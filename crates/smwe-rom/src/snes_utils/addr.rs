@@ -1,7 +1,6 @@
 use std::{convert::TryFrom, fmt, num::ParseIntError, ops::*};
 
 use duplicate::*;
-use num_traits::{cast::cast, *};
 use paste::*;
 use thiserror::Error;
 
@@ -34,7 +33,11 @@ pub const MASK_BBHHDD: u32 = MASK_BB | MASK_HH | MASK_DD;
 
 // -------------------------------------------------------------------------------------------------
 
-pub trait Addr: Clone + NumOps<usize, Self> + PrimInt + fmt::LowerHex + fmt::UpperHex {
+/// The arithmetic and ordering `RomSlice` needs from an address type. Deliberately narrow: the
+/// address newtypes are offsets into a ROM, not general-purpose integers.
+pub trait Addr:
+    Copy + Ord + fmt::LowerHex + fmt::UpperHex + Add<usize, Output = Self> + Sub<usize, Output = Self>
+{
     const MIN: Self;
 }
 
@@ -58,6 +61,13 @@ duplicate! {
         }
     }
 
+    impl From<addr_type> for inner {
+        #[inline]
+        fn from(addr: addr_type) -> Self {
+            addr.0
+        }
+    }
+
     impl Default for addr_type {
         #[inline]
         fn default() -> Self {
@@ -77,197 +87,6 @@ duplicate! {
         }
     }
 
-    impl Zero for addr_type {
-        #[inline]
-        fn zero() -> Self {
-            Self::MIN
-        }
-
-        #[inline]
-        fn set_zero(&mut self) {
-            self.0 = Self::zero().0
-        }
-
-        #[inline]
-        fn is_zero(&self) -> bool {
-            *self == Self::zero()
-        }
-    }
-
-    impl One for addr_type {
-        #[inline]
-        fn one() -> Self {
-            Self::MIN + 1
-        }
-
-        fn set_one(&mut self) {
-            self.0 = Self::one().0
-        }
-
-        #[inline]
-        fn is_one(&self) -> bool {
-            *self == Self::one()
-        }
-    }
-
-    impl Num for addr_type {
-        type FromStrRadixErr = ParseIntError;
-
-        #[inline]
-        fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-            Ok(Self(inner::from_str_radix(str, radix)?))
-        }
-    }
-
-    impl NumCast for addr_type {
-        #[inline]
-        fn from<T: ToPrimitive>(n: T) -> Option<Self> {
-            Some(Self(n.to_u32()? as _))
-        }
-    }
-
-    impl ToPrimitive for addr_type {
-        #[inline]
-        fn to_i64(&self) -> Option<i64> {
-            cast::<inner, i64>(self.0)
-        }
-
-        #[inline]
-        fn to_u64(&self) -> Option<u64> {
-            cast::<inner, u64>(self.0)
-        }
-    }
-
-    impl PrimInt for addr_type {
-        #[inline]
-        fn count_ones(self) -> u32 {
-            self.0.count_ones()
-        }
-
-        #[inline]
-        fn count_zeros(self) -> u32 {
-            self.0.count_zeros()
-        }
-
-        #[inline]
-        fn leading_ones(self) -> u32 {
-            self.0.leading_ones()
-        }
-
-        #[inline]
-        fn leading_zeros(self) -> u32 {
-            self.0.leading_zeros()
-        }
-
-        #[inline]
-        fn trailing_ones(self) -> u32 {
-            self.0.trailing_ones()
-        }
-
-        #[inline]
-        fn trailing_zeros(self) -> u32 {
-            self.0.trailing_zeros()
-        }
-
-        #[inline]
-        fn rotate_left(self, n: u32) -> Self {
-            Self(self.0.rotate_left(n))
-        }
-
-        #[inline]
-        fn rotate_right(self, n: u32) -> Self {
-            Self(self.0.rotate_right(n))
-        }
-
-        #[inline]
-        fn signed_shl(self, n: u32) -> Self {
-            Self(self.0 << n)
-        }
-
-        #[inline]
-        fn signed_shr(self, n: u32) -> Self {
-            Self(self.0 >> n)
-        }
-
-        #[inline]
-        fn unsigned_shl(self, n: u32) -> Self {
-            Self(self.0 << n)
-        }
-
-        #[inline]
-        fn unsigned_shr(self, n: u32) -> Self {
-            Self(self.0 >> n)
-        }
-
-        #[inline]
-        fn swap_bytes(self) -> Self {
-            Self(self.0.swap_bytes())
-        }
-
-        #[inline]
-        fn reverse_bits(self) -> Self {
-            Self(self.0.reverse_bits())
-        }
-
-        #[inline]
-        fn from_be(x: Self) -> Self {
-            Self(inner::from_be(x.0))
-        }
-
-        #[inline]
-        fn from_le(x: Self) -> Self {
-            Self(inner::from_le(x.0))
-        }
-
-        #[inline]
-        fn to_be(self) -> Self {
-            Self(self.0.to_be())
-        }
-
-        #[inline]
-        fn to_le(self) -> Self {
-            Self(self.0.to_le())
-        }
-
-        #[inline]
-        fn pow(self, exp: u32) -> Self {
-            Self(self.0.pow(exp))
-        }
-    }
-
-    impl Bounded for addr_type {
-        #[inline]
-        fn min_value() -> Self {
-            Self::MIN
-        }
-
-        #[inline]
-        fn max_value() -> Self {
-            Self(inner::MAX)
-        }
-    }
-
-    impl Saturating for addr_type {
-        #[inline]
-        fn saturating_add(self, v: Self) -> Self {
-            Self(self.0.saturating_add(v.0))
-        }
-
-        #[inline]
-        fn saturating_sub(self, v: Self) -> Self {
-            Self(self.0.saturating_sub(v.0))
-        }
-    }
-
-    impl Not for addr_type {
-        type Output = Self;
-
-        #[inline]
-        fn not(self) -> Self::Output {
-            Self(!self.0)
-        }
-    }
-
     #[duplicate_item(
         op_name     op;
         [Add]       [+];
@@ -282,33 +101,25 @@ duplicate! {
         [Shr]       [>>];
     )]
     paste! {
-        impl<I: PrimInt> op_name<I> for addr_type {
+        impl<I: TryInto<inner>> op_name<I> for addr_type {
             type Output = Self;
             fn [<op_name:lower>](self, rhs: I) -> Self::Output {
-                Self(self.0 op cast::<I, inner>(rhs).unwrap())
+                Self(self.0 op rhs.try_into().ok().expect("address operand out of range"))
             }
         }
-        impl<I: PrimInt> [<op_name Assign>]<I> for addr_type {
+        impl<I: TryInto<inner>> [<op_name Assign>]<I> for addr_type {
             fn [<op_name:lower _assign>](&mut self, rhs: I) {
-                self.0 = self.0 op cast::<I, inner>(rhs).unwrap();
+                self.0 = self.0 op rhs.try_into().ok().expect("address operand out of range");
             }
         }
     }
 
-    #[duplicate_item(
-        op_name            op;
-        [CheckedAdd]       [+];
-        [CheckedSub]       [-];
-        [CheckedMul]       [*];
-        [CheckedDiv]       [/];
-        [CheckedRem]       [%];
-    )]
-    impl op_name for addr_type {
-        paste! {
-            fn [<op_name:snake>](&self, v: &Self) -> Option<Self> {
-                Some(Self(self.0.[<op_name:snake>](v.0)?))
-            }
-        }
+}
+
+impl From<AddrVram> for u32 {
+    #[inline]
+    fn from(addr: AddrVram) -> Self {
+        addr.0 as u32
     }
 }
 

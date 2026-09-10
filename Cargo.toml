@@ -2,9 +2,6 @@
 
 members = [
     "crates/smwe-math",
-    "crates/smwe-math/wrapped_vec2_derive",
-    "crates/smwe-math/wrapped_pos2_derive",
-    "crates/smwe-math/wrapped_rect_derive",
     "crates/smwe-render",
     "crates/smwe-rom",
     "crates/smwe-widgets",
