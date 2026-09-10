@@ -604,6 +604,102 @@ pub fn decompress_sublevel(cpu: &mut Cpu<CheckedMem>, id: u16) -> u64 {
     cy
 }
 
+/// Snapshot of emulator state after [`render_message`] ran the real message
+/// routine: the raw dynamic-stripe-image bytes the game appends to its WRAM
+/// stripe buffer. See [`render_message`] for the command format.
+#[derive(Debug, Clone)]
+pub struct MessageStripe {
+    /// Raw stripe commands appended to `DynamicStripeImage` ($7F837D): 8 rows
+    /// × [VRAM-dest word, flags/length word, 18 tile words]. The game's $FF
+    /// sentinel is written after these bytes and is NOT included here.
+    pub stripe: Vec<u8>,
+    /// CPU cycles executed.
+    pub cycles: u64,
+}
+
+/// Render a message box through the REAL game routine (`CODE_05B1BC`).
+///
+/// What the routine actually does — verified in SMWDisX `bank_05.asm`
+/// (`CODE_05B1BC`, `CODE_05B208`), not guessed:
+/// - It does NOT upload font tile graphics to VRAM. It appends 8 rows of
+///   tilemap data (18 tiles each) to the WRAM dynamic-stripe-image buffer
+///   (`DynamicStripeImage` at $7F837D; write offset at `DynStripeImgSize`
+///   $7F837B, from `rammap.asm`).
+/// - Each tile word is `$39TT`, where TT is the message byte with bit 7
+///   stripped (`AND #$7F`): tiles $100-$17F, palette 6, priority 1, no flip.
+///   The font graphics must already be in VRAM (the game's normal GFX upload;
+///   the routine never touches VRAM itself).
+/// - Each row is one stripe command — `[VRAM-dest word][flags/length word][18
+///   tile words]` — terminated by a $FF sentinel byte. The NMI uploader
+///   (`LoadStripeImage`, bank_00.asm) later DMAs each command's payload to its
+///   VRAM address: flags/length word bit 15 = vertical, bit 14 = RLE, low 14
+///   bits = payload length in bytes minus 1.
+/// - The routine falls through into the message-box window/HDMA setup
+///   (`CODE_05B250`) and returns via RTL; it also writes WRAM-only state
+///   (Layer 3 scroll/pos, WindowTable, MessageBoxTimer). For message types
+///   0-3 (switch palaces) it JSRs to `CODE_05B2EB`, which writes OAM tiles —
+///   also not VRAM.
+///
+/// `msg_type` is the 0-24 message-type index into `DATA_05A5A7` (the 25-entry
+/// pointer table), matching `LDA.W DATA_05A5A7,X` in `CODE_05B1BC` — use
+/// `smwe_rom::message_boxes::pointer_slot_for_message` to convert a message
+/// number (0-21).
+///
+/// Setup: `DynStripeImgSize` is zeroed before the call. That matches hardware
+/// state when a message triggers in-game: the game zeroes it at level init
+/// (bank_00.asm, "Initialize the stripe image and palette upload tables") and
+/// the NMI uploader resets it after every upload, so a message always starts
+/// appending at offset 0.
+///
+/// UNVERIFIED WITHOUT A ROM: the trampoline compiles and follows the
+/// `decompress_sublevel` pattern (JSL at $2000, X = message type, run to end
+/// PC), but it has NEVER EXECUTED — there is no SMW ROM on this machine. What
+/// remains for real-ROM verification: run it (ideally after
+/// `decompress_sublevel`, so the font tiles are in VRAM), parse the stripe
+/// commands, and rasterize tiles $100-$17F with palette 6 into the Layer 3
+/// tilemap at each command's VRAM address.
+pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe {
+    // WRAM stripe-buffer addresses from SMWDisX rammap.asm.
+    const DYN_STRIPE_IMG_SIZE: u32 = 0x7F837B;
+    const DYNAMIC_STRIPE_IMAGE: u32 = 0x7F837D;
+
+    cpu.emulation = false;
+    cpu.ill = false;
+    cpu.s = 0x1FF;
+    cpu.pc = 0x2000;
+    cpu.pbr = 0x00;
+    cpu.dbr = 0x00;
+    cpu.trace = false;
+    cpu.x = msg_type as u16;
+
+    cpu.mem.store_u16(DYN_STRIPE_IMG_SIZE, 0);
+
+    cpu.mem.store(0x2000, 0x22); // JSL
+    cpu.mem.store_u24(
+        0x2001,
+        cpu.mem.cart.resolve("CODE_05B1BC").unwrap_or_else(|| panic!("no symbol: CODE_05B1BC")),
+    );
+    let end = 0x2004u16;
+
+    let mut cy = 0u64;
+    loop {
+        cy += cpu.dispatch() as u64;
+        if cpu.ill {
+            log_illegal_instruction(cpu.pbr, cpu.pc);
+            break;
+        }
+        if cpu.pbr == 0 && cpu.pc == end {
+            break;
+        }
+        cpu.mem.process_dma();
+    }
+
+    let len = cpu.mem.load_u16(DYN_STRIPE_IMG_SIZE) as usize;
+    let stripe =
+        (0..len).map(|i| cpu.mem.load_u8(DYNAMIC_STRIPE_IMAGE + i as u32)).collect::<Vec<_>>();
+    MessageStripe { stripe, cycles: cy }
+}
+
 pub fn decompress_extram(cpu: &mut Cpu<CheckedMem>, id: u16) -> u64 {
     let now = std::time::Instant::now();
     cpu.emulation = false;

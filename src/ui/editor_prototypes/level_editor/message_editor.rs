@@ -6,9 +6,15 @@ use super::UiLevelEditor;
 /// Editor for SMW's vanilla "destruction event" message box text: 22 global
 /// messages, each a sequence of raw font-tile-index bytes (0x00-0x7F; bit 7
 /// is reserved by the game as a repeat/hold flag, so this editor doesn't let
-/// users set it). There's no WYSIWYG font preview yet — the message's font
-/// tileset (drawn via SMW's "dynamic stripe image"/Layer 3 mechanism) hasn't
-/// been identified, so bytes are edited as raw tile indices.
+/// users set it).
+///
+/// The read-only preview pane at the bottom runs the selected message through
+/// the REAL game routine (`CODE_05B1BC`, verified in SMWDisX `bank_05.asm`)
+/// on a scratch CPU clone and captures the dynamic stripe image it appends
+/// to WRAM: 8 rows × 18 tile words (`$39TT` = tiles $100-$17F, palette 6).
+/// Pixel rasterization of that stripe is pending real-ROM verification (the
+/// routine has never executed here — no ROM). The readable-text line needs
+/// the empirically derived font map (`smwe_rom::font_map`), also ROM-gated.
 ///
 /// Edits are global (every level shares the same 22 messages) and size-
 /// constrained: the vanilla ROM already uses the full byte budget, so making
@@ -87,6 +93,47 @@ impl UiLevelEditor {
                                 }
                             });
                         });
+
+                        ui.separator();
+                        ui.label("Preview (read-only)");
+
+                        // Readable-text preview via the empirically derived font map.
+                        match &self.message_font_map {
+                            Some(map) => {
+                                // Control codes are identified during real-ROM
+                                // derivation; none are known yet.
+                                ui.label(format!(
+                                    "Text: {}",
+                                    map.to_text(&self.message_boxes.messages[i], &[])
+                                ));
+                            }
+                            None => {
+                                ui.small(
+                                    "Readable-text preview needs the font map — derive it \
+                                     with a ROM (see smwe_rom::font_map).",
+                                );
+                            }
+                        }
+
+                        // Pixel preview: run the real CODE_05B1BC on a scratch CPU
+                        // clone and capture the dynamic stripe image it appends
+                        // to WRAM. Rasterizing that stripe into pixels is pending
+                        // real-ROM verification (see smwe_emu::emu::render_message).
+                        let slot = smwe_rom::message_boxes::pointer_slot_for_message(i);
+                        if self.message_preview_for != Some(i) {
+                            let mut scratch = self.cpu.clone();
+                            self.message_preview =
+                                Some(smwe_emu::emu::render_message(&mut scratch, slot));
+                            self.message_preview_for = Some(i);
+                        }
+                        if let Some(stripe) = &self.message_preview {
+                            ui.small(format!(
+                                "CODE_05B1BC ran ({} cycles): captured {} stripe bytes. \
+                                 Tilemap rasterization pending real-ROM verification.",
+                                stripe.cycles,
+                                stripe.stripe.len()
+                            ));
+                        }
                     });
                 });
             },

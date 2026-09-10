@@ -99,3 +99,40 @@ In `message_editor.rs::message_editor_window`, next to the byte grid:
 ## Explicitly out of scope (Phase 2)
 
 Text→bytes editing (typing readable text). Phase 1 is read-only preview only.
+
+## Addendum 2026-09-10: disassembly findings (SMWDisX now available)
+
+Grepped `bank_05.asm`/`bank_00.asm` per `AGENTS.md` instead of guessing from
+the Rust side. This answers the plan's open questions:
+
+- **Does `CODE_05B1BC` upload font tiles to VRAM itself? NO.** It appends 8
+  rows × 18 tile words to the WRAM dynamic-stripe-image buffer
+  (`DynamicStripeImage` at $7F837D; write offset at `DynStripeImgSize`
+  $7F837B, per `rammap.asm`). It never writes VRAM. The font graphics
+  (tiles $100-$17F) must already be in VRAM from the game's normal GFX upload.
+- **Tile format:** each tile word is `$39TT` (TT = message byte & $7F):
+  tiles $100-$17F, palette 6, priority 1, no flip. Bit 7 of the message byte
+  is the hold/repeat flag: when set, the previous tile is re-emitted without
+  advancing the message pointer (`BIT.W _3` / `BMI` in `CODE_05B208`).
+- **Stripe command format** (from `LoadStripeImage`, bank_00.asm):
+  `[VRAM-dest word][flags/length word][payload bytes…]`; flags/length bit 15
+  = vertical, bit 14 = RLE, low 14 bits = payload length in bytes minus 1.
+  A first byte with bit 7 set ($FF) terminates the buffer. Row header words
+  (U version, `DATA_05A580`, written Y=$0E first): `$E750 $C750 $0751 $2751
+  $4751 $6751 $8751 $A751`.
+- **Setup:** X = message-type index (0-24) into `DATA_05A5A7`; `DynStripeImgSize`
+  must be 0 (game zeroes it at level init; NMI uploader resets it after every
+  upload). `MessageBoxTrigger`/`PlayerRidingYoshi`/`SwitchPalaceColor` may be
+  zero (level-start state). Types 0-3 JSR to `CODE_05B2EB` (writes OAM tiles,
+  not VRAM — harmless headless). The routine falls through into the
+  message-box window/HDMA setup (`CODE_05B250`, WRAM-only) and returns via a
+  single RTL (bank_05.asm:3475), so the $2000 JSL trampoline pattern applies.
+- **Implemented accordingly:** `smwe_emu::emu::render_message` now zeroes
+  `DynStripeImgSize`, runs the trampoline, and returns the appended stripe
+  bytes (`MessageStripe { stripe, cycles }`) — not a VRAM snapshot. The
+  `render_message` binary dumps those bytes and decodes the 8 commands.
+- **Still pending a real ROM:** executing the trampoline at all; confirming
+  the 8 VRAM row addresses against the Layer 3 tilemap; rasterizing tiles
+  $100-$17F with palette 6 into a PNG (recipe: run `decompress_sublevel`
+  first so the font tiles are in VRAM, then `render_message` on the same
+  CPU); deriving the true font map; GUI screenshot.

@@ -106,6 +106,13 @@ const MESSAGE_START_OFFSETS: [u32; MESSAGE_COUNT] = [
 pub const POINTER_TO_MESSAGE: [usize; MESSAGE_POINTER_COUNT] =
     [1, 1, 1, 1, 0, 5, 8, 10, 12, 17, 15, 6, 16, 19, 21, 9, 20, 13, 14, 18, 11, 7, 2, 4, 3];
 
+/// First pointer-table slot (0-24) that displays message `i`. Routines like
+/// `CODE_05B1BC` take the message-*type* index (into `DATA_05A5A7`), not the
+/// message number, so preview/render entry points go through this.
+pub fn pointer_slot_for_message(i: usize) -> u8 {
+    POINTER_TO_MESSAGE.iter().position(|&m| m == i).unwrap_or(0) as u8
+}
+
 #[derive(Debug, Clone)]
 pub struct MessageBoxes {
     /// Raw tile-index bytes (0x00-0x7F, bit 7 reserved) for each message, in
@@ -256,5 +263,35 @@ mod real_rom_tests {
         let (blob, pointers) = boxes.to_blob_and_pointers().unwrap();
         assert_eq!(blob.len(), total);
         println!("pointers: {pointers:?}");
+    }
+
+    /// Dumps all 22 messages' raw bytes in exactly the tuple format consumed
+    /// by `smwe_rom::font_map::derive_font_map`, so the TRUE font map can be
+    /// completed the moment a real ROM is available: pair each dumped byte
+    /// sequence with its known vanilla English text (fill in the `""`
+    /// placeholders), identify the control-code bytes empirically (line break,
+    /// end-of-message — compare byte positions against known line breaks in
+    /// the English text), and pass the pairs to `derive_font_map`.
+    ///
+    /// Run with `ROM_PATH=/path/to/smw.smc cargo test -p smwe-rom --lib
+    /// -- --ignored real_rom_dump_font_map_input -- --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_rom_dump_font_map_input() {
+        let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH");
+        let rom = SmwRom::from_file(rom_path).expect("parse ROM");
+
+        println!("// === derive_font_map input (fill in each message's known vanilla English text) ===");
+        println!("// let pairs: &[(&[u8], &str)] = &[");
+        for (i, msg) in rom.message_boxes.messages.iter().enumerate() {
+            let hex: Vec<String> = msg.iter().map(|b| format!("0x{b:02X}")).collect();
+            println!("//   // {} ({} bytes)", MESSAGE_NAMES[i], msg.len());
+            println!("//   (&[{}], \"\"),", hex.join(", "));
+        }
+        println!("// ];");
+        println!("// let control_codes: &[u8] = &[/* line break, end-of-message, ... */];");
+        println!(
+            "// let font_map = smwe_rom::font_map::derive_font_map(pairs, control_codes).unwrap();"
+        );
     }
 }
