@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{objects::map16::Tile8x8, AddrSnes, DataBlock, DataKind, RomDisassembly, SnesSlice};
+use crate::{objects::map16::Tile8x8, snes_utils::rom::Rom, AddrSnes, SnesSlice};
 
 // -------------------------------------------------------------------------------------------------
 
@@ -22,10 +22,12 @@ pub struct ObjectGfxList {
 // -------------------------------------------------------------------------------------------------
 
 impl ObjectGfxList {
-    pub fn parse(disasm: &mut RomDisassembly) -> Result<Self, ObjectGfxListParseError> {
-        let block = DataBlock { slice: OBJECT_GFX_LIST, kind: DataKind::GfxListObjects };
-        let gfx_file_nums =
-            disasm.rom_slice_at_block(block, |_| ObjectGfxListParseError(OBJECT_GFX_LIST))?.as_bytes()?.to_vec();
+    pub fn parse(rom: &Rom) -> Result<Self, ObjectGfxListParseError> {
+        let gfx_file_nums = rom
+            .with_error_mapper(|_| ObjectGfxListParseError(OBJECT_GFX_LIST))
+            .slice_lorom(OBJECT_GFX_LIST)?
+            .as_bytes()?
+            .to_vec();
         Ok(Self { gfx_file_nums })
     }
 

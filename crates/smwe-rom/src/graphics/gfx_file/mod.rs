@@ -10,9 +10,8 @@ use thiserror::Error;
 
 use crate::{
     compression::{lc_lz2, DecompressionError},
-    disassembler::binary_block::DataKind,
-    snes_utils::{addr::AddrSnes, rom_slice::SnesSlice},
-    RomDisassembly, RomError,
+    snes_utils::{addr::AddrSnes, rom::Rom, rom_slice::SnesSlice},
+    RomError,
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -74,7 +73,7 @@ pub struct Tile {
 #[derive(Debug, Clone)]
 pub struct GfxFile {
     pub tile_format: TileFormat,
-    pub tiles: Vec<Tile>,
+    pub tiles:       Vec<Tile>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -301,7 +300,7 @@ impl GfxFile {
     }
 
     /// Parse already-decompressed raw tile bytes into `Tile`s for the given
-    /// format, without needing a `RomDisassembly`. Used for import (after the
+    /// format, without needing a `Rom`. Used for import (after the
     /// caller supplies replacement tile data) and for round-trip testing.
     pub fn decode_tiles(bytes: &[u8], tile_format: TileFormat) -> Vec<Tile> {
         use TileFormat::*;
@@ -330,41 +329,36 @@ impl GfxFile {
     /// The ROM address a GFX file's compressed data currently starts at,
     /// resolving the pointer-table indirection the same way `new` does.
     /// Exposed for callers that need to repoint/rewrite a GFX file's data.
-    pub fn resolve_addr(disasm: &mut RomDisassembly, file_num: usize) -> Result<AddrSnes, GfxFileParseError> {
-        Ok(Self::resolve_slice(disasm, file_num)?.begin)
+    pub fn resolve_addr(rom: &Rom, file_num: usize) -> Result<AddrSnes, GfxFileParseError> {
+        Ok(Self::resolve_slice(rom, file_num)?.begin)
     }
 
-    fn read_pointer_byte(disasm: &mut RomDisassembly, addr: AddrSnes) -> Result<u8, GfxFileParseError> {
+    fn read_pointer_byte(rom: &Rom, addr: AddrSnes) -> Result<u8, GfxFileParseError> {
         let slice = SnesSlice::new(addr, 1);
-        let bytes = disasm
-            .rom_slice_at_block(
-                crate::disassembler::binary_block::DataBlock { slice, kind: DataKind::GfxFile },
-                GfxFileParseError::IsolatingData,
-            )?
-            .as_bytes()?;
+        let bytes = rom.with_error_mapper(GfxFileParseError::IsolatingData).slice_lorom(slice)?.as_bytes()?;
         bytes.first().copied().ok_or(GfxFileParseError::ParsingTile)
     }
 
-    fn resolve_slice(disasm: &mut RomDisassembly, file_num: usize) -> Result<SnesSlice, GfxFileParseError> {
+    fn resolve_slice(rom: &Rom, file_num: usize) -> Result<SnesSlice, GfxFileParseError> {
         let (_, slice) = GFX_FILES_META[file_num];
         if file_num >= GFX_POINTER_TABLE_LEN {
             return Ok(slice);
         }
 
-        let low = Self::read_pointer_byte(disasm, GFX_POINTER_TABLE_LOW + file_num)?;
-        let high = Self::read_pointer_byte(disasm, GFX_POINTER_TABLE_HIGH + file_num)?;
-        let bank = Self::read_pointer_byte(disasm, GFX_POINTER_TABLE_BANK + file_num)?;
+        let low = Self::read_pointer_byte(rom, GFX_POINTER_TABLE_LOW + file_num)?;
+        let high = Self::read_pointer_byte(rom, GFX_POINTER_TABLE_HIGH + file_num)?;
+        let bank = Self::read_pointer_byte(rom, GFX_POINTER_TABLE_BANK + file_num)?;
         let start = AddrSnes(((bank as u32) << 16) | ((high as u32) << 8) | (low as u32));
         Ok(slice.move_to(start))
     }
 
-    pub fn new(disasm: &mut RomDisassembly, file_num: usize, revised_gfx: bool) -> Result<Self, GfxFileParseError> {
+    pub fn new(rom: &Rom, file_num: usize, revised_gfx: bool) -> Result<Self, GfxFileParseError> {
         use TileFormat::*;
         type ParserFn = fn(&[u8]) -> IResult<&[u8], Tile>;
 
         debug_assert!(file_num < GFX_FILES_META.len());
         let (tile_format, _) = GFX_FILES_META[file_num];
-        let slice = Self::resolve_slice(disasm, file_num)?;
+        let slice = Self::resolve_slice(rom, file_num)?;
         let (tile_parser, tile_size_bytes): (ParserFn, usize) = match tile_format {
             Tile2bpp => (Tile::from_2bpp, 2 * 8),
             Tile3bpp => (Tile::from_3bpp, 3 * 8),
@@ -373,8 +367,7 @@ impl GfxFile {
             Tile3bppMode7 => (Tile::from_3bpp_mode7, 3 * 8),
         };
 
-        let decompressed = disasm
-            .rom
+        let decompressed = rom
             .with_error_mapper(|e| match e {
                 RomError::SliceSnes(_) | RomError::SlicePc(_) => GfxFileParseError::IsolatingData(e),
                 RomError::Decompress(DecompressionError::LcLz2(l)) => GfxFileParseError::DecompressingData(l.into()),

@@ -338,7 +338,7 @@ impl UiMainWindow {
         }
 
         // Create BPS patch
-        let patch = smwe_bps::create_patch(&original_bytes, &modified_bytes, smwe_bps::BpsConfig::default())?;
+        let patch = smwe_bps::create_patch(&original_bytes, &modified_bytes)?;
 
         // Write patch to file
         std::fs::write(patch_dest, patch)

@@ -862,7 +862,7 @@ impl UiLevelEditor {
 
         // ── Palette data ─────────────────────────────────────────────────────
         {
-            let rom_bytes = self.rom.disassembly.rom_bytes();
+            let rom_bytes = self.rom.rom_bytes();
             let p = &self.rom.levels[level_idx].primary_header;
             let read_palette = |snes_addr: u32| -> [u16; 12] {
                 let mut colors = [0u16; 12];

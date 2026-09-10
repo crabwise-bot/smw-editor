@@ -1,17 +1,20 @@
 use thiserror::Error;
 
 use crate::{
-    disassembler::RomDisassembly,
     graphics::{
         gfx_file::{GfxFile, Tile, GFX_FILES_META},
         palette::ColorPalettes,
     },
     level::Level,
     objects::{
-        animated_tile_data::AnimatedTileData, map16::Block, object_gfx_list::ObjectGfxList, tilesets::TILESETS_COUNT,
+        animated_tile_data::AnimatedTileData,
+        map16::Block,
+        object_gfx_list::ObjectGfxList,
+        tilesets::TILESETS_COUNT,
     },
-    snes_utils::addr::AddrSnes,
-    RegionCode, RomInternalHeader,
+    snes_utils::{addr::AddrSnes, rom::Rom},
+    RegionCode,
+    RomInternalHeader,
 };
 
 pub mod gfx_file;
@@ -33,32 +36,30 @@ pub enum BlockGfx<'t> {
 
 #[derive(Debug)]
 pub struct Gfx {
-    pub files: Vec<GfxFile>,
-    pub color_palettes: ColorPalettes,
-    pub object_gfx_list: ObjectGfxList,
+    pub files:              Vec<GfxFile>,
+    pub color_palettes:     ColorPalettes,
+    pub object_gfx_list:    ObjectGfxList,
     pub animated_tile_data: AnimatedTileData,
 }
 
 // -------------------------------------------------------------------------------------------------
 
 impl Gfx {
-    pub fn parse(
-        disasm: &mut RomDisassembly, levels: &[Level], internal_header: &RomInternalHeader,
-    ) -> anyhow::Result<Self> {
+    pub fn parse(rom: &Rom, levels: &[Level], internal_header: &RomInternalHeader) -> anyhow::Result<Self> {
         let revised_gfx =
             matches!(internal_header.region_code, RegionCode::Japan) || internal_header.version_number > 0;
 
         let mut files = Vec::with_capacity(GFX_FILES_META.len());
         for file_num in 0..GFX_FILES_META.len() {
-            let file = GfxFile::new(disasm, file_num, revised_gfx)?;
+            let file = GfxFile::new(rom, file_num, revised_gfx)?;
             files.push(file);
         }
 
         Ok(Self {
             files,
-            color_palettes: ColorPalettes::parse(disasm, levels)?,
-            object_gfx_list: ObjectGfxList::parse(disasm)?,
-            animated_tile_data: AnimatedTileData::parse(disasm)?,
+            color_palettes: ColorPalettes::parse(rom, levels)?,
+            object_gfx_list: ObjectGfxList::parse(rom)?,
+            animated_tile_data: AnimatedTileData::parse(rom)?,
         })
     }
 

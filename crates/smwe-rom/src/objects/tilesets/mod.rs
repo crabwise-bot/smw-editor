@@ -6,13 +6,11 @@ use nom::{combinator::map, multi::many0, number::complete::le_u16};
 use thiserror::Error;
 
 use crate::{
-    disassembler::binary_block::{DataBlock, DataKind},
     objects::{
         animated_tile_data::AnimatedTileDataParseError,
         map16::{Block, Tile8x8},
     },
-    snes_utils::{addr::AddrSnes, rom_slice::SnesSlice},
-    RomDisassembly,
+    snes_utils::{addr::AddrSnes, rom::Rom, rom_slice::SnesSlice},
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -51,7 +49,7 @@ pub const OBJECT_TO_MAP16_TILESET: [usize; OBJECT_TILESETS_COUNT] = [
 #[derive(Debug)]
 pub struct Tilesets {
     pub tiles: Vec<Tile>,
-    lm_map16: Option<LmMap16>,
+    lm_map16:  Option<LmMap16>,
 }
 
 #[derive(Debug)]
@@ -63,8 +61,8 @@ pub enum Tile {
 // -------------------------------------------------------------------------------------------------
 
 impl Tilesets {
-    pub fn parse(disasm: &mut RomDisassembly) -> Result<Self, TilesetParseError> {
-        let mut parse_16x16 = |slice| parse_blocks(disasm, slice);
+    pub fn parse(rom: &Rom) -> Result<Self, TilesetParseError> {
+        let parse_16x16 = |slice| parse_blocks(rom, slice);
 
         let mut tiles: Vec<Tile> = Vec::with_capacity(0x200);
 
@@ -77,7 +75,7 @@ impl Tilesets {
         let tiles_1ec_1ef = parse_16x16(TILES_1EC_1EF)?.into_iter().map(Tile::Shared);
         let tiles_1f0_1ff = parse_16x16(TILES_1F0_1FF)?.into_iter().map(Tile::Shared);
 
-        let mut parse_tileset_specific = |slices: [SnesSlice; 5]| {
+        let parse_tileset_specific = |slices: [SnesSlice; 5]| {
             let it = itertools::izip!(
                 parse_16x16(slices[0])?.into_iter(),
                 parse_16x16(slices[1])?.into_iter(),
@@ -107,7 +105,7 @@ impl Tilesets {
                 .chain(tiles_1f0_1ff),
         );
 
-        let lm_map16 = parse_lm_map16(disasm).ok();
+        let lm_map16 = parse_lm_map16(rom).ok();
         Ok(Tilesets { tiles, lm_map16 })
     }
 
@@ -143,8 +141,8 @@ pub fn object_tileset_to_map16_tileset(object_tileset: usize) -> usize {
 
 #[derive(Debug)]
 struct LmMap16 {
-    blocks: Vec<Block>,
-    present: Vec<bool>,
+    blocks:                 Vec<Block>,
+    present:                Vec<bool>,
     page2_tileset_specific: Option<Vec<[Block; TILESETS_COUNT]>>,
 }
 
@@ -165,9 +163,10 @@ impl LmMap16 {
     }
 }
 
-fn parse_blocks(disasm: &mut RomDisassembly, slice: SnesSlice) -> Result<Vec<Block>, TilesetParseError> {
-    let it = disasm
-        .rom_slice_at_block(DataBlock { slice, kind: DataKind::Tileset }, |_| TilesetParseError::Slice(slice))?
+fn parse_blocks(rom: &Rom, slice: SnesSlice) -> Result<Vec<Block>, TilesetParseError> {
+    let it = rom
+        .with_error_mapper(|_| TilesetParseError::Slice(slice))
+        .slice_lorom(slice)?
         .parse(many0(map(le_u16, Tile8x8)))?
         .into_iter()
         .tuples::<(Tile8x8, Tile8x8, Tile8x8, Tile8x8)>()
@@ -187,36 +186,32 @@ fn blank_block() -> Block {
     Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0)))
 }
 
-fn read_u8(disasm: &mut RomDisassembly, addr: u32) -> Result<u8, TilesetParseError> {
+fn read_u8(rom: &Rom, addr: u32) -> Result<u8, TilesetParseError> {
     let slice = SnesSlice::new(AddrSnes(addr), 1);
-    let bytes = disasm
-        .rom_slice_at_block(DataBlock { slice, kind: DataKind::Tileset }, |_| TilesetParseError::Slice(slice))?
-        .as_bytes()?;
+    let bytes = rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice)?.as_bytes()?;
     bytes.first().copied().ok_or(TilesetParseError::Slice(slice))
 }
 
-fn read_u16(disasm: &mut RomDisassembly, addr: u32) -> Result<u16, TilesetParseError> {
+fn read_u16(rom: &Rom, addr: u32) -> Result<u16, TilesetParseError> {
     let slice = SnesSlice::new(AddrSnes(addr), 2);
-    let bytes = disasm
-        .rom_slice_at_block(DataBlock { slice, kind: DataKind::Tileset }, |_| TilesetParseError::Slice(slice))?
-        .as_bytes()?;
+    let bytes = rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice)?.as_bytes()?;
     if bytes.len() < 2 {
         return Err(TilesetParseError::Slice(slice));
     }
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseError> {
+fn parse_lm_map16(rom: &Rom) -> Result<LmMap16, TilesetParseError> {
     // Sources:
     // - https://smwspeedruns.com/Level_Data_Format  (Map16 Data section)
     // - https://www.smwcentral.net/ (SMW Memory Map: Map16 page pointers)
     #[derive(Clone, Copy)]
     struct Range {
-        start: u8,
-        end: u8,
-        lo: u32,
-        bank: u32,
-        add: u32,
+        start:   u8,
+        end:     u8,
+        lo:      u32,
+        bank:    u32,
+        add:     u32,
         alt_add: Option<u32>,
     }
 
@@ -224,11 +219,25 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
         Range { start: 0x02, end: 0x0F, lo: 0x06F553, bank: 0x06F557, add: 0, alt_add: Some(0x1000) },
         Range { start: 0x10, end: 0x1F, lo: 0x06F55C, bank: 0x06F560, add: 0, alt_add: Some(0x8000) },
         Range { start: 0x20, end: 0x2F, lo: 0x06F567, bank: 0x06F56B, add: 1, alt_add: None },
-        Range { start: 0x30, end: 0x3F, lo: 0x06F570, bank: 0x06F574, add: 1, alt_add: Some(0x8000 + 1) },
+        Range {
+            start:   0x30,
+            end:     0x3F,
+            lo:      0x06F570,
+            bank:    0x06F574,
+            add:     1,
+            alt_add: Some(0x8000 + 1),
+        },
         Range { start: 0x40, end: 0x4F, lo: 0x06F594, bank: 0x06F598, add: 0, alt_add: None },
         Range { start: 0x50, end: 0x5F, lo: 0x06F59D, bank: 0x06F5A1, add: 0, alt_add: Some(0x8000) },
         Range { start: 0x60, end: 0x6F, lo: 0x06F5A8, bank: 0x06F5AC, add: 1, alt_add: None },
-        Range { start: 0x70, end: 0x7F, lo: 0x06F5B1, bank: 0x06F5B5, add: 1, alt_add: Some(0x8000 + 1) },
+        Range {
+            start:   0x70,
+            end:     0x7F,
+            lo:      0x06F5B1,
+            bank:    0x06F5B5,
+            add:     1,
+            alt_add: Some(0x8000 + 1),
+        },
     ];
 
     let mut blocks = vec![blank_block(); 0x8000];
@@ -237,8 +246,8 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
     let is_valid_lorom = |addr: u32| -> bool { (addr & 0xFFFF) >= 0x8000 };
 
     for r in ranges {
-        let bank = read_u8(disasm, r.bank)? as u32;
-        let lo = read_u16(disasm, r.lo)? as u32;
+        let bank = read_u8(rom, r.bank)? as u32;
+        let lo = read_u16(rom, r.lo)? as u32;
         let base = (bank << 16) | lo;
         let mut base_addr = AddrSnes(base.wrapping_add(r.add));
 
@@ -252,7 +261,7 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
             }
             let offset = (page as u32 - r.start as u32) * 0x800;
             let slice = SnesSlice::new(AddrSnes(base_addr.0 + offset), 0x800);
-            match parse_blocks(disasm, slice) {
+            match parse_blocks(rom, slice) {
                 Ok(page_blocks) => {
                     for (i, block) in page_blocks.into_iter().take(0x100).enumerate() {
                         let tile_num = ((page as usize) << 8) | i;
@@ -280,7 +289,7 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
                 for page in r.start..=r.end {
                     let offset = (page as u32 - r.start as u32) * 0x800;
                     let slice = SnesSlice::new(AddrSnes(base_addr.0 + offset), 0x800);
-                    let page_blocks = parse_blocks(disasm, slice)?;
+                    let page_blocks = parse_blocks(rom, slice)?;
                     for (i, block) in page_blocks.into_iter().take(0x100).enumerate() {
                         let tile_num = ((page as usize) << 8) | i;
                         if tile_num < blocks.len() {
@@ -305,7 +314,7 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
         for page in 0x02_u8..=0x7F_u8 {
             let offset = (page as u32 - 0x02) * 0x800;
             let slice = SnesSlice::new(AddrSnes(base.0 + offset), 0x800);
-            match parse_blocks(disasm, slice) {
+            match parse_blocks(rom, slice) {
                 Ok(page_blocks) => {
                     for (i, block) in page_blocks.into_iter().take(0x100).enumerate() {
                         let tile_num = ((page as usize) << 8) | i;
@@ -329,14 +338,14 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
     let present_count = present.iter().filter(|p| **p).count();
     if present_count == 0 {
         // Last-resort: scan for RATS-tagged Map16 data blocks and pick the best match.
-        if let Some((base_off, pages, score)) = scan_rats_map16(&disasm.rom.0) {
+        if let Some((base_off, pages, score)) = scan_rats_map16(&rom.0) {
             for page_idx in 0..pages {
                 let page = 0x02_u8 + page_idx as u8;
                 if page > 0x7F {
                     break;
                 }
                 let offset = base_off + page_idx * 0x800;
-                let page_bytes = &disasm.rom.0[offset..offset + 0x800];
+                let page_bytes = &rom.0[offset..offset + 0x800];
                 for tile in 0..0x100_usize {
                     let t_off = tile * 8;
                     let block = parse_block_from_bytes(&page_bytes[t_off..t_off + 8]);
@@ -357,10 +366,10 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
     }
 
     // Tileset-specific Map16 on page 2 (Lunar Magic).
-    let page2_enabled = read_u8(disasm, 0x06F547)? != 0;
+    let page2_enabled = read_u8(rom, 0x06F547)? != 0;
     let page2_tileset_specific = if page2_enabled {
-        let bank = read_u8(disasm, 0x06F58A)? as u32;
-        let lo = read_u16(disasm, 0x06F586)? as u32;
+        let bank = read_u8(rom, 0x06F58A)? as u32;
+        let lo = read_u16(rom, 0x06F586)? as u32;
         let base = (bank << 16) | lo;
         let base = AddrSnes(base.wrapping_add(0x1000));
         if (base.0 & 0xFFFF) < 0x8000 {
@@ -369,9 +378,7 @@ fn parse_lm_map16(disasm: &mut RomDisassembly) -> Result<LmMap16, TilesetParseEr
         } else {
             let size = TILESETS_COUNT * 0x100 * 8;
             let slice = SnesSlice::new(base, size);
-            match disasm
-                .rom_slice_at_block(DataBlock { slice, kind: DataKind::Tileset }, |_| TilesetParseError::Slice(slice))
-            {
+            match rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice) {
                 Ok(bytes) => {
                     let bytes = bytes.as_bytes()?;
                     let mut out: Vec<[Block; TILESETS_COUNT]> = Vec::with_capacity(0x100);

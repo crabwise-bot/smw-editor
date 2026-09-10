@@ -2,6 +2,7 @@
 //! Allows creation of BPS patches for ROM distribution
 
 use std::io::Write;
+
 use thiserror::Error;
 
 mod encoding;
@@ -13,22 +14,13 @@ pub enum BpsError {
     Io(#[from] std::io::Error),
     #[error("Invalid patch data")]
     InvalidPatch,
-    #[error("Metadata is too large")]
-    MetadataTooLarge,
-}
-
-/// Configuration for BPS patch creation
-#[derive(Debug, Clone, Default)]
-pub struct BpsConfig {
-    /// Optional metadata (e.g., XML with description, author, etc.)
-    pub metadata: Vec<u8>,
 }
 
 /// Creates a BPS patch that transforms source into target
 ///
 /// This uses the linear algorithm which is simpler but may create larger patches
 /// compared to the delta algorithm used by Flips.
-pub fn create_patch(source: &[u8], target: &[u8], config: BpsConfig) -> Result<Vec<u8>, BpsError> {
+pub fn create_patch(source: &[u8], target: &[u8]) -> Result<Vec<u8>, BpsError> {
     let mut patch = Vec::new();
 
     // Write header
@@ -39,8 +31,7 @@ pub fn create_patch(source: &[u8], target: &[u8], config: BpsConfig) -> Result<V
     encode_number(target.len() as u64, &mut patch)?;
 
     // Write metadata
-    encode_number(config.metadata.len() as u64, &mut patch)?;
-    patch.write_all(&config.metadata)?;
+    encode_number(0, &mut patch)?;
 
     // Calculate checksums
     let source_crc = crc32_sum(source);
@@ -126,8 +117,7 @@ mod tests {
         let source = b"Hello World";
         let target = b"Hello Rust!";
 
-        let config = BpsConfig::default();
-        let patch = create_patch(source, target, config).expect("patch creation failed");
+        let patch = create_patch(source, target).expect("patch creation failed");
 
         // Should have BPS1 header, sizes, metadata, commands, and footer
         assert!(patch.starts_with(b"BPS1"));
@@ -137,23 +127,8 @@ mod tests {
     #[test]
     fn test_identical_files() {
         let data = b"Same content";
-        let config = BpsConfig::default();
-        let patch = create_patch(data, data, config).expect("patch creation failed");
+        let patch = create_patch(data, data).expect("patch creation failed");
 
         assert!(patch.starts_with(b"BPS1"));
-    }
-
-    #[test]
-    fn test_with_metadata() {
-        let source = b"test";
-        let target = b"best";
-        let metadata = b"<?xml version=\"1.0\"?><patch><author>Test</author></patch>";
-
-        let config = BpsConfig { metadata: metadata.to_vec() };
-        let patch = create_patch(source, target, config).expect("patch creation failed");
-
-        assert!(patch.starts_with(b"BPS1"));
-        // Metadata should be in the patch
-        assert!(patch.windows(metadata.len()).any(|w| w == *metadata));
     }
 }

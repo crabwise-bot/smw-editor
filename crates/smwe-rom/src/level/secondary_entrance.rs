@@ -1,7 +1,10 @@
 use crate::{
-    disassembler::binary_block::{DataBlock, DataKind},
-    snes_utils::{addr::AddrSnes, rom::noop_error_mapper, rom_slice::SnesSlice},
-    RomDisassembly, RomError,
+    snes_utils::{
+        addr::AddrSnes,
+        rom::{noop_error_mapper, Rom},
+        rom_slice::SnesSlice,
+    },
+    RomError,
 };
 
 pub const SECONDARY_ENTRANCE_TABLE: SnesSlice = SnesSlice::new(AddrSnes(0x05F800), 512);
@@ -10,12 +13,11 @@ pub const SECONDARY_ENTRANCE_TABLE: SnesSlice = SnesSlice::new(AddrSnes(0x05F800
 pub struct SecondaryEntrance([u8; 4]);
 
 impl SecondaryEntrance {
-    pub fn read_from_rom(disasm: &mut RomDisassembly, entrance_id: usize) -> Result<Self, RomError> {
+    pub fn read_from_rom(rom: &Rom, entrance_id: usize) -> Result<Self, RomError> {
         let mut bytes = [0; 4];
         for (i, byte) in bytes.iter_mut().enumerate() {
-            let data_block =
-                DataBlock { slice: SECONDARY_ENTRANCE_TABLE.skip_forward(i), kind: DataKind::SecondaryEntranceTable };
-            *byte = disasm.rom_slice_at_block(data_block, noop_error_mapper)?.as_bytes()?[entrance_id];
+            let slice = SECONDARY_ENTRANCE_TABLE.skip_forward(i);
+            *byte = rom.with_error_mapper(noop_error_mapper).slice_lorom(slice)?.as_bytes()?[entrance_id];
         }
 
         Ok(Self(bytes))

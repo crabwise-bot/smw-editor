@@ -1,6 +1,5 @@
 use egui::{Pos2, Rangef, Rect, Vec2};
 use itertools::Itertools;
-use num::Integer;
 use smwe_math::coordinates::{OnCanvas, OnGrid, OnScreen};
 use smwe_render::tile_renderer::{Tile, TileJson};
 
@@ -147,7 +146,7 @@ impl UiSpriteMapEditor {
             if let Some(tile) =
                 tiles.iter().rev().find(|&&tile| tile.contains_point(pos.to_canvas(self.pixels_per_point, self.zoom)))
             {
-                let (y, x) = tile.tile_num().div_rem(&16);
+                let (y, x) = (tile.tile_num() / 16, tile.tile_num() % 16);
                 self.selected_vram_tile = (x, y - 96);
             }
         });

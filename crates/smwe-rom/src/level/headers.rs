@@ -3,9 +3,12 @@ use std::convert::TryInto;
 use nom::{bytes::complete::take, IResult};
 
 use crate::{
-    disassembler::binary_block::{DataBlock, DataKind},
-    snes_utils::{addr::AddrSnes, rom::noop_error_mapper, rom_slice::SnesSlice},
-    RomDisassembly, RomError,
+    snes_utils::{
+        addr::AddrSnes,
+        rom::{noop_error_mapper, Rom},
+        rom_slice::SnesSlice,
+    },
+    RomError,
 };
 
 pub const PRIMARY_HEADER_SIZE: usize = 5;
@@ -106,15 +109,12 @@ impl PrimaryHeader {
 }
 
 impl SecondaryHeader {
-    pub fn read_from_rom(disasm: &mut RomDisassembly, level_num: u32) -> Result<Self, RomError> {
+    pub fn read_from_rom(rom: &Rom, level_num: u32) -> Result<Self, RomError> {
         let mut bytes = [0; 4];
         let byte_table_addrs = [0x05F000, 0x05F200, 0x05F400, 0x05F600];
         for (byte, addr) in bytes.iter_mut().zip(byte_table_addrs) {
-            let data_block = DataBlock {
-                slice: SnesSlice::new(AddrSnes(addr), 0x200),
-                kind: DataKind::LevelHeaderSecondaryByteTable,
-            };
-            let byte_table = disasm.rom_slice_at_block(data_block, noop_error_mapper)?.as_bytes()?;
+            let slice = SnesSlice::new(AddrSnes(addr), 0x200);
+            let byte_table = rom.with_error_mapper(noop_error_mapper).slice_lorom(slice)?.as_bytes()?;
             *byte = byte_table[level_num as usize];
         }
         Ok(Self(bytes))

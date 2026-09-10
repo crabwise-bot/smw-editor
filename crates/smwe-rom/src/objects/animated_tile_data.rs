@@ -2,13 +2,10 @@ use nom::{combinator::map, multi::many0, number::complete::le_u16};
 use thiserror::Error;
 
 use crate::{
-    disassembler::{
-        binary_block::{DataBlock, DataKind},
-        RomDisassembly,
-    },
     objects::map16::{Block, Tile8x8},
     snes_utils::{
         addr::{AddrSnes, AddrVram},
+        rom::Rom,
         rom_slice::SnesSlice,
     },
 };
@@ -31,28 +28,26 @@ const ANIM_BEHAVIOUR_TABLE: SnesSlice = SnesSlice::new(AddrSnes(0x05B96B), 46);
 pub struct AnimatedTileData {
     pub src_addresses: Vec<AddrSnes>,
     pub dst_addresses: Vec<AddrVram>,
-    pub behaviours: Vec<u8>,
-    pub switches: Vec<u8>,
-    pub tilesets: Vec<u8>,
+    pub behaviours:    Vec<u8>,
+    pub switches:      Vec<u8>,
+    pub tilesets:      Vec<u8>,
 }
 
 impl AnimatedTileData {
-    pub fn parse(disasm: &mut RomDisassembly) -> anyhow::Result<Self> {
+    pub fn parse(rom: &Rom) -> anyhow::Result<Self> {
         let src_addresses = {
-            let data_block = DataBlock { slice: ANIM_SRC_ADDRESSES_TABLE, kind: DataKind::AnimatedTileData };
-            disasm
-                .rom_slice_at_block(data_block, |_| AnimatedTileDataParseError)?
+            rom.with_error_mapper(|_| AnimatedTileDataParseError)
+                .slice_lorom(ANIM_SRC_ADDRESSES_TABLE)?
                 .parse(many0(map(le_u16, |a| AddrSnes(a as _).with_bank(0x7E))))?
         };
         let dst_addresses = {
-            let data_block = DataBlock { slice: ANIM_DST_ADDRESSES_TABLE, kind: DataKind::AnimatedTileData };
-            disasm
-                .rom_slice_at_block(data_block, |_| AnimatedTileDataParseError)?
+            rom.with_error_mapper(|_| AnimatedTileDataParseError)
+                .slice_lorom(ANIM_DST_ADDRESSES_TABLE)?
                 .parse(many0(map(le_u16, AddrVram)))?
         };
         let (behaviours, switches, tilesets) = {
-            let data_block = DataBlock { slice: ANIM_BEHAVIOUR_TABLE, kind: DataKind::AnimatedTileData };
-            let bytes = disasm.rom_slice_at_block(data_block, |_| AnimatedTileDataParseError)?.as_bytes()?;
+            let bytes =
+                rom.with_error_mapper(|_| AnimatedTileDataParseError).slice_lorom(ANIM_BEHAVIOUR_TABLE)?.as_bytes()?;
             (bytes[..24].to_vec(), bytes[18..18 + 15].to_vec(), bytes[32..32 + 14].to_vec())
         };
         Ok(Self { src_addresses, dst_addresses, behaviours, switches, tilesets })

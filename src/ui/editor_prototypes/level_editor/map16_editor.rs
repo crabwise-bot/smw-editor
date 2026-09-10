@@ -164,7 +164,7 @@ impl UiLevelEditor {
         if let Some(&snes_addr) = self.map16_block_ptrs.get(block_id as usize) {
             if snes_addr != 0 {
                 use smwe_rom::snes_utils::addr::{AddrPc, AddrSnes};
-                let rom_bytes = self.rom.disassembly.rom_bytes();
+                let rom_bytes = self.rom.rom_bytes();
                 if let Ok(pc) = AddrPc::try_from_lorom(AddrSnes(snes_addr)) {
                     let base = pc.as_index();
                     let mut words = [0u16; 4];

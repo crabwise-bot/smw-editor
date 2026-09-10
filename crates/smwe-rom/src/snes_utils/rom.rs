@@ -4,8 +4,10 @@ use thiserror::Error;
 
 use crate::{
     compression::DecompressionError,
-    disassembler::binary_block::DataBlock,
-    snes_utils::{addr::AddrPc, rom_slice::*},
+    snes_utils::{
+        addr::{AddrPc, AddrSnes},
+        rom_slice::*,
+    },
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -26,8 +28,6 @@ pub enum RomError {
     Decompress(DecompressionError),
     #[error("Could not parse ROM slice")]
     Parse,
-    #[error("Data block not found: {0:?}")]
-    DataBlockNotFound(DataBlock),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -77,12 +77,18 @@ pub trait IsDecompressed {
 #[derive(Clone)]
 pub struct Rom(pub Arc<[u8]>);
 
+impl std::fmt::Debug for Rom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rom({} bytes)", self.0.len())
+    }
+}
+
 pub struct RomWithErrorMapper<'r, EM, ET>
 where
     EM: Fn(RomError) -> ET,
 {
     error_mapper: EM,
-    rom: &'r Rom,
+    rom:          &'r Rom,
 }
 
 pub struct RomViewWithErrorMapper<'r, EM, ET, RV>
@@ -90,8 +96,8 @@ where
     EM: Fn(RomError) -> ET,
 {
     error_mapper: EM,
-    rom_view: RV,
-    _phantom: std::marker::PhantomData<&'r [u8]>,
+    rom_view:     RV,
+    _phantom:     std::marker::PhantomData<&'r [u8]>,
 }
 
 #[derive(Clone)]
@@ -102,7 +108,7 @@ pub struct SnesSliced<'r> {
 #[derive(Clone)]
 pub struct PcSliced<'r> {
     slice: PcSlice,
-    rom: &'r Rom,
+    rom:   &'r Rom,
 }
 
 pub struct Decompressed {
@@ -137,6 +143,18 @@ impl Rom {
 
     pub fn view(&self) -> RomWithErrorMapper<'_, impl Fn(RomError) -> RomError, RomError> {
         self.with_error_mapper(noop_error_mapper)
+    }
+
+    /// Slices the ROM starting at `start` with unknown length, hands the view to `parse`, and
+    /// returns what it parsed. `parse` also reports how many bytes it consumed; that count is only
+    /// meaningful to the parser itself.
+    pub fn parse_at<EM, ET, RT, PF>(&self, start: AddrSnes, error_mapper: EM, parse: PF) -> Result<RT, ET>
+    where
+        PF: FnOnce(RomViewWithErrorMapper<'_, EM, ET, SnesSliced<'_>>) -> Result<(RT, usize), ET>,
+        EM: Fn(RomError) -> ET,
+    {
+        let view = self.with_error_mapper(error_mapper).slice_lorom(SnesSlice::new(start, usize::MAX))?;
+        Ok(parse(view)?.0)
     }
 
     pub fn with_error_mapper<'r, EM, ET>(&'r self, error_mapper: EM) -> RomWithErrorMapper<'r, EM, ET>
@@ -194,7 +212,11 @@ where
         Decompressor: 'static + Fn(&[u8]) -> Result<Vec<u8>, DecompressionError>,
     {
         let decomp = self.rom_view.decompress(decompressor).map_err(&self.error_mapper)?;
-        Ok(RomViewWithErrorMapper { error_mapper: self.error_mapper, rom_view: decomp, _phantom: Default::default() })
+        Ok(RomViewWithErrorMapper {
+            error_mapper: self.error_mapper,
+            rom_view:     decomp,
+            _phantom:     Default::default(),
+        })
     }
 
     pub fn parse<'s, Ret: 's, Parser>(&'s self, f: Parser) -> Result<Ret, ET>

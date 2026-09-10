@@ -5,7 +5,7 @@ use crate::snes_utils::addr::{Addr, AddrPc, AddrSnes};
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct RomSlice<A: Addr> {
     pub begin: A,
-    pub size: usize,
+    pub size:  usize,
 }
 
 pub type PcSlice = RomSlice<AddrPc>;
@@ -38,25 +38,11 @@ impl<A: Addr> RomSlice<A> {
     }
 
     #[must_use]
-    pub fn offset_backward(self, offset: usize) -> Self {
-        Self { begin: self.begin - offset, ..self }
-    }
-
-    #[must_use]
     pub fn skip_forward(self, lengths: usize) -> Self {
         if self.is_infinite() {
             self
         } else {
             Self { begin: self.begin + (self.size * lengths), ..self }
-        }
-    }
-
-    #[must_use]
-    pub fn skip_backward(self, lengths: usize) -> Self {
-        if self.is_infinite() {
-            self
-        } else {
-            Self { begin: self.begin - (self.size * lengths), ..self }
         }
     }
 
