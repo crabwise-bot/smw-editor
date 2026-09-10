@@ -153,12 +153,8 @@ pub struct UiLevelEditor {
     message_boxes_dirty: bool,
     show_message_editor: bool,
     message_editor_selected: usize,
-    /// Empirically derived byte→character map for the readable-text preview.
-    /// `None` until derived from a real ROM (see `smwe_rom::font_map`).
-    message_font_map: Option<smwe_rom::font_map::FontMap>,
     /// Cached `CODE_05B1BC` stripe capture for the selected message, run on a
-    /// scratch CPU clone. Read-only preview; rasterization of the stripe into
-    /// pixels is pending real-ROM verification.
+    /// scratch CPU clone. Read-only preview; the text uses `FontMap::real()`.
     message_preview: Option<smwe_emu::emu::MessageStripe>,
     message_preview_for: Option<usize>,
 
@@ -255,7 +251,6 @@ impl UiLevelEditor {
             message_boxes_dirty: false,
             show_message_editor: false,
             message_editor_selected: 0,
-            message_font_map: None,
             message_preview: None,
             message_preview_for: None,
             title_credits,

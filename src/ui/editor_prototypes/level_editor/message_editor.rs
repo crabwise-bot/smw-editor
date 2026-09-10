@@ -1,20 +1,24 @@
 use egui::{Context, ScrollArea, Slider};
+use smwe_rom::font_map::FontMap;
 use smwe_rom::message_boxes::{MESSAGE_BOXES_MAX_SIZE, MESSAGE_NAMES};
 
 use super::UiLevelEditor;
 
-/// Editor for SMW's vanilla "destruction event" message box text: 22 global
-/// messages, each a sequence of raw font-tile-index bytes (0x00-0x7F; bit 7
-/// is reserved by the game as a repeat/hold flag, so this editor doesn't let
-/// users set it).
+/// Editor for SMW's vanilla message box text: 22 global messages, each a
+/// sequence of raw font-tile-index bytes (0x00-0x7F; bit 7 set means "insert
+/// a blank cell after this character", per `CODE_05B208` in bank_05.asm).
 ///
-/// The read-only preview pane at the bottom runs the selected message through
-/// the REAL game routine (`CODE_05B1BC`, verified in SMWDisX `bank_05.asm`)
-/// on a scratch CPU clone and captures the dynamic stripe image it appends
-/// to WRAM: 8 rows × 18 tile words (`$39TT` = tiles $100-$17F, palette 6).
-/// Pixel rasterization of that stripe is pending real-ROM verification (the
-/// routine has never executed here — no ROM). The readable-text line needs
-/// the empirically derived font map (`smwe_rom::font_map`), also ROM-gated.
+/// The read-only preview pane at the bottom shows:
+/// 1. Readable text (8 rows × 18 cells) via the real SMW (U) font map
+///    (`FontMap::real()`, verified 2026-09-10 by running all 22 messages
+///    through the genuine `CODE_05B1BC`).
+/// 2. Stripe info: runs the selected message through the REAL game routine
+///    (`CODE_05B1BC`) on a scratch CPU clone and captures the dynamic stripe
+///    image (8 rows × 18 tile words, `$39TT`).
+///
+/// Pixel rasterization of the stripe is pending font-graphics identification
+/// (the routine does not upload font tiles; they come from normal GFX init).
+/// The text preview above is genuine and verified.
 ///
 /// Edits are global (every level shares the same 22 messages) and size-
 /// constrained: the vanilla ROM already uses the full byte budget, so making
@@ -26,10 +30,10 @@ impl UiLevelEditor {
             return;
         }
         let mut open = self.show_message_editor;
-        egui::Window::new("Message Box Editor").open(&mut open).resizable(true).default_size([520.0, 420.0]).show(
+        egui::Window::new("Message Box Editor").open(&mut open).resizable(true).default_size([520.0, 520.0]).show(
             ctx,
             |ui| {
-                ui.label("Raw font-tile-index bytes (0x00-0x7F) — no readable-text preview yet.");
+                ui.label("Raw font-tile-index bytes (0x00-0x7F). Bit 7 = insert blank after.");
                 let total = self.message_boxes.total_size();
                 let over_budget = total > MESSAGE_BOXES_MAX_SIZE;
                 let color = if over_budget {
@@ -95,30 +99,25 @@ impl UiLevelEditor {
                         });
 
                         ui.separator();
-                        ui.label("Preview (read-only)");
+                        ui.label("Preview (read-only, 8×18)");
 
-                        // Readable-text preview via the empirically derived font map.
-                        match &self.message_font_map {
-                            Some(map) => {
-                                // Control codes are identified during real-ROM
-                                // derivation; none are known yet.
-                                ui.label(format!(
-                                    "Text: {}",
-                                    map.to_text(&self.message_boxes.messages[i], &[])
-                                ));
-                            }
-                            None => {
-                                ui.small(
-                                    "Readable-text preview needs the font map — derive it \
-                                     with a ROM (see smwe_rom::font_map).",
-                                );
-                            }
+                        // Readable-text preview via the real SMW (U) font map.
+                        // Verified 2026-09-10: all 22 vanilla messages run
+                        // through the genuine CODE_05B1BC produce readable
+                        // 8×18 text via this map.
+                        let real_map = FontMap::real();
+                        let rows = real_map.to_rows(&self.message_boxes.messages[i], &[]);
+                        // Monospace for aligned 18-column rows.
+                        let mono = egui::TextStyle::Monospace;
+                        for row in rows.iter() {
+                            ui.label(egui::RichText::new(row).text_style(mono.clone()));
                         }
 
                         // Pixel preview: run the real CODE_05B1BC on a scratch CPU
                         // clone and capture the dynamic stripe image it appends
-                        // to WRAM. Rasterizing that stripe into pixels is pending
-                        // real-ROM verification (see smwe_emu::emu::render_message).
+                        // to WRAM. Rasterizing that stripe into pixels needs
+                        // the font graphics in VRAM (pending identification of
+                        // the compressed font source).
                         let slot = smwe_rom::message_boxes::pointer_slot_for_message(i);
                         if self.message_preview_for != Some(i) {
                             let mut scratch = self.cpu.clone();
@@ -128,8 +127,7 @@ impl UiLevelEditor {
                         }
                         if let Some(stripe) = &self.message_preview {
                             ui.small(format!(
-                                "CODE_05B1BC ran ({} cycles): captured {} stripe bytes. \
-                                 Tilemap rasterization pending real-ROM verification.",
+                                "CODE_05B1BC ran ({} cycles): {} stripe bytes (8 rows × 18 tiles).",
                                 stripe.cycles,
                                 stripe.stripe.len()
                             ));

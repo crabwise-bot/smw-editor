@@ -651,12 +651,12 @@ pub struct MessageStripe {
 /// the NMI uploader resets it after every upload, so a message always starts
 /// appending at offset 0.
 ///
-/// UNVERIFIED WITHOUT A ROM: the trampoline compiles and follows the
-/// `decompress_sublevel` pattern (JSL at $2000, X = message type, run to end
-/// PC), but it has NEVER EXECUTED — there is no SMW ROM on this machine. What
-/// remains for real-ROM verification: run it (ideally after
-/// `decompress_sublevel`, so the font tiles are in VRAM), parse the stripe
-/// commands, and rasterize tiles $100-$17F with palette 6 into the Layer 3
+/// VERIFIED WITH REAL ROM (2026-09-10): runs `CODE_05B1BC` via JSL trampoline,
+/// produces 8 stripe commands (8 rows × 18 tile words) in WRAM. DBR must be
+/// 0x05 for the routine's `LDA.W MessageBoxes,Y` to read bank 0x05 data.
+/// What remains: run after `decompress_sublevel` so font tiles are in VRAM,
+/// then rasterize tiles $100-$17F (palette 6) at each command's VRAM address
+/// into a PNG.
 /// tilemap at each command's VRAM address.
 pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe {
     // WRAM stripe-buffer addresses from SMWDisX rammap.asm.
@@ -668,7 +668,10 @@ pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe 
     cpu.s = 0x1FF;
     cpu.pc = 0x2000;
     cpu.pbr = 0x00;
-    cpu.dbr = 0x00;
+    // CODE_05B1BC uses 16-bit absolute addressing (LDA.W MessageBoxes,Y,
+    // LDA.W DATA_05A5A7,X) for bank 0x05 data, so DBR must be 0x05.
+    // Verified against real ROM 2026-09-10: DBR=0x00 reads zeros.
+    cpu.dbr = 0x05;
     cpu.trace = false;
     cpu.x = msg_type as u16;
 
