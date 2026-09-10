@@ -13,6 +13,7 @@ pub mod overworld;
 pub mod snes_utils;
 pub mod sprite_tweakers;
 pub mod title_credits;
+pub mod xref;
 
 use std::{fs, path::Path};
 

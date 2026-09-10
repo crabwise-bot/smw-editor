@@ -131,6 +131,14 @@ impl UiLevelEditor {
             if tbtn(ui, icon::CHAT, "Edit message box text", self.show_message_editor) {
                 self.show_message_editor = !self.show_message_editor;
             }
+            if tbtn(
+                ui,
+                icon::MAGNIFYING_GLASS,
+                "Cross-reference search (find levels using a sprite, object, tile, or music track)",
+                self.show_xref_search,
+            ) {
+                self.show_xref_search = !self.show_xref_search;
+            }
             if tbtn(ui, icon::DOOR, "Secondary entrances", self.show_secondary_entrances) {
                 self.show_secondary_entrances = !self.show_secondary_entrances;
             }
