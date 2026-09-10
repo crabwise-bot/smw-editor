@@ -610,11 +610,64 @@ pub fn decompress_sublevel(cpu: &mut Cpu<CheckedMem>, id: u16) -> u64 {
 #[derive(Debug, Clone)]
 pub struct MessageStripe {
     /// Raw stripe commands appended to `DynamicStripeImage` ($7F837D): 8 rows
-    /// × [VRAM-dest word, flags/length word, 18 tile words]. The game's $FF
-    /// sentinel is written after these bytes and is NOT included here.
+    /// × [VRAM-dest word (big-endian), flags/length word (big-endian), 18
+    /// tile words (little-endian `$39TT`)]. The game's $FF sentinel is written
+    /// after these bytes and is NOT included here. See `LoadStripeImage` in
+    /// SMWDisX bank_00.asm: the header words are stored high-byte-first.
     pub stripe: Vec<u8>,
     /// CPU cycles executed.
     pub cycles: u64,
+}
+
+/// One parsed dynamic-stripe-image command from a [`MessageStripe`].
+#[derive(Debug, Clone)]
+pub struct StripeCommand {
+    /// VRAM destination word (big-endian in the stripe).
+    pub vram_dest: u16,
+    /// Flags/length word (big-endian in the stripe).
+    pub flags_len: u16,
+    /// Tile words, each little-endian `$39TT` (tile index `$100 | TT`,
+    /// palette 6, priority 1).
+    pub tiles: Vec<u16>,
+}
+
+/// Parse the raw stripe bytes from [`render_message`] into commands.
+///
+/// The header words (VRAM dest, flags/length) are big-endian (high byte
+/// first), matching `LoadStripeImage` in SMWDisX bank_00.asm. The tile words
+/// themselves are little-endian (`$39TT`: low tile byte, high `$39`).
+/// The flags/length word holds `(byte_count - 1)` in bits 0-13 (bit 14 = RLE,
+/// bit 15 = direction). Returns an error (not a panic) on truncated input.
+pub fn parse_stripe_commands(stripe: &[u8]) -> Result<Vec<StripeCommand>, String> {
+    let mut cmds = Vec::new();
+    let mut i = 0usize;
+    while i < stripe.len() {
+        if stripe.len() - i < 4 {
+            return Err(format!("truncated stripe header at offset {i:#06X}"));
+        }
+        let vram_dest = u16::from_be_bytes([stripe[i], stripe[i + 1]]);
+        let flags_len = u16::from_be_bytes([stripe[i + 2], stripe[i + 3]]);
+        // Bits 0-13: (payload byte count - 1). Bit 14: RLE. Bit 15: direction.
+        let nbytes = ((flags_len & 0x3FFF) + 1) as usize;
+        if flags_len & 0x4000 != 0 {
+            return Err(format!("RLE stripe commands not supported (offset {i:#06X})"));
+        }
+        if nbytes % 2 != 0 {
+            return Err(format!("odd stripe payload byte count {nbytes} at offset {i:#06X}"));
+        }
+        let payload_start = i + 4;
+        let payload_end = payload_start + nbytes;
+        if payload_end > stripe.len() {
+            return Err(format!("truncated stripe payload at offset {i:#06X}"));
+        }
+        let tiles = stripe[payload_start..payload_end]
+            .chunks_exact(2)
+            .map(|w| u16::from_le_bytes([w[0], w[1]]))
+            .collect();
+        cmds.push(StripeCommand { vram_dest, flags_len, tiles });
+        i = payload_end;
+    }
+    Ok(cmds)
 }
 
 /// Render a message box through the REAL game routine (`CODE_05B1BC`).
@@ -654,10 +707,8 @@ pub struct MessageStripe {
 /// VERIFIED WITH REAL ROM (2026-09-10): runs `CODE_05B1BC` via JSL trampoline,
 /// produces 8 stripe commands (8 rows × 18 tile words) in WRAM. DBR must be
 /// 0x05 for the routine's `LDA.W MessageBoxes,Y` to read bank 0x05 data.
-/// What remains: run after `decompress_sublevel` so font tiles are in VRAM,
-/// then rasterize tiles $100-$17F (palette 6) at each command's VRAM address
-/// into a PNG.
-/// tilemap at each command's VRAM address.
+/// The font graphics are GFX2A ("Message Box Letters", SNES $0BCB7B, 2bpp);
+/// rasterize tiles $100-$17F with those graphics and palette 6 to preview.
 pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe {
     // WRAM stripe-buffer addresses from SMWDisX rammap.asm.
     const DYN_STRIPE_IMG_SIZE: u32 = 0x7F837B;

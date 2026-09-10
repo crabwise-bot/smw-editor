@@ -157,6 +157,12 @@ pub struct UiLevelEditor {
     /// scratch CPU clone. Read-only preview; the text uses `FontMap::real()`.
     message_preview: Option<smwe_emu::emu::MessageStripe>,
     message_preview_for: Option<usize>,
+    /// Cached decompressed GFX2A message font (128 2bpp tiles) for raster preview.
+    message_font: Option<Vec<Box<[u8]>>>,
+    /// Cached raster texture for the selected message's 8×18 grid.
+    message_raster_texture: Option<egui::TextureHandle>,
+    /// (message index, byte-hash) the raster texture was built for.
+    message_raster_for: Option<(usize, u64)>,
 
     // Title screen / ending credits fixed-location data.
     title_credits: smwe_rom::title_credits::TitleCreditsData,
@@ -253,6 +259,9 @@ impl UiLevelEditor {
             message_editor_selected: 0,
             message_preview: None,
             message_preview_for: None,
+            message_font: None,
+            message_raster_texture: None,
+            message_raster_for: None,
             title_credits,
             title_credits_dirty: false,
             show_title_credits_editor: false,

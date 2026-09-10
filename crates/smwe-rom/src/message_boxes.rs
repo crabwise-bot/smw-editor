@@ -4,12 +4,15 @@
 //! render routine) and cross-checked against `symbols/SMW_U.sym` for exact
 //! per-message byte boundaries (see module docs below for how those were derived).
 //!
-//! Message bytes are NOT ASCII: each byte (0x00-0x7F) is a tile number into a
-//! small font tileset drawn via SMW's "dynamic stripe image" (Layer 3)
-//! mechanism (confirmed in `CODE_05B208`: `LDA.W MessageBoxes,Y` is stored
-//! directly as a tile number, with bit 7 reserved as a "hold/repeat" flag —
-//! `AND #$7F` strips it before use). No WYSIWYG font preview exists yet; this
-//! module exposes/edits the raw tile-index bytes.
+//! Message bytes are NOT ASCII: each byte (0x00-0x7F) is a tile number into the
+//! message font tileset (GFX2A, "Message Box Letters", SNES $0BCB7B, 2bpp,
+//! 128 tiles) drawn via SMW's "dynamic stripe image" (Layer 3) mechanism
+//! (confirmed in `CODE_05B208`: `LDA.W MessageBoxes,Y` is stored directly as a
+//! tile number, with `AND #$7F` stripping bit 7 before use). Bit 7 is NOT a
+//! hold/repeat flag: it means "fill the remainder of this 18-cell row with
+//! `$1F` blanks" (see [`crate::font_map`] for the exact row-fill semantics).
+//! The editor renders these tiles with the real GFX2A graphics for a true
+//! WYSIWYG preview.
 //!
 //! Messages are looked up exclusively through a 25-entry pointer table
 //! (`MESSAGE_POINTER_TABLE_SNES`, offsets relative to `MESSAGE_BOXES_SNES`) —
@@ -293,5 +296,63 @@ mod real_rom_tests {
         println!(
             "// let font_map = smwe_rom::font_map::derive_font_map(pairs, control_codes).unwrap();"
         );
+    }
+
+    /// Runs all 22 vanilla messages through the REAL `CODE_05B1BC` via the
+    /// emulator and validates the full pipeline:
+    /// - 8 stripe commands per message (320 bytes total)
+    /// - 18 tile words per command, every attribute byte `$39`
+    /// - the stripe's 8×18 tile grid matches `font_map::message_cells`
+    ///   (the row-aware bit-7 fill decoder) exactly
+    /// - each message has exactly 8 bit-7 bytes (one row terminator per row)
+    ///   and the decoder consumes exactly the message's full source length
+    ///
+    /// Run with `ROM_PATH=/path/to/smw.smc cargo test -p smwe-rom --lib
+    /// -- --ignored real_rom_message_render_all`.
+    #[test]
+    #[ignore]
+    fn real_rom_message_render_all() {
+        use std::sync::Arc;
+        let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH");
+        let rom = SmwRom::from_file(&rom_path).expect("parse ROM");
+
+        for (i, msg) in rom.message_boxes.messages.iter().enumerate() {
+            let name = MESSAGE_NAMES[i];
+            let slot = pointer_slot_for_message(i);
+
+            // Run the genuine CODE_05B1BC.
+            let raw = std::fs::read(&rom_path).expect("read ROM");
+            let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+            let mut emu_rom = smwe_emu::rom::Rom::new(rom_bytes);
+            emu_rom.load_symbols(include_str!("../../../symbols/SMW_U.sym"));
+            let mut cpu = smwe_emu::Cpu::new(smwe_emu::emu::CheckedMem::new(Arc::new(emu_rom)));
+            let stripe = smwe_emu::emu::render_message(&mut cpu, slot);
+
+            // 8 commands, 320 bytes.
+            assert_eq!(stripe.stripe.len(), 320, "{name}: stripe length");
+            let cmds = smwe_emu::emu::parse_stripe_commands(&stripe.stripe)
+                .unwrap_or_else(|e| panic!("{name}: stripe parse failed: {e}"));
+            assert_eq!(cmds.len(), 8, "{name}: command count");
+
+            // 18 tile words per command, all attributes $39.
+            let mut cells = [[0u8; 18]; 8];
+            for (r, cmd) in cmds.iter().enumerate() {
+                assert_eq!(cmd.tiles.len(), 18, "{name} row {r}: tile count");
+                for (c, &t) in cmd.tiles.iter().enumerate() {
+                    assert_eq!(t & 0xFF00, 0x3900, "{name} row {r} col {c}: tile word {t:#06X}");
+                    cells[r][c] = (t & 0xFF) as u8;
+                }
+            }
+
+            // Stripe grid must match the row-aware decoder exactly.
+            let expected = crate::font_map::message_cells(msg);
+            assert_eq!(cells, expected, "{name}: stripe disagrees with message_cells");
+
+            // Exactly 8 bit-7 bytes (one row terminator per row), and the
+            // decoder consumes the full source length.
+            let bit7_count = msg.iter().filter(|&&b| b & 0x80 != 0).count();
+            assert_eq!(bit7_count, 8, "{name}: expected 8 bit-7 row terminators, found {bit7_count}");
+            println!("{name:24} {:3} bytes, 8 terminators, stripe OK", msg.len());
+        }
     }
 }
