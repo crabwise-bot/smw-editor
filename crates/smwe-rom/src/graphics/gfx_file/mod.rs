@@ -335,7 +335,7 @@ impl GfxFile {
 
     fn read_pointer_byte(rom: &Rom, addr: AddrSnes) -> Result<u8, GfxFileParseError> {
         let slice = SnesSlice::new(addr, 1);
-        let bytes = rom.with_error_mapper(GfxFileParseError::IsolatingData).slice_lorom(slice)?.as_bytes()?;
+        let bytes = rom.slice_lorom(slice).map_err(GfxFileParseError::IsolatingData)?;
         bytes.first().copied().ok_or(GfxFileParseError::ParsingTile)
     }
 
@@ -367,19 +367,17 @@ impl GfxFile {
             Tile3bppMode7 => (Tile::from_3bpp_mode7, 3 * 8),
         };
 
-        let decompressed = rom
-            .with_error_mapper(|e| match e {
+        let bytes = rom
+            .decompress_lorom(slice.infinite(), move |slice| lc_lz2::decompress(slice, revised_gfx))
+            .map_err(|e| match e {
                 RomError::SliceSnes(_) | RomError::SlicePc(_) => GfxFileParseError::IsolatingData(e),
                 RomError::Decompress(DecompressionError::LcLz2(l)) => GfxFileParseError::DecompressingData(l.into()),
                 RomError::Parse => GfxFileParseError::ParsingTile,
                 _ => unreachable!(),
-            })
-            .slice_lorom(slice.infinite())?
-            .decompress(move |slice| lc_lz2::decompress(slice, revised_gfx))?;
-        let bytes = decompressed.view().as_bytes()?;
+            })?;
 
         let mut tiles = Vec::with_capacity(bytes.len() / tile_size_bytes);
-        let mut input = bytes;
+        let mut input = &bytes[..];
         while input.len() >= tile_size_bytes {
             let (rest, tile) = tile_parser(input).map_err(|_| GfxFileParseError::ParsingTile)?;
             input = rest;

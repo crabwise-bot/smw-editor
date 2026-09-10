@@ -13,7 +13,11 @@ pub use self::{
 };
 use crate::{
     compression::DecompressionError,
-    snes_utils::{addr::AddrSnes, rom::Rom, rom_slice::SnesSlice},
+    snes_utils::{
+        addr::AddrSnes,
+        rom::{parse_bytes, Rom},
+        rom_slice::SnesSlice,
+    },
     RomError,
 };
 
@@ -92,19 +96,18 @@ impl Level {
     fn parse_ph_and_l1(rom: &Rom, level_num: u32) -> Result<(PrimaryHeader, ObjectLayer), LevelParseError> {
         let l1_ptr_slice = SnesSlice::new(AddrSnes(0x05E000), 0x200 * 3);
         let ph_addr = rom
-            .with_error_mapper(LevelParseError::Layer1AddressRead)
-            .slice_lorom(l1_ptr_slice)?
-            .parse(count(map(le_u24, AddrSnes), 0x200))?[level_num as usize];
+            .parse_lorom(l1_ptr_slice, count(map(le_u24, AddrSnes), 0x200))
+            .map_err(LevelParseError::Layer1AddressRead)?[level_num as usize];
 
         let primary_header = {
             let ph_slice = SnesSlice::new(ph_addr, PRIMARY_HEADER_SIZE);
-            let bytes = rom.with_error_mapper(LevelParseError::PrimaryHeaderRead).slice_lorom(ph_slice)?.as_bytes()?;
-            PrimaryHeader::new(bytes)
+            PrimaryHeader::new(rom.slice_lorom(ph_slice).map_err(LevelParseError::PrimaryHeaderRead)?)
         };
 
-        let layer1 = rom.parse_at(ph_addr + PRIMARY_HEADER_SIZE as u32, LevelParseError::Layer1Read, |rom_view| {
-            rom_view.parse(ObjectLayer::parse)
-        })?;
+        let layer1 = {
+            let bytes = rom.slice_from(ph_addr + PRIMARY_HEADER_SIZE as u32).map_err(LevelParseError::Layer1Read)?;
+            parse_bytes(bytes, ObjectLayer::parse).map_err(LevelParseError::Layer1Read)?.0
+        };
 
         Ok((primary_header, layer1))
     }
@@ -113,22 +116,16 @@ impl Level {
         const LAYER2_DATA: AddrSnes = AddrSnes(0x05E600);
 
         let l2_addr_slice = SnesSlice::new(LAYER2_DATA + (3 * level_num), 3);
-        let l2_ptr = rom
-            .with_error_mapper(LevelParseError::Layer2AddressRead)
-            .slice_lorom(l2_addr_slice)?
-            .parse(map(le_u24, AddrSnes))?;
+        let l2_ptr =
+            rom.parse_lorom(l2_addr_slice, map(le_u24, AddrSnes)).map_err(LevelParseError::Layer2AddressRead)?;
 
         if l2_ptr.bank() == 0xFF {
-            let background = rom.parse_at(l2_ptr.with_bank(0x0C), LevelParseError::Layer2Isolate, |rom_view| {
-                let bytes = rom_view.as_bytes()?;
-                BackgroundData::read_from(bytes).map_err(LevelParseError::Layer2BackgroundRead)
-            })?;
+            let bytes = rom.slice_from(l2_ptr.with_bank(0x0C)).map_err(LevelParseError::Layer2Isolate)?;
+            let (background, _) = BackgroundData::read_from(bytes).map_err(LevelParseError::Layer2BackgroundRead)?;
             Ok(Layer2Data::Background(background))
         } else {
-            let objects =
-                rom.parse_at(l2_ptr + PRIMARY_HEADER_SIZE as u32, LevelParseError::Layer2Read, |rom_view| {
-                    rom_view.parse(ObjectLayer::parse)
-                })?;
+            let bytes = rom.slice_from(l2_ptr + PRIMARY_HEADER_SIZE as u32).map_err(LevelParseError::Layer2Read)?;
+            let (objects, _) = parse_bytes(bytes, ObjectLayer::parse).map_err(LevelParseError::Layer2Read)?;
             Ok(Layer2Data::Objects(objects))
         }
     }
@@ -137,18 +134,17 @@ impl Level {
         const SPRITE_DATA: AddrSnes = AddrSnes(0x05EC00);
 
         let sprite_ptr_slice = SnesSlice::new(SPRITE_DATA + (2 * level_num), 2);
-        let sh_addr =
-            rom.with_error_mapper(LevelParseError::SpriteAddressRead).slice_lorom(sprite_ptr_slice)?.parse(le_u16)?;
+        let sh_addr = rom.parse_lorom(sprite_ptr_slice, le_u16).map_err(LevelParseError::SpriteAddressRead)?;
         let sh_addr = AddrSnes(sh_addr as _).with_bank(0x07);
 
         let sh_slice = SnesSlice::new(sh_addr, SPRITE_HEADER_SIZE);
-        let sprite_header = rom
-            .with_error_mapper(LevelParseError::SpriteHeaderRead)
-            .slice_lorom(sh_slice)?
-            .parse(SpriteHeader::read_from)?;
+        let sprite_header =
+            rom.parse_lorom(sh_slice, SpriteHeader::read_from).map_err(LevelParseError::SpriteHeaderRead)?;
 
-        let sprite_layer =
-            rom.parse_at(sh_addr + 1, LevelParseError::SpriteRead, |rom_view| rom_view.parse(SpriteLayer::parse))?;
+        let sprite_layer = {
+            let bytes = rom.slice_from(sh_addr + 1).map_err(LevelParseError::SpriteRead)?;
+            parse_bytes(bytes, SpriteLayer::parse).map_err(LevelParseError::SpriteRead)?.0
+        };
 
         Ok((sprite_header, sprite_layer))
     }

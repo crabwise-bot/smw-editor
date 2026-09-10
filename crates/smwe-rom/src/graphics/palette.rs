@@ -210,7 +210,7 @@ fn make_color_parser(
 ) -> impl FnMut(SnesSlice, ColorPaletteParseError) -> Result<Vec<Abgr1555>, ColorPaletteParseError> + '_ {
     |slice, err| {
         let palette_parser = many1(map(le_u16, Abgr1555));
-        rom.with_error_mapper(move |_| err).slice_lorom(slice)?.parse(palette_parser)
+        rom.parse_lorom(slice, palette_parser).map_err(move |_| err)
     }
 }
 
@@ -422,19 +422,15 @@ impl OverworldColorPaletteSet {
         drop(parse_colors);
 
         let indirect_table_1 = rom
-            .with_error_mapper(|_| {
-                ColorPaletteParseError::OverworldLayer2IndicesIndirect1Read(LAYER2_PALETTE_INDIRECT1)
-            })
-            .slice_lorom(LAYER2_PALETTE_INDIRECT1)?
-            .as_bytes()?
+            .slice_lorom(LAYER2_PALETTE_INDIRECT1)
+            .map_err(|_| ColorPaletteParseError::OverworldLayer2IndicesIndirect1Read(LAYER2_PALETTE_INDIRECT1))?
             .to_vec();
 
         for &offset in indirect_table_1.iter() {
             let index_offset = LAYER2_PALETTE_INDIRECT2.offset_forward(2 * offset as usize).begin;
             let ptr16 = rom
-                .with_error_mapper(|_| ColorPaletteParseError::OverworldLayer2IndexRead(offset as usize))
-                .slice_lorom(SnesSlice::new(index_offset, 2))?
-                .parse(le_u16)?;
+                .parse_lorom(SnesSlice::new(index_offset, 2), le_u16)
+                .map_err(|_| ColorPaletteParseError::OverworldLayer2IndexRead(offset as usize))?;
 
             let idx = ptr16 / 0x38;
             layer2_indices.push(idx as usize);

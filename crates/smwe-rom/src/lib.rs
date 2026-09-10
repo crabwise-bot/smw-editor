@@ -69,8 +69,8 @@ impl SmwRom {
         log::info!("Parsing internal ROM header");
         let internal_header = RomInternalHeader::parse(&rom)?;
 
-        rom.with_error_mapper(|_| InternalHeaderParseError::NotFound)
-            .slice_lorom(SnesSlice::new(AddrSnes(0x00FFC0), internal_header::sizes::INTERNAL_HEADER))?;
+        rom.slice_lorom(SnesSlice::new(AddrSnes(0x00FFC0), internal_header::sizes::INTERNAL_HEADER))
+            .map_err(|_| InternalHeaderParseError::NotFound)?;
 
         log::info!("Parsing level data");
         let levels = Self::parse_levels(&rom)?;

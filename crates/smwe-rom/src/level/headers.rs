@@ -3,11 +3,7 @@ use std::convert::TryInto;
 use nom::{bytes::complete::take, IResult};
 
 use crate::{
-    snes_utils::{
-        addr::AddrSnes,
-        rom::{noop_error_mapper, Rom},
-        rom_slice::SnesSlice,
-    },
+    snes_utils::{addr::AddrSnes, rom::Rom, rom_slice::SnesSlice},
     RomError,
 };
 
@@ -114,7 +110,7 @@ impl SecondaryHeader {
         let byte_table_addrs = [0x05F000, 0x05F200, 0x05F400, 0x05F600];
         for (byte, addr) in bytes.iter_mut().zip(byte_table_addrs) {
             let slice = SnesSlice::new(AddrSnes(addr), 0x200);
-            let byte_table = rom.with_error_mapper(noop_error_mapper).slice_lorom(slice)?.as_bytes()?;
+            let byte_table = rom.slice_lorom(slice)?;
             *byte = byte_table[level_num as usize];
         }
         Ok(Self(bytes))

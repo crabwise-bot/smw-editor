@@ -1,4 +1,4 @@
-use std::{convert::TryFrom, fmt, num::ParseIntError, ops::*};
+use std::{convert::TryFrom, fmt, ops::*};
 
 use duplicate::*;
 use paste::*;

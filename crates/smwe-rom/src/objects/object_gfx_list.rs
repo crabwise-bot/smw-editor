@@ -23,11 +23,8 @@ pub struct ObjectGfxList {
 
 impl ObjectGfxList {
     pub fn parse(rom: &Rom) -> Result<Self, ObjectGfxListParseError> {
-        let gfx_file_nums = rom
-            .with_error_mapper(|_| ObjectGfxListParseError(OBJECT_GFX_LIST))
-            .slice_lorom(OBJECT_GFX_LIST)?
-            .as_bytes()?
-            .to_vec();
+        let gfx_file_nums =
+            rom.slice_lorom(OBJECT_GFX_LIST).map_err(|_| ObjectGfxListParseError(OBJECT_GFX_LIST))?.to_vec();
         Ok(Self { gfx_file_nums })
     }
 

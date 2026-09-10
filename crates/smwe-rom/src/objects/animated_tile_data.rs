@@ -36,18 +36,15 @@ pub struct AnimatedTileData {
 impl AnimatedTileData {
     pub fn parse(rom: &Rom) -> anyhow::Result<Self> {
         let src_addresses = {
-            rom.with_error_mapper(|_| AnimatedTileDataParseError)
-                .slice_lorom(ANIM_SRC_ADDRESSES_TABLE)?
-                .parse(many0(map(le_u16, |a| AddrSnes(a as _).with_bank(0x7E))))?
+            rom.parse_lorom(ANIM_SRC_ADDRESSES_TABLE, many0(map(le_u16, |a| AddrSnes(a as _).with_bank(0x7E))))
+                .map_err(|_| AnimatedTileDataParseError)?
         };
         let dst_addresses = {
-            rom.with_error_mapper(|_| AnimatedTileDataParseError)
-                .slice_lorom(ANIM_DST_ADDRESSES_TABLE)?
-                .parse(many0(map(le_u16, AddrVram)))?
+            rom.parse_lorom(ANIM_DST_ADDRESSES_TABLE, many0(map(le_u16, AddrVram)))
+                .map_err(|_| AnimatedTileDataParseError)?
         };
         let (behaviours, switches, tilesets) = {
-            let bytes =
-                rom.with_error_mapper(|_| AnimatedTileDataParseError).slice_lorom(ANIM_BEHAVIOUR_TABLE)?.as_bytes()?;
+            let bytes = rom.slice_lorom(ANIM_BEHAVIOUR_TABLE).map_err(|_| AnimatedTileDataParseError)?;
             (bytes[..24].to_vec(), bytes[18..18 + 15].to_vec(), bytes[32..32 + 14].to_vec())
         };
         Ok(Self { src_addresses, dst_addresses, behaviours, switches, tilesets })

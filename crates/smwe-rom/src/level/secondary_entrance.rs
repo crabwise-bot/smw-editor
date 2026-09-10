@@ -1,9 +1,5 @@
 use crate::{
-    snes_utils::{
-        addr::AddrSnes,
-        rom::{noop_error_mapper, Rom},
-        rom_slice::SnesSlice,
-    },
+    snes_utils::{addr::AddrSnes, rom::Rom, rom_slice::SnesSlice},
     RomError,
 };
 
@@ -17,7 +13,7 @@ impl SecondaryEntrance {
         let mut bytes = [0; 4];
         for (i, byte) in bytes.iter_mut().enumerate() {
             let slice = SECONDARY_ENTRANCE_TABLE.skip_forward(i);
-            *byte = rom.with_error_mapper(noop_error_mapper).slice_lorom(slice)?.as_bytes()?[entrance_id];
+            *byte = rom.slice_lorom(slice)?[entrance_id];
         }
 
         Ok(Self(bytes))

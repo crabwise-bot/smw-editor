@@ -165,9 +165,8 @@ impl LmMap16 {
 
 fn parse_blocks(rom: &Rom, slice: SnesSlice) -> Result<Vec<Block>, TilesetParseError> {
     let it = rom
-        .with_error_mapper(|_| TilesetParseError::Slice(slice))
-        .slice_lorom(slice)?
-        .parse(many0(map(le_u16, Tile8x8)))?
+        .parse_lorom(slice, many0(map(le_u16, Tile8x8)))
+        .map_err(|_| TilesetParseError::Slice(slice))?
         .into_iter()
         .tuples::<(Tile8x8, Tile8x8, Tile8x8, Tile8x8)>()
         .map(Block::from_tuple);
@@ -188,13 +187,13 @@ fn blank_block() -> Block {
 
 fn read_u8(rom: &Rom, addr: u32) -> Result<u8, TilesetParseError> {
     let slice = SnesSlice::new(AddrSnes(addr), 1);
-    let bytes = rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice)?.as_bytes()?;
+    let bytes = rom.slice_lorom(slice).map_err(|_| TilesetParseError::Slice(slice))?;
     bytes.first().copied().ok_or(TilesetParseError::Slice(slice))
 }
 
 fn read_u16(rom: &Rom, addr: u32) -> Result<u16, TilesetParseError> {
     let slice = SnesSlice::new(AddrSnes(addr), 2);
-    let bytes = rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice)?.as_bytes()?;
+    let bytes = rom.slice_lorom(slice).map_err(|_| TilesetParseError::Slice(slice))?;
     if bytes.len() < 2 {
         return Err(TilesetParseError::Slice(slice));
     }
@@ -378,9 +377,8 @@ fn parse_lm_map16(rom: &Rom) -> Result<LmMap16, TilesetParseError> {
         } else {
             let size = TILESETS_COUNT * 0x100 * 8;
             let slice = SnesSlice::new(base, size);
-            match rom.with_error_mapper(|_| TilesetParseError::Slice(slice)).slice_lorom(slice) {
+            match rom.slice_lorom(slice) {
                 Ok(bytes) => {
-                    let bytes = bytes.as_bytes()?;
                     let mut out: Vec<[Block; TILESETS_COUNT]> = Vec::with_capacity(0x100);
                     for tile in 0..0x100_usize {
                         let mut per_ts = [blank_block(); TILESETS_COUNT];
