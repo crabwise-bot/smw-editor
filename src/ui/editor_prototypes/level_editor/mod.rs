@@ -17,6 +17,7 @@ mod sprite_tweaker_editor;
 mod tile_picker;
 mod title_credits_editor;
 mod toolbar;
+mod xref_search;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -46,6 +47,7 @@ use self::{
     properties::LevelProperties,
     sprite_layer::EditableSpriteLayer,
     tile_picker::{BgTilePicker, TilePicker},
+    xref_search::XrefSearchState,
 };
 use crate::{
     rom_freespace::{find_free_space, find_free_space_in},
@@ -163,6 +165,9 @@ pub struct UiLevelEditor {
     message_raster_texture: Option<egui::TextureHandle>,
     /// (message index, byte-hash) the raster texture was built for.
     message_raster_for: Option<(usize, u64)>,
+    /// ROM-wide cross-reference search ("find all references") window.
+    show_xref_search: bool,
+    xref_search: XrefSearchState,
 
     // Title screen / ending credits fixed-location data.
     title_credits: smwe_rom::title_credits::TitleCreditsData,
@@ -262,6 +267,8 @@ impl UiLevelEditor {
             message_font: None,
             message_raster_texture: None,
             message_raster_for: None,
+            show_xref_search: false,
+            xref_search: XrefSearchState::default(),
             title_credits,
             title_credits_dirty: false,
             show_title_credits_editor: false,
@@ -284,6 +291,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.sprite_tweaker_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
         self.message_editor_window(&ctx);
+        self.xref_search_window(&ctx);
         self.title_credits_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.
         TopBottomPanel::top("level_editor.toolbar").show_inside(ui, |ui| self.toolbar(ui));

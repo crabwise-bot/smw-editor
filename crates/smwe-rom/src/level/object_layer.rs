@@ -107,6 +107,13 @@ impl StandardObject {
     }
 }
 
+impl ExtendedOtherObject {
+    /// Extended object number (byte 2 of the 3-byte instance).
+    pub fn ext_obj_num(&self) -> ExtendedObjectID {
+        self.0[2]
+    }
+}
+
 impl ScreenJumpObject {
     pub fn screen_number(&self) -> u8 {
         // ---HHHHH -------- --------
@@ -157,6 +164,11 @@ impl ObjectLayer {
         let bytes_consumed = input.len() - rest.len();
         let raw_bytes = input[..bytes_consumed].to_vec();
         Ok((rest, (Self { _objects: objects, raw_bytes }, bytes_consumed)))
+    }
+
+    /// Returns the parsed object instances (standard and extended), in ROM order.
+    pub fn objects(&self) -> &[ObjectInstance] {
+        &self._objects
     }
 
     /// Returns the raw bytes of this object layer including the 0xFF terminator.
