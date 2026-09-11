@@ -3857,6 +3857,7 @@ dependencies = [
  "paste",
  "serde",
  "smallvec",
+ "smwe-emu",
  "smwe-render",
  "thiserror 1.0.58",
 ]
