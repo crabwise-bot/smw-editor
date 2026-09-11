@@ -124,6 +124,150 @@ impl FontMap {
     pub fn to_text(&self, bytes: &[u8]) -> String {
         self.to_rows(bytes).join("\n")
     }
+
+    /// Inverse lookup: character → raw message byte (0x00-0x7F).
+    ///
+    /// Returns `None` for characters with no font glyph, including
+    /// [`GRAPHIC_PLACEHOLDER`] (which is preserved positionally from the
+    /// original bytes by [`encode_editable_text`], never mapped to a byte).
+    pub fn byte_for(&self, c: char) -> Option<u8> {
+        self.map.iter().position(|&m| m == Some(c)).map(|i| i as u8)
+    }
+}
+
+/// Placeholder shown in editable message text for bytes with no font-map
+/// entry (non-text graphic tiles such as Yoshi's signature or the bonus-star
+/// icons).
+///
+/// It is U+FFFD REPLACEMENT CHARACTER, deliberately distinct from `'?'`
+/// (which is a real mapped glyph, byte `0x1E`): a typed `'?'` always encodes
+/// to `0x1E`, while `'�'` reuses the original byte at the same cell — but
+/// only if that cell held an unmapped graphic byte in the first place.
+/// Typing `'�'` where the original cell was text/blank is an encode error,
+/// and deleting a `'�'` drops that graphic tile. Graphics can therefore be
+/// preserved in place or removed, but not moved or inserted, via the text
+/// field (the raw byte grid below remains for byte-level surgery).
+pub const GRAPHIC_PLACEHOLDER: char = '�';
+
+/// Decode message bytes to editable text: the 8×18 grid from
+/// [`message_cells`] as 8 lines joined by `'\n'`, with unmapped graphic bytes
+/// shown as [`GRAPHIC_PLACEHOLDER`].
+///
+/// The result round-trips through [`encode_editable_text`] byte-exactly when
+/// left unedited (each vanilla message's 8 bit-7 row terminators are
+/// regenerated from the row structure).
+pub fn decode_editable_text(map: &FontMap, bytes: &[u8]) -> String {
+    message_cells(bytes)
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&b| map.char_for(b).unwrap_or(GRAPHIC_PLACEHOLDER))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Encode edited message text back to raw message bytes.
+///
+/// `text` is up to 8 lines (excess lines are an error); each line holds up to
+/// 18 characters (longer lines are an error — the game only draws 18 cells
+/// per row). `\n` in the text is the line-break representation; there are no
+/// other control codes (the real `CODE_05B208` has none — see module docs).
+///
+/// Encoding inverts the row-fill: trailing spaces of each row are dropped and
+/// the last content byte gets bit 7 set ("fill the remainder of this row
+/// with `$1F` blanks"); a fully blank row encodes to a single `0x9F` byte,
+/// matching the vanilla pattern of one bit-7 row terminator per row.
+///
+/// `original` is the message's current bytes, used only to preserve graphic
+/// tiles: a [`GRAPHIC_PLACEHOLDER`] at cell (r, c) reuses the original
+/// emitted cell's byte, which must itself be unmapped. Any other unmappable
+/// character is an error.
+///
+/// This enforces the *encoding* only, not the size budget — use
+/// [`encode_message_checked`] to also enforce a message's byte budget.
+pub fn encode_editable_text(map: &FontMap, original: &[u8], text: &str) -> anyhow::Result<Vec<u8>> {
+    let old_cells = message_cells(original);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() > 8 {
+        anyhow::bail!(
+            "message text has {} lines; the game draws exactly 8 rows",
+            lines.len()
+        );
+    }
+    let mut out = Vec::new();
+    for r in 0..8 {
+        let line = lines.get(r).copied().unwrap_or("");
+        let chars: Vec<char> = line.chars().collect();
+        if chars.len() > 18 {
+            anyhow::bail!(
+                "line {} has {} characters; the game draws 18 cells per row",
+                r + 1,
+                chars.len()
+            );
+        }
+        match chars.iter().rposition(|&c| c != ' ') {
+            None => {
+                // Fully blank row: one space byte with the row-fill flag,
+                // exactly the vanilla pattern (verified: every vanilla
+                // message has 8 bit-7 bytes, one per row).
+                out.push(0x9F);
+            }
+            Some(last) => {
+                for (c_idx, &c) in chars[..=last].iter().enumerate() {
+                    let byte = match map.byte_for(c) {
+                        Some(b) => b,
+                        None if c == GRAPHIC_PLACEHOLDER => {
+                            let ob = old_cells[r][c_idx];
+                            if map.char_for(ob).is_none() {
+                                ob
+                            } else {
+                                anyhow::bail!(
+                                    "line {} col {}: '�' has no graphic tile to preserve here \
+                                     (original cell was text/blank)",
+                                    r + 1,
+                                    c_idx + 1
+                                );
+                            }
+                        }
+                        None => anyhow::bail!(
+                            "line {} col {}: character {c:?} has no message-font glyph",
+                            r + 1,
+                            c_idx + 1
+                        ),
+                    };
+                    out.push(byte);
+                }
+                // Bit 7 on the last content byte: fill the rest of the row
+                // with $1F blanks (the real CODE_05B208 semantics).
+                let last_byte = out.last_mut().expect("non-empty row pushed no bytes");
+                *last_byte |= 0x80;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`encode_editable_text`] plus the per-message byte-budget check: the
+/// encoded bytes must fit within `budget` (the message's vanilla length —
+/// the combined 22-message blob isn't repointable, so no single message may
+/// grow past what it originally occupied).
+pub fn encode_message_checked(
+    map: &FontMap,
+    original: &[u8],
+    budget: usize,
+    text: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let bytes = encode_editable_text(map, original, text)?;
+    if bytes.len() > budget {
+        anyhow::bail!(
+            "encoded text is {} bytes, over this message's {}-byte budget",
+            bytes.len(),
+            budget
+        );
+    }
+    Ok(bytes)
 }
 
 /// Derive a [`FontMap`] from `(byte sequence, expected 8×18 text rows)` pairs.
@@ -337,5 +481,121 @@ mod tests {
         let map = derive_font_map(&[]).unwrap();
         assert_eq!(map.char_for(0x00), None);
         assert_eq!(map.to_rows(&[0x00])[0].chars().next().unwrap(), '?');
+    }
+
+    #[test]
+    fn byte_for_inverts_char_for_for_every_mapped_byte() {
+        // The real map must be 1:1 so typed text encodes deterministically.
+        let map = FontMap::real();
+        for b in 0u8..128 {
+            if let Some(c) = map.char_for(b) {
+                assert_eq!(map.byte_for(c), Some(b), "char {c:?} (byte {b:#04X}) is not 1:1");
+            }
+        }
+        // '?' is a real glyph (0x1E), distinct from the graphic placeholder.
+        assert_eq!(map.byte_for('?'), Some(0x1E));
+        assert_eq!(map.byte_for(GRAPHIC_PLACEHOLDER), None);
+    }
+
+    const EDIT_PAD: &str = "                  "; // 18 spaces
+
+    fn edit_text_row0(row0: &str) -> String {
+        let mut s = String::from(row0);
+        for _ in 1..8 {
+            s.push('\n');
+            s.push_str(EDIT_PAD);
+        }
+        s
+    }
+
+    #[test]
+    fn editable_round_trip_is_byte_exact() {
+        let map = FontMap::real();
+        // Row 0: 'A','B'+fill; rows 1-7: blank (0x9F each) — vanilla shape:
+        // one bit-7 row terminator per row.
+        let bytes: Vec<u8> = vec![0x00, 0x81, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F];
+        let text = decode_editable_text(&map, &bytes);
+        assert_eq!(text, edit_text_row0("AB                "));
+        let back = encode_editable_text(&map, &bytes, &text).unwrap();
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn editable_encode_drops_trailing_spaces_and_sets_bit7() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        let back = encode_editable_text(&map, &original, &edit_text_row0("Hi")).unwrap();
+        // "Hi" -> [0x07, 0x48|0x80]; 7 blank rows -> 7 × 0x9F.
+        assert_eq!(&back[..2], &[0x07, 0xC8]);
+        assert_eq!(&back[2..], &[0x9F; 7]);
+        // ... and it decodes back to the same text.
+        assert_eq!(decode_editable_text(&map, &back), edit_text_row0("Hi                "));
+    }
+
+    #[test]
+    fn editable_encode_rejects_long_lines() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        let text = edit_text_row0(&"A".repeat(19));
+        let err = encode_editable_text(&map, &original, &text).unwrap_err();
+        assert!(err.to_string().contains("18 cells"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn editable_encode_rejects_too_many_lines() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        let text = (0..9).map(|_| "x").collect::<Vec<_>>().join("\n");
+        let err = encode_editable_text(&map, &original, &text).unwrap_err();
+        assert!(err.to_string().contains("8 rows"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn editable_encode_rejects_unknown_characters() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        let err = encode_editable_text(&map, &original, &edit_text_row0("#nope")).unwrap_err();
+        assert!(err.to_string().contains("no message-font glyph"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn editable_placeholder_preserves_graphic_byte_in_place() {
+        let map = FontMap::real();
+        // 0x60 is an unmapped graphic tile; 0xE0 = graphic + row-fill flag.
+        let bytes: Vec<u8> = vec![0x00, 0xE0, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F];
+        let text = decode_editable_text(&map, &bytes);
+        assert!(text.starts_with("A�"), "graphic byte must decode as placeholder: {text:?}");
+        let back = encode_editable_text(&map, &bytes, &text).unwrap();
+        assert_eq!(back, bytes, "placeholder must reuse the original graphic byte");
+    }
+
+    #[test]
+    fn editable_placeholder_without_original_graphic_is_an_error() {
+        let map = FontMap::real();
+        // Original row 0 is "AB"+fill — no graphic at col 2.
+        let bytes: Vec<u8> = vec![0x00, 0x81, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F, 0x9F];
+        let err = encode_editable_text(&map, &bytes, &edit_text_row0("A�                ")).unwrap_err();
+        assert!(err.to_string().contains("no graphic tile to preserve"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn editable_typed_question_mark_is_the_real_glyph() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        // Typed '?' must encode to 0x1E (the real glyph), never to a graphic.
+        let back = encode_editable_text(&map, &original, &edit_text_row0("?")).unwrap();
+        assert_eq!(back[0], 0x1E | 0x80);
+    }
+
+    #[test]
+    fn encode_message_checked_enforces_the_byte_budget() {
+        let map = FontMap::real();
+        let original = vec![0x9F; 8];
+        let text = edit_text_row0("Hello");
+        // "Hello" encodes to 5 bytes + 7 blank rows = 12 bytes.
+        let ok = encode_message_checked(&map, &original, 12, &text).unwrap();
+        assert_eq!(ok.len(), 12);
+        let err = encode_message_checked(&map, &original, 11, &text).unwrap_err();
+        assert!(err.to_string().contains("over this message's 11-byte budget"), "unexpected error: {err}");
     }
 }

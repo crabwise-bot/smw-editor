@@ -14,8 +14,9 @@ found by grep," not proven absent — re-verify with a grep/read before relying
 on a row for planning if it's been a while since the file was touched. Missing
 areas not yet cross-checked in depth: overworld animated tiles/indicator
 sprites, layer 3 "tide"/water settings across levels, direct Map16
-import/export file format, ROM search/analysis tools (e.g. "find levels using
-X"), and player (Mario/Yoshi) graphics customization.
+import/export file format, and player (Mario/Yoshi) graphics customization.
+(ROM search/analysis is now covered: PR #4 added ROM-wide cross-reference
+search — "find all references" for sprites, objects, tiles, music, and exits.)
 
 ## Level Editing
 
@@ -30,7 +31,7 @@ X"), and player (Mario/Yoshi) graphics customization.
 | Layer 2/3 background editing | 🟡 | `background_layer.rs` minimal (~510 bytes); L2 header copied verbatim, not user-editable (`level_editor/mod.rs:342`) |
 | Music selection | 🟡 | Raw nibble slider only, no track-name mapping |
 | Custom level names (overworld name table) | ⛔ | Not found |
-| Message box / dialog text editor | 🟡 | `crates/smwe-rom/src/message_boxes.rs` + `level_editor/message_editor.rs` — edits all 22 vanilla messages as raw font-tile-index bytes (0x00-0x7F), verified against real ROM (exact byte boundaries derived from `symbols/SMW_U.sym` label addresses, cross-checked: total size matches the ROM's already-100%-utilized 2854-byte budget exactly). No WYSIWYG readable-text preview yet — the message font's GFX source (drawn via Layer 3 "dynamic stripe image") hasn't been identified, so bytes are edited as raw tile indices, not typed letters |
+| Message box / dialog text editor | ✅ | `crates/smwe-rom/src/message_boxes.rs` + `level_editor/message_editor.rs` — all 22 vanilla messages, verified against real ROM (exact byte boundaries derived from `symbols/SMW_U.sym` label addresses; total size matches the ROM's already-100%-utilized 2854-byte budget exactly). PR #5 added a read-only WYSIWYG preview: true GFX2A message font rasterization (SNES $0BCB7B, 2bpp, 128 tiles) plus a `CODE_05B1BC` stripe capture, shown as an 8×18 raster per message, validated against the real ROM. Phase 2 (this PR) made the text itself editable: a multiline field shows decoded text (`\n` = line break; the real routine has no other control codes) and typing re-encodes to tile bytes live, with per-message byte-budget enforcement (`used / budget`, over-budget input refused, not truncated). Non-text graphic tiles (Yoshi's signature, bonus-star icons) show as `�` and are preserved in place. Decode→encode round-trips all 22 vanilla messages byte-exactly |
 | Import/export level as `.mwl` | ⛔ | Not found |
 | Move/resize via drag handles (LM-style) | ⛔ | Object editing exists but unclear if drag-resize UX matches LM |
 
