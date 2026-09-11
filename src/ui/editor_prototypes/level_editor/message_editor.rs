@@ -1,41 +1,55 @@
+use std::sync::Arc;
+
 use egui::{Context, ScrollArea, Slider};
-use smwe_rom::font_map::FontMap;
-use smwe_rom::message_boxes::{MESSAGE_BOXES_MAX_SIZE, MESSAGE_NAMES};
+use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
+use smwe_rom::font_map::{decode_editable_text, encode_message_checked, FontMap};
+use smwe_rom::message_boxes::{
+    pointer_slot_for_message, MESSAGE_BOXES_MAX_SIZE, MESSAGE_BOXES_SNES, MESSAGE_NAMES,
+    MESSAGE_POINTER_COUNT, MESSAGE_POINTER_TABLE_SNES,
+};
+use smwe_rom::snes_utils::addr::{AddrPc, AddrSnes};
 
 use super::UiLevelEditor;
 
-/// Editor for SMW's vanilla message box text: 22 global messages, each a
-/// sequence of raw font-tile-index bytes (0x00-0xFF). Bit 7 set means "fill
-/// the remainder of this 18-cell row with blanks" (per `CODE_05B208` in
-/// bank_05.asm; see `smwe_rom::font_map` for the exact row-fill semantics).
+/// Editor for SMW's vanilla message box text: 22 global messages.
 ///
-/// The read-only preview pane at the bottom shows:
-/// 1. Readable text (8 rows × 18 cells) via the real SMW (U) font map
-///    (`FontMap::real()`, verified 2026-09-10 by running all 22 messages
-///    through the genuine `CODE_05B1BC`).
-/// 2. Stripe info: runs the selected message through the REAL game routine
-///    (`CODE_05B1BC`) on a scratch CPU clone and captures the dynamic stripe
-///    image (8 rows × 18 tile words, `$39TT`).
+/// Phase 2 (editable text): each message shows a multiline text field with
+/// the decoded text — type real characters and the field re-encodes to
+/// font-tile-index bytes live. `\n` is the line-break representation (8 rows
+/// × 18 cells, matching the game's message window); there are no other
+/// control codes because the real `CODE_05B208` has none.
 ///
-/// Pixel rasterization uses the real message font graphics: GFX2A
-/// ("Message Box Letters", SNES $0BCB7B, 2bpp, 128 tiles), decompressed from
-/// the ROM and rendered with the message palette.
-/// The text preview above is genuine and verified.
+/// Byte↔character mapping is the real SMW (U) font map (`FontMap::real()`,
+/// verified 2026-09-10 by running all 22 messages through the genuine
+/// `CODE_05B1BC`). Bytes with no font glyph (non-text graphic tiles such as
+/// Yoshi's signature or the bonus-star icons) show as `�` (U+FFFD): leave
+/// the placeholder in place to keep the graphic, delete it to drop it.
+/// Graphics can't be moved or inserted via the text field — the raw byte grid
+/// below remains for byte-level surgery.
 ///
-/// Edits are global (every level shares the same 22 messages) and size-
-/// constrained: the vanilla ROM already uses the full byte budget, so making
-/// one message longer requires shrinking another (see
-/// `smwe_rom::message_boxes` module docs for why this data isn't repointable).
+/// Size constraint: the 22-message blob isn't repointable (addressed directly
+/// by ASM), so each message's encoded text must fit within its vanilla byte
+/// span. The field shows `used / budget` bytes and refuses over-budget input
+/// with an explanatory message instead of silently truncating.
+///
+/// The raster preview below the text field is live: it re-renders from the
+/// current bytes with the real GFX2A message-font graphics on every edit.
+/// The `CODE_05B1BC` readout also re-runs on every edit — the edited bytes
+/// are patched into a scratch ROM image (message blob + recomputed pointer
+/// table, exactly what saving would write) so it shows what the game will
+/// actually render.
 impl UiLevelEditor {
     pub(super) fn message_editor_window(&mut self, ctx: &Context) {
         if !self.show_message_editor {
             return;
         }
         let mut open = self.show_message_editor;
-        egui::Window::new("Message Box Editor").open(&mut open).resizable(true).default_size([520.0, 520.0]).show(
-            ctx,
-            |ui| {
-                ui.label("Raw font-tile-index bytes (0x00-0xFF). Bit 7 = fill rest of row with blanks.");
+        egui::Window::new("Message Box Editor")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([560.0, 700.0])
+            .show(ctx, |ui| {
+                ui.label("Type real text — it encodes to font-tile bytes live. 8 rows × 18 cells; longer lines are rejected.");
                 let total = self.message_boxes.total_size();
                 let over_budget = total > MESSAGE_BOXES_MAX_SIZE;
                 let color = if over_budget {
@@ -54,7 +68,7 @@ impl UiLevelEditor {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    ScrollArea::vertical().max_height(300.0).id_salt("message_list").show(ui, |ui| {
+                    ScrollArea::vertical().max_height(340.0).id_salt("message_list").show(ui, |ui| {
                         for (i, name) in MESSAGE_NAMES.iter().enumerate() {
                             let label = format!("{name} ({} B)", self.message_boxes.messages[i].len());
                             ui.selectable_value(&mut self.message_editor_selected, i, label);
@@ -65,72 +79,72 @@ impl UiLevelEditor {
 
                     ui.vertical(|ui| {
                         let i = self.message_editor_selected;
+                        let map = FontMap::real();
                         ui.label(format!("Editing: {}", MESSAGE_NAMES[i]));
 
-                        ui.horizontal(|ui| {
-                            if ui.button("+ Byte").clicked() {
-                                self.message_boxes.messages[i].push(0x1F); // 0x1F = vanilla space code
-                                self.message_boxes_dirty = true;
-                                self.has_edits = true;
-                            }
-                            if ui.button("- Byte").clicked() && !self.message_boxes.messages[i].is_empty() {
-                                self.message_boxes.messages[i].pop();
-                                self.message_boxes_dirty = true;
-                                self.has_edits = true;
-                            }
-                        });
+                        // Keep the text buffer synced: a selection change, or
+                        // an edit via the raw byte grid below, re-decodes it.
+                        let cur_hash = byte_hash(&self.message_boxes.messages[i]);
+                        if self.message_text_for != Some(i) || cur_hash != self.message_text_bytes_hash
+                        {
+                            self.message_text_edit =
+                                decode_editable_text(&map, &self.message_boxes.messages[i]);
+                            self.message_text_for = Some(i);
+                            self.message_text_bytes_hash = cur_hash;
+                            self.message_text_error = None;
+                        }
 
-                        ScrollArea::vertical().max_height(300.0).id_salt("message_bytes").show(ui, |ui| {
-                            egui::Grid::new("message_byte_grid").num_columns(8).spacing([4.0, 4.0]).show(ui, |ui| {
-                                let mut changed = false;
-                                for (byte_i, byte) in self.message_boxes.messages[i].iter_mut().enumerate() {
-                                    let mut v = *byte as i32;
-                                    if ui.add(Slider::new(&mut v, 0..=0xFF).hexadecimal(2, false, false)).changed() {
-                                        *byte = v as u8;
-                                        changed = true;
-                                    }
-                                    if (byte_i + 1) % 8 == 0 {
-                                        ui.end_row();
-                                    }
-                                }
-                                if changed {
+                        let budget = self.message_budgets[i];
+                        let used = self.message_boxes.messages[i].len();
+                        let budget_color = if self.message_text_error.is_some() || used > budget {
+                            egui::Color32::from_rgb(220, 60, 60)
+                        } else {
+                            ui.style().visuals.text_color()
+                        };
+                        ui.colored_label(budget_color, format!("Text encodes to {used} / {budget} bytes"));
+                        ui.small("'�' marks a graphic tile: keep it in place to preserve the graphic, delete it to drop it.");
+
+                        let text_resp = ui.add(
+                            egui::TextEdit::multiline(&mut self.message_text_edit)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if text_resp.changed() {
+                            let original = self.message_boxes.messages[i].clone();
+                            match encode_message_checked(&map, &original, budget, &self.message_text_edit)
+                            {
+                                Ok(bytes) => {
+                                    self.message_boxes.messages[i] = bytes;
+                                    self.message_text_bytes_hash =
+                                        byte_hash(&self.message_boxes.messages[i]);
+                                    self.message_text_error = None;
                                     self.message_boxes_dirty = true;
                                     self.has_edits = true;
                                 }
-                            });
-                        });
+                                Err(e) => {
+                                    self.message_text_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                        if let Some(err) = self.message_text_error.as_ref() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err.as_str());
+                        }
 
                         ui.separator();
-                        ui.label("Preview (read-only, 8×18)");
-
-                        // Readable-text preview via the real SMW (U) font map.
-                        // Verified 2026-09-10: all 22 vanilla messages run
-                        // through the genuine CODE_05B1BC produce readable
-                        // 8×18 text via this map.
-                        let real_map = FontMap::real();
-                        let rows = real_map.to_rows(&self.message_boxes.messages[i]);
-                        // Monospace for aligned 18-column rows.
-                        let mono = egui::TextStyle::Monospace;
-                        for row in rows.iter() {
-                            ui.label(egui::RichText::new(row).text_style(mono.clone()));
-                        }
+                        ui.label("Preview (live, 8×18)");
 
                         // True raster preview: decompress GFX2A ("Message Box
                         // Letters") once, rasterize the 8×18 grid with the real
-                        // SMW font graphics, and display it. The cache key
-                        // includes a hash of the message bytes so edits
-                        // invalidate and rebuild the preview.
+                        // SMW font graphics. The cache key includes a hash of
+                        // the message bytes so typing rebuilds the preview.
                         if self.message_font.is_none() {
                             self.message_font =
                                 smwe_rom::message_raster::decompress_message_font(&self.rom.rom).ok();
                         }
                         if let Some(font) = &self.message_font {
                             let msg_bytes = &self.message_boxes.messages[i];
-                            // Simple hash for cache invalidation.
-                            let mut hash: u64 = 0;
-                            for &b in msg_bytes {
-                                hash = hash.wrapping_mul(31).wrapping_add(b as u64);
-                            }
+                            let hash = byte_hash(msg_bytes);
                             if self.message_raster_for != Some((i, hash)) {
                                 let cells = smwe_rom::font_map::message_cells(msg_bytes);
                                 let img = smwe_rom::message_raster::rasterize_message(cells, font);
@@ -158,28 +172,113 @@ impl UiLevelEditor {
                             }
                         }
 
-                        // Pixel preview: run the real CODE_05B1BC on a scratch CPU
-                        // clone and capture the dynamic stripe image it appends
-                        // to WRAM. The stripe is rasterized below with the real
-                        // GFX2A message-font graphics.
-                        let slot = smwe_rom::message_boxes::pointer_slot_for_message(i);
-                        if self.message_preview_for != Some(i) {
-                            let mut scratch = self.cpu.clone();
-                            self.message_preview =
-                                Some(smwe_emu::emu::render_message(&mut scratch, slot));
-                            self.message_preview_for = Some(i);
+                        // Live game-routine check: patch the CURRENT bytes
+                        // into a scratch ROM image (message blob + recomputed
+                        // pointer table — exactly what saving writes) and run
+                        // the real CODE_05B1BC, so this reflects the edited
+                        // text, not the vanilla bytes.
+                        let slot = pointer_slot_for_message(i);
+                        let stripe_hash = byte_hash(&self.message_boxes.messages[i]);
+                        if self.message_preview_for != Some((i, stripe_hash)) {
+                            if let Ok((blob, pointers)) = self.message_boxes.to_blob_and_pointers() {
+                                let mut patched = self.cpu.mem.cart.as_slice().to_vec();
+                                let base = snes_to_pc(MESSAGE_BOXES_SNES);
+                                let tab = snes_to_pc(MESSAGE_POINTER_TABLE_SNES);
+                                if base + blob.len() <= patched.len()
+                                    && tab + 2 * MESSAGE_POINTER_COUNT <= patched.len()
+                                {
+                                    patched[base..base + blob.len()].copy_from_slice(&blob);
+                                    for (s, p) in pointers.iter().enumerate() {
+                                        patched[tab + 2 * s..tab + 2 * s + 2]
+                                            .copy_from_slice(&p.to_le_bytes());
+                                    }
+                                    let mut emu_rom = EmuRom::new(patched);
+                                    emu_rom.load_symbols(include_str!(
+                                        "../../../../symbols/SMW_U.sym"
+                                    ));
+                                    let mut scratch =
+                                        Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
+                                    self.message_preview =
+                                        Some(smwe_emu::emu::render_message(&mut scratch, slot));
+                                    self.message_preview_for = Some((i, stripe_hash));
+                                }
+                            }
                         }
                         if let Some(stripe) = &self.message_preview {
                             ui.small(format!(
-                                "CODE_05B1BC ran ({} cycles): {} stripe bytes (8 rows × 18 tiles).",
+                                "CODE_05B1BC on edited bytes ({} cycles): {} stripe bytes (8 rows × 18 tiles).",
                                 stripe.cycles,
                                 stripe.stripe.len()
                             ));
                         }
+
+                        ui.separator();
+                        ui.collapsing("Raw bytes (advanced)", |ui| {
+                            ui.small("Direct byte surgery. The text field above re-decodes from these bytes.");
+                            ui.horizontal(|ui| {
+                                if ui.button("+ Byte").clicked() {
+                                    self.message_boxes.messages[i].push(0x1F); // 0x1F = vanilla space code
+                                    self.message_boxes_dirty = true;
+                                    self.has_edits = true;
+                                }
+                                if ui.button("- Byte").clicked()
+                                    && !self.message_boxes.messages[i].is_empty()
+                                {
+                                    self.message_boxes.messages[i].pop();
+                                    self.message_boxes_dirty = true;
+                                    self.has_edits = true;
+                                }
+                            });
+
+                            ScrollArea::vertical()
+                                .max_height(200.0)
+                                .id_salt("message_bytes")
+                                .show(ui, |ui| {
+                                    egui::Grid::new("message_byte_grid")
+                                        .num_columns(8)
+                                        .spacing([4.0, 4.0])
+                                        .show(ui, |ui| {
+                                            let mut changed = false;
+                                            for (byte_i, byte) in
+                                                self.message_boxes.messages[i].iter_mut().enumerate()
+                                            {
+                                                let mut v = *byte as i32;
+                                                if ui
+                                                    .add(Slider::new(&mut v, 0..=0xFF).hexadecimal(2, false, false))
+                                                    .changed()
+                                                {
+                                                    *byte = v as u8;
+                                                    changed = true;
+                                                }
+                                                if (byte_i + 1) % 8 == 0 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                            if changed {
+                                                self.message_boxes_dirty = true;
+                                                self.has_edits = true;
+                                            }
+                                        });
+                                });
+                        });
                     });
                 });
             },
         );
         self.show_message_editor = open;
     }
+}
+
+/// Simple byte hash for preview-cache invalidation.
+fn byte_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0;
+    for &b in bytes {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    hash
+}
+
+/// LoROM SNES address → file offset, for patching the scratch CPU's ROM.
+fn snes_to_pc(snes: AddrSnes) -> usize {
+    AddrPc::try_from_lorom(snes).expect("message box SNES address").0 as usize
 }

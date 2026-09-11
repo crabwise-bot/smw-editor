@@ -156,15 +156,31 @@ pub struct UiLevelEditor {
     show_message_editor: bool,
     message_editor_selected: usize,
     /// Cached `CODE_05B1BC` stripe capture for the selected message, run on a
-    /// scratch CPU clone. Read-only preview; the text uses `FontMap::real()`.
+    /// scratch CPU clone. Preview; the text uses `FontMap::real()`.
     message_preview: Option<smwe_emu::emu::MessageStripe>,
-    message_preview_for: Option<usize>,
+    /// (message index, byte-hash) the stripe capture was built for.
+    message_preview_for: Option<(usize, u64)>,
     /// Cached decompressed GFX2A message font (128 2bpp tiles) for raster preview.
     message_font: Option<Vec<Box<[u8]>>>,
     /// Cached raster texture for the selected message's 8×18 grid.
     message_raster_texture: Option<egui::TextureHandle>,
     /// (message index, byte-hash) the raster texture was built for.
     message_raster_for: Option<(usize, u64)>,
+    /// Per-message byte budgets for the editable text field: each message's
+    /// vanilla length, captured at load. The 22-message blob isn't
+    /// repointable, so no message may grow past its original span.
+    message_budgets: Vec<usize>,
+    /// Editable-text buffer for the selected message (decoded via
+    /// `font_map::decode_editable_text`; `\n` = line break).
+    message_text_edit: String,
+    /// Which message `message_text_edit` is synced to.
+    message_text_for: Option<usize>,
+    /// Hash of the message bytes the text buffer was last synced from (or
+    /// successfully applied to); a mismatch means the raw byte grid changed
+    /// the bytes and the text must be re-decoded.
+    message_text_bytes_hash: u64,
+    /// Last text→bytes encode failure, shown under the text field.
+    message_text_error: Option<String>,
     /// ROM-wide cross-reference search ("find all references") window.
     show_xref_search: bool,
     xref_search: XrefSearchState,
@@ -188,6 +204,10 @@ impl UiLevelEditor {
         let cpu = smwe_emu::Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
         let sprite_tweakers = rom.sprite_tweakers.clone();
         let message_boxes = rom.message_boxes.clone();
+        // Per-message byte budgets for the editable text field: each
+        // message's vanilla length at load. The blob isn't repointable, so
+        // text edits may not grow a message past its original span.
+        let message_budgets: Vec<usize> = message_boxes.messages.iter().map(Vec::len).collect();
         let title_credits = rom.title_credits.clone();
 
         let mut editor = Self {
@@ -267,6 +287,11 @@ impl UiLevelEditor {
             message_font: None,
             message_raster_texture: None,
             message_raster_for: None,
+            message_budgets,
+            message_text_edit: String::new(),
+            message_text_for: None,
+            message_text_bytes_hash: 0,
+            message_text_error: None,
             show_xref_search: false,
             xref_search: XrefSearchState::default(),
             title_credits,

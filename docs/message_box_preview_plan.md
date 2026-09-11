@@ -1,4 +1,8 @@
-# Message Box WYSIWYG Preview — Implementation Plan (Phase 1: read-only)
+# Message Box WYSIWYG Preview — Implementation Plan (Phase 1: read-only, Phase 2: editable text)
+
+**Status 2026-09-10: Phase 1 DONE and merged (PR #5); Phase 2 DONE — this PR.**
+Phase 1's "BLOCKED — no SMW ROM" is resolved: Justin provided his own dump
+(`smw.smc`, kept out of the repo; `ROM_PATH` for tests).
 
 **Status: BLOCKED — no SMW ROM on this machine.** The app exits at startup
 without one (`src/main.rs:41-45`: "No ROM path defined (ROM_PATH not set,
@@ -99,6 +103,55 @@ In `message_editor.rs::message_editor_window`, next to the byte grid:
 ## Explicitly out of scope (Phase 2)
 
 Text→bytes editing (typing readable text). Phase 1 is read-only preview only.
+
+## Phase 2 — Editable text (DONE 2026-09-10)
+
+The message editor now has a multiline text field per message: decoded text
+is shown, typing re-encodes to font-tile bytes live.
+
+**Codec** (`crates/smwe-rom/src/font_map.rs`):
+- `decode_editable_text`: 8×18 grid → 8 `\n`-joined lines. `\n` is the
+  line-break representation; there are no other control codes (the real
+  `CODE_05B208` has none — every source byte is consumed as a tile index).
+- `encode_editable_text`: inverts the row-fill — trailing spaces per row are
+  dropped, the last content byte gets bit 7 (fill rest of row with `$1F`
+  blanks); a fully blank row encodes to one `0x9F` byte, matching the vanilla
+  pattern of one bit-7 terminator per row.
+- `encode_message_checked`: additionally enforces the per-message byte
+  budget (the message's vanilla length — the 22-message blob isn't
+  repointable, so no message may grow past its original span).
+- Non-text graphic tiles (Yoshi's signature `0x60-0x63`, bonus-star icons
+  `0x64`/`0x6B` — the only unmapped bytes in the vanilla set) decode as `�`
+  (U+FFFD), deliberately distinct from `?` (real glyph, `0x1E`): a typed `?`
+  always encodes to `0x1E`, while `�` reuses the original byte at the same
+  cell iff that cell held an unmapped graphic. Graphics can be preserved in
+  place or deleted via the text field, not moved/inserted (raw byte grid
+  remains for that).
+
+**UI** (`src/ui/editor_prototypes/level_editor/message_editor.rs`):
+- Monospace multiline `TextEdit` (8 rows) replaces the read-only text
+  preview; `used / budget` byte counter with red over-budget/error state;
+  encode failures show the message and leave bytes untouched (no silent
+  truncation).
+- Text buffer re-syncs on message selection change and on raw-byte-grid
+  edits (byte-hash comparison).
+- Raster preview is live (cache key already included the byte hash).
+- The `CODE_05B1BC` readout now also re-runs per edit: the current bytes are
+  patched into a scratch ROM image (message blob + recomputed pointer table
+  via `to_blob_and_pointers` — exactly what saving writes) so it shows what
+  the game will render for the edited text.
+- Raw byte sliders moved into a "Raw bytes (advanced)" collapsible.
+
+**Tests:** 11 new `font_map` unit tests (codec round-trips, 1:1 map check,
+rejection paths, placeholder rules, budget enforcement); real-ROM ignored
+test `real_rom_editable_round_trip` — all 22 vanilla messages decode →
+re-encode byte-exactly.
+
+**Screenshot:** `docs/screenshots/message-edit.png` via the new
+`render_message_editor` headless binary (egui can't render headless, so the
+window chrome is drawn; text, byte counts, and rasters are real ROM output
+from the editor's code paths). Shows Intro before/after a typed edit plus a
+real rejection message.
 
 ## Addendum 2026-09-10: disassembly findings (SMWDisX now available)
 

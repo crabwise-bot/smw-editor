@@ -268,6 +268,44 @@ mod real_rom_tests {
         println!("pointers: {pointers:?}");
     }
 
+    /// Verifies the Phase 2 editable-text codec against the real ROM: every
+    /// vanilla message must decode to editable text and re-encode
+    /// byte-exactly (each vanilla message has one bit-7 row terminator per
+    /// row, so the canonical encoder regenerates the original bytes).
+    /// Also reports any unmapped bytes per message (non-text graphic tiles,
+    /// shown as '�' in the editor).
+    ///
+    /// Run with `ROM_PATH=/path/to/smw.smc cargo test -p smwe-rom --lib
+    /// -- --ignored real_rom_editable_round_trip -- --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_rom_editable_round_trip() {
+        use crate::font_map::{decode_editable_text, encode_editable_text, FontMap};
+        let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH");
+        let rom = SmwRom::from_file(rom_path).expect("parse ROM");
+        let map = FontMap::real();
+
+        for (i, msg) in rom.message_boxes.messages.iter().enumerate() {
+            let text = decode_editable_text(&map, msg);
+            let back =
+                encode_editable_text(&map, msg, &text).unwrap_or_else(|e| panic!("{}: re-encode failed: {e}", MESSAGE_NAMES[i]));
+            assert_eq!(&back, msg, "{}: editable round-trip is not byte-exact", MESSAGE_NAMES[i]);
+
+            // Report unmapped (graphic) bytes for the human-readable log.
+            let mut unmapped: Vec<u8> = msg
+                .iter()
+                .map(|b| b & 0x7F)
+                .filter(|b| map.char_for(*b).is_none())
+                .collect();
+            unmapped.sort_unstable();
+            unmapped.dedup();
+            println!("{:24} {:3} bytes  unmapped: {:02X?}", MESSAGE_NAMES[i], msg.len(), unmapped);
+            println!("---");
+            println!("{text}");
+            println!("---");
+        }
+    }
+
     /// Dumps all 22 messages' raw bytes in exactly the tuple format consumed
     /// by `smwe_rom::font_map::derive_font_map`, so the TRUE font map can be
     /// completed the moment a real ROM is available: pair each dumped byte
