@@ -265,9 +265,13 @@ impl UiWorldEditor {
         let source_layer1_tiles = rom.overworld.layer1_tiles.clone();
         let edit_state =
             UndoableData::new(OverworldEditState { layer1_tiles: source_layer1_tiles, layer2_words: Vec::new() });
-        // Decode vanilla level names before `rom` is moved into the struct.
+        // Decode level names before `rom` is moved into the struct.
+        // A ROM saved with custom names has the relocation patch applied,
+        // so decode from the patched tables when detected; otherwise the
+        // old vanilla table space (now string pool) would decode as garbage.
+        let patched = smwe_rom::overworld::level_names::is_patch_applied(rom.rom_bytes(), 0);
         let vanilla_level_names =
-            smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false).unwrap_or_default();
+            smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, patched).unwrap_or_default();
         let mut editor = Self {
             gl,
             rom,
@@ -838,9 +842,7 @@ impl UiWorldEditor {
                                 if resp.changed() {
                                     use smwe_rom::overworld::level_names as ln;
                                     let trimmed = self.level_name_edit.trim().to_string();
-                                    if trimmed.is_empty()
-                                        || trimmed.to_uppercase() == vanilla_name.to_uppercase()
-                                    {
+                                    if trimmed.is_empty() || trimmed.to_uppercase() == vanilla_name.to_uppercase() {
                                         self.custom_level_names.remove(&translevel_u8);
                                         self.level_name_error = None;
                                         self.level_names_dirty = true;
@@ -848,8 +850,7 @@ impl UiWorldEditor {
                                     } else {
                                         match ln::check_name(&trimmed) {
                                             Ok(normalized) => {
-                                                self.custom_level_names
-                                                    .insert(translevel_u8, normalized);
+                                                self.custom_level_names.insert(translevel_u8, normalized);
                                                 self.level_name_error = None;
                                                 self.level_names_dirty = true;
                                                 self.has_edits = true;
@@ -871,9 +872,7 @@ impl UiWorldEditor {
                             {
                                 use smwe_rom::overworld::level_names as ln;
                                 let used = self.level_name_edit.trim().chars().count();
-                                let budget_color = if self.level_name_error.is_some()
-                                    || used > ln::MAX_NAME_CHARS
-                                {
+                                let budget_color = if self.level_name_error.is_some() || used > ln::MAX_NAME_CHARS {
                                     egui::Color32::from_rgb(220, 60, 60)
                                 } else {
                                     ui.style().visuals.text_color()
