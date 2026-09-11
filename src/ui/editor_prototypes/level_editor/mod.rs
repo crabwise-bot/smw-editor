@@ -36,7 +36,7 @@ use smwe_emu::{
 use smwe_rom::{
     compression::{lc_lz2, lc_rle1},
     graphics::gfx_file,
-    level::{Layer2Data, Level, PRIMARY_HEADER_SIZE},
+    level::{Layer2Data, Level, LAYER2_HEADER_SIZE, PRIMARY_HEADER_SIZE},
     snes_utils::addr::{AddrPc, AddrSnes},
     SmwRom,
 };
@@ -458,20 +458,21 @@ impl DockableEditorTool for UiLevelEditor {
                 read_u24(rom_bytes, ptr_off).ok_or_else(|| anyhow::anyhow!("L2 pointer table out of range"))?;
 
             match (&level.layer2, &self.layer2_objects, &self.layer2_background) {
-                (Layer2Data::Objects(objects), Some(layer2), _) => {
+                (Layer2Data::Objects { objects, .. }, Some(layer2), _) => {
                     let new_l2 = layer2.read(|l| l.serialize_layer1_bytes(vertical))?;
                     let old_file = AddrPc::try_from_lorom(AddrSnes(l2_raw))?.as_index() + header_offset;
 
-                    // The 5-byte L2 header is not edited; copy it verbatim when repointing.
-                    let old_block = PRIMARY_HEADER_SIZE + objects.as_bytes().len();
-                    let new_block = PRIMARY_HEADER_SIZE + new_l2.len();
+                    // The 5-byte L2 header is user-editable (Level Header
+                    // window); write the edited bytes instead of copying the
+                    // old ones verbatim. The game skips them, so in-place
+                    // edits only change the stored bytes.
+                    let new_l2_header = self.level_properties.layer2_header;
+                    let old_block = LAYER2_HEADER_SIZE + objects.as_bytes().len();
+                    let new_block = LAYER2_HEADER_SIZE + new_l2.len();
 
                     let dest = if new_block <= old_block {
                         old_file
                     } else {
-                        // Save the existing L2 header before erasing.
-                        let mut l2_hdr = [0u8; PRIMARY_HEADER_SIZE];
-                        l2_hdr.copy_from_slice(&rom_bytes[old_file..old_file + PRIMARY_HEADER_SIZE]);
                         let pc = find_free_space(rom_bytes, new_block, 0x008000, header_offset).ok_or_else(|| {
                             anyhow::anyhow!(
                                 "No free space for level {:03X} layer 2 ({} bytes)",
@@ -482,12 +483,11 @@ impl DockableEditorTool for UiLevelEditor {
                         rom_bytes[old_file..old_file + old_block].fill(0xFF);
                         let b = AddrSnes::try_from_lorom(AddrPc(pc as u32))?.0.to_le_bytes();
                         rom_bytes[ptr_off..ptr_off + 3].copy_from_slice(&b[..3]);
-                        let dest_file = pc + header_offset;
-                        rom_bytes[dest_file..dest_file + PRIMARY_HEADER_SIZE].copy_from_slice(&l2_hdr);
-                        dest_file
+                        pc + header_offset
                     };
 
-                    let data_dest = dest + PRIMARY_HEADER_SIZE;
+                    rom_bytes[dest..dest + LAYER2_HEADER_SIZE].copy_from_slice(&new_l2_header);
+                    let data_dest = dest + LAYER2_HEADER_SIZE;
                     rom_bytes[data_dest..data_dest + new_l2.len()].copy_from_slice(&new_l2);
                     if dest == old_file && new_block < old_block {
                         rom_bytes[dest + new_block..dest + old_block].fill(0xFF);
@@ -838,7 +838,7 @@ impl UiLevelEditor {
             self.layer1 = UndoableData::new(layer1);
             self.sprites = UndoableData::new(EditableSpriteLayer::from_level(level));
             match &level.layer2 {
-                Layer2Data::Objects(objects) => {
+                Layer2Data::Objects { objects, .. } => {
                     self.layer2_objects = Some(UndoableData::new(EditableObjectLayer::from_object_layer(
                         objects,
                         level.secondary_header.vertical_level(),

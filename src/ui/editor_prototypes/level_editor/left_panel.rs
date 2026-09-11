@@ -573,6 +573,29 @@ impl UiLevelEditor {
                 row_slider!("BG Initial Pos:", p.bg_initial_pos, 0..=3_i32);
             });
 
+            if self.level_properties.has_layer2 {
+                ui.separator();
+                ui.strong("Layer 2 Header");
+                ui.label(
+                    "5 bytes at the Layer 2 pointer. The game skips them entirely\n\
+                     (SMWDisX bank_05.asm: +5 \"to ignore Layer 2's header\"); they usually\n\
+                     mirror the level's primary header. Edits are written back on save.",
+                )
+                .on_hover_text("Vanilla SMW never reads these bytes; Lunar Magic copies them verbatim.");
+                let p = &mut self.level_properties;
+                egui::Grid::new("l2_header_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                    for (i, byte) in p.layer2_header.iter_mut().enumerate() {
+                        ui.label(format!("Byte {i}:"));
+                        let mut v = *byte as i32;
+                        if ui.add(Slider::new(&mut v, 0..=255_i32).hexadecimal(2, false, false)).changed() {
+                            *byte = v as u8;
+                            changed = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
+
             if changed {
                 self.mark_edited();
             }
