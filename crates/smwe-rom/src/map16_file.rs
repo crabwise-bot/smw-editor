@@ -12,14 +12,6 @@
 //! be imported straight into Lunar Magic's Map16 page import, and vice
 //! versa.
 //!
-//! A multi-page set file (`.s16set`, our own container) holds several pages:
-//!
-//! * bytes 0x00-0x05: signature `S16SET`
-//! * bytes 0x06-0x07: version `u16` (currently 1)
-//! * byte  0x08:      page count `u8`
-//! * bytes 0x09..:    one `(page, tileset)` byte pair per page
-//! * then:            `page_count` × 0x800 raw page bytes
-//!
 //! Page numbers: `0x00`/`0x01` are the foreground pages (tiles 0x000-0x0FF /
 //! 0x100-0x1FF), `0x10`/`0x11` are the two halves of the vanilla background
 //! Map16 table at SNES `$0D9100`. The `tileset` byte selects which of the
@@ -76,11 +68,6 @@ pub const BG_MAP16_TABLE_SNES: u32 = 0x0D9100;
 /// Byte size of the vanilla background Map16 table.
 pub const BG_MAP16_TABLE_BYTES: usize = 0x1000;
 
-/// Signature of the multi-page `.s16set` container.
-pub const SET_SIGNATURE: &[u8; 6] = b"S16SET";
-/// Container format version written by this exporter.
-pub const SET_VERSION: u16 = 1;
-
 /// Human-readable name for a page number.
 pub fn page_name(page: u8) -> &'static str {
     match page {
@@ -109,14 +96,8 @@ pub enum Map16FileError {
     BadPageSize(usize),
     #[error("Map16 tileset {0} out of range (0-4)")]
     BadTileset(usize),
-    #[error("Not a Map16 set file: missing 'S16SET' signature")]
-    BadSignature,
-    #[error("Unsupported Map16 set version {0}")]
-    BadVersion(u16),
-    #[error("Map16 set file is truncated (needed {needed} bytes, have {have})")]
+    #[error("Buffer too small: needed {needed:#X} bytes, have {have:#X}")]
     Truncated { needed: usize, have: usize },
-    #[error("Map16 set holds no pages")]
-    EmptySet,
     #[error("Foreground tile {0:#05X} has no fixed ROM address")]
     NoTileAddress(u16),
     #[error("Invalid SNES address {0:#X}")]
@@ -294,113 +275,6 @@ pub fn import_page(
 }
 
 // -------------------------------------------------------------------------------------------------
-// Multi-page set container
-// -------------------------------------------------------------------------------------------------
-
-/// One page inside a `.s16set` container: page number, tileset variant
-/// (foreground pages only), and the raw 0x800 page bytes.
-#[derive(Debug, Clone)]
-pub struct Map16SetPage {
-    pub page:    u8,
-    pub tileset: u8,
-    pub data:    [u8; MAP16_PAGE_BYTES],
-}
-
-/// A decoded `.s16set` multi-page file.
-#[derive(Debug, Clone, Default)]
-pub struct Map16SetFile {
-    pub pages: Vec<Map16SetPage>,
-}
-
-impl Map16SetFile {
-    /// Decode a set file from its bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Map16FileError> {
-        const HEADER: usize = 9; // signature(6) + version(2) + count(1)
-        if bytes.len() < HEADER || &bytes[0..6] != SET_SIGNATURE {
-            return Err(Map16FileError::BadSignature);
-        }
-        let version = u16::from_le_bytes([bytes[6], bytes[7]]);
-        if version != SET_VERSION {
-            return Err(Map16FileError::BadVersion(version));
-        }
-        let count = bytes[8] as usize;
-        if count == 0 {
-            return Err(Map16FileError::EmptySet);
-        }
-        let table_end = HEADER + count * 2;
-        let needed = table_end + count * MAP16_PAGE_BYTES;
-        if bytes.len() < needed {
-            return Err(Map16FileError::Truncated { needed, have: bytes.len() });
-        }
-        let mut pages = Vec::with_capacity(count);
-        for i in 0..count {
-            let page = bytes[HEADER + i * 2];
-            let tileset = bytes[HEADER + i * 2 + 1];
-            if !page_is_foreground(page) && !matches!(page, PAGE_BG0 | PAGE_BG1) {
-                return Err(Map16FileError::BadPage(page));
-            }
-            if page_is_foreground(page) && tileset as usize >= TILESETS_COUNT {
-                return Err(Map16FileError::BadTileset(tileset as usize));
-            }
-            let start = table_end + i * MAP16_PAGE_BYTES;
-            let mut data = [0u8; MAP16_PAGE_BYTES];
-            data.copy_from_slice(&bytes[start..start + MAP16_PAGE_BYTES]);
-            pages.push(Map16SetPage { page, tileset, data });
-        }
-        Ok(Self { pages })
-    }
-
-    /// Encode this set file to its canonical byte layout.
-    pub fn encode(&self) -> Result<Vec<u8>, Map16FileError> {
-        if self.pages.is_empty() {
-            return Err(Map16FileError::EmptySet);
-        }
-        let mut out = Vec::with_capacity(9 + self.pages.len() * (2 + MAP16_PAGE_BYTES));
-        out.extend_from_slice(SET_SIGNATURE);
-        out.extend_from_slice(&SET_VERSION.to_le_bytes());
-        out.push(self.pages.len() as u8);
-        for p in &self.pages {
-            out.push(p.page);
-            out.push(p.tileset);
-        }
-        for p in &self.pages {
-            out.extend_from_slice(&p.data);
-        }
-        Ok(out)
-    }
-}
-
-/// Export several pages into a set file.
-///
-/// Each entry is `(page, map16_tileset)`; the tileset is ignored for BG
-/// pages.
-pub fn export_set(
-    rom: &SmwRom,
-    pages: &[(u8, usize)],
-) -> Result<Map16SetFile, Map16FileError> {
-    let mut set = Map16SetFile::default();
-    for &(page, tileset) in pages {
-        let data_vec = export_page(rom, page, tileset)?;
-        let mut data = [0u8; MAP16_PAGE_BYTES];
-        data.copy_from_slice(&data_vec);
-        set.pages.push(Map16SetPage { page, tileset: tileset as u8, data });
-    }
-    Ok(set)
-}
-
-/// Import every page of a set file into the ROM.
-pub fn import_set(
-    rom_bytes: &mut [u8],
-    set: &Map16SetFile,
-    header_offset: usize,
-) -> Result<(), Map16FileError> {
-    for p in &set.pages {
-        import_page(rom_bytes, p.page, p.tileset as usize, &p.data, header_offset)?;
-    }
-    Ok(())
-}
-
-// -------------------------------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------------------------------
 
@@ -431,35 +305,6 @@ mod tests {
     #[test]
     fn page_rejects_wrong_size() {
         assert!(matches!(parse_page(&[0u8; 100]), Err(Map16FileError::BadPageSize(100))));
-    }
-
-    #[test]
-    fn set_container_round_trip() {
-        let pages = vec![
-            Map16SetPage { page: PAGE_FG0, tileset: 0, data: [0x11; MAP16_PAGE_BYTES] },
-            Map16SetPage { page: PAGE_FG1, tileset: 2, data: [0x22; MAP16_PAGE_BYTES] },
-            Map16SetPage { page: PAGE_BG0, tileset: 0, data: [0x33; MAP16_PAGE_BYTES] },
-        ];
-        let set = Map16SetFile { pages };
-        let bytes = set.encode().unwrap();
-        assert_eq!(&bytes[0..6], b"S16SET");
-        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), SET_VERSION);
-        let back = Map16SetFile::decode(&bytes).unwrap();
-        assert_eq!(back.pages.len(), 3);
-        assert_eq!(back.pages[0].page, PAGE_FG0);
-        assert_eq!(back.pages[1].tileset, 2);
-        assert_eq!(back.pages[2].data[0], 0x33);
-    }
-
-    #[test]
-    fn set_rejects_bad_signature() {
-        let mut bytes = Map16SetFile {
-            pages: vec![Map16SetPage { page: PAGE_FG0, tileset: 0, data: [0; MAP16_PAGE_BYTES] }],
-        }
-        .encode()
-        .unwrap();
-        bytes[0] = b'X';
-        assert!(matches!(Map16SetFile::decode(&bytes), Err(Map16FileError::BadSignature)));
     }
 
     #[test]
@@ -539,26 +384,6 @@ mod tests {
     #[ignore]
     fn bg_page_round_trip() {
         round_trip_page(PAGE_BG0, 0);
-    }
-
-    #[test]
-    #[ignore]
-    fn set_export_import_round_trip() {
-        let rom = test_rom().expect("ROM_PATH must point at a headerless SMW ROM");
-        let set = export_set(&rom, &[(PAGE_FG0, 0), (PAGE_FG1, 1), (PAGE_BG0, 0)]).unwrap();
-        let bytes = set.encode().unwrap();
-        let back = Map16SetFile::decode(&bytes).unwrap();
-
-        let mut scratch = std::fs::read(std::env::var("ROM_PATH").unwrap()).unwrap();
-        import_set(&mut scratch, &back, 0).unwrap();
-
-        let rom2 = SmwRom::from_rom(Rom::new(scratch).unwrap()).expect("reparse modified ROM");
-        let set2 = export_set(&rom2, &[(PAGE_FG0, 0), (PAGE_FG1, 1), (PAGE_BG0, 0)]).unwrap();
-        assert_eq!(set2.pages.len(), set.pages.len());
-        for (a, b) in set.pages.iter().zip(set2.pages.iter()) {
-            assert_eq!(a.page, b.page);
-            assert_eq!(a.data, b.data, "page {:#04X} changed across import", a.page);
-        }
     }
 
     #[test]

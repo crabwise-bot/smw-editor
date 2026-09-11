@@ -35,19 +35,6 @@ exact inverse of that parse layout, so export and import always agree on
 where a tile lives; import writes in place and never needs the free-space
 scanner. This is safe because the data is the same size by construction.
 
-## `.s16set` container (our own format)
-
-Single raw pages cover LM interchange; the set container bundles several
-pages with their page numbers and FG tileset variants:
-
-```
-0x00: "S16SET" (6 bytes)
-0x06: version u16 LE (1)
-0x08: page count u8
-0x09: one (page, tileset) byte pair per page
-...:  page_count × 0x800 raw page bytes
-```
-
 ## v1 limits (documented, not silently missing)
 
 - Vanilla layouts only: FG pages 0-1, BG table pages. No LM-expanded pages

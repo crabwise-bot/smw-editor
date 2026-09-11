@@ -2,11 +2,11 @@
 //!
 //! Export renders the selected page — including unsaved in-memory block
 //! edits, by applying them to a scratch copy of the ROM — to a raw
-//! 0x800-byte page file (Lunar Magic `Map16Page.bin` compatible) or to a
-//! multi-page `.s16set` container. Import decodes a page or set file,
-//! confirms with the user, writes it into the ROM file at the pages' fixed
-//! vanilla addresses (with the same backup + atomic-rename safety as a
-//! normal save), and reloads the level from the freshly parsed ROM.
+//! 0x800-byte page file (Lunar Magic `Map16Page.bin` compatible). Import
+//! decodes a raw page file, confirms with the user, writes it into the ROM
+//! file at the page's fixed vanilla address (with the same backup +
+//! atomic-rename safety as a normal save), and reloads the level from the
+//! freshly parsed ROM.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
 
 use crate::ui::tool::DockableEditorTool;
 use smwe_rom::{
-    map16_file::{self, Map16SetFile},
+    map16_file,
     objects::tilesets::object_tileset_to_map16_tileset,
     snes_utils::rom::Rom,
     SmwRom,
@@ -90,53 +90,11 @@ impl UiLevelEditor {
         });
     }
 
-    /// Export all foreground pages (for the selected tileset) plus both BG
-    /// pages into one `.s16set` container.
-    pub(super) fn export_map16_set(&mut self) {
-        let tileset = self.map16_tileset_idx.min(4);
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Map16 page set", &["s16set"])
-            .set_file_name(format!("map16-set-ts{tileset}.s16set"))
-            .save_file()
-        else {
-            return;
-        };
-
-        let result = (|| -> anyhow::Result<String> {
-            let scratch = scratch_rom_with_edits(self)?;
-            let set = map16_file::export_set(
-                &scratch,
-                &[
-                    (map16_file::PAGE_FG0, tileset),
-                    (map16_file::PAGE_FG1, tileset),
-                    (map16_file::PAGE_BG0, 0),
-                    (map16_file::PAGE_BG1, 0),
-                ],
-            )?;
-            let bytes = set.encode()?;
-            std::fs::write(&path, &bytes)?;
-            Ok(format!(
-                "Exported Map16 set (FG pages tileset {tileset} + BG pages) → {} ({} bytes)",
-                path.display(),
-                bytes.len()
-            ))
-        })();
-
-        self.map16_file_status = Some(match result {
-            Ok(msg) => {
-                log::info!("{msg}");
-                msg
-            }
-            Err(e) => format!("Map16 set export failed: {e:#}"),
-        });
-    }
-
-    /// Import a raw page or a `.s16set` container into the ROM, with
-    /// confirmation. A raw 0x800-byte file goes into the currently selected
-    /// page/tileset; a set file carries its own page list.
+    /// Import a raw 0x800-byte page file into the ROM, with confirmation.
+    /// The file goes into the currently selected page/tileset.
     pub(super) fn import_map16(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Map16 page or set", &["bin", "s16set"])
+            .add_filter("Map16 page", &["bin"])
             .pick_file()
         else {
             return;
@@ -149,39 +107,18 @@ impl UiLevelEditor {
                 return;
             }
         };
-
-        // Detect the format: exactly one raw page, or our set container.
-        enum Import {
-            Page(Vec<u8>),
-            Set(Map16SetFile),
+        if raw.len() != map16_file::MAP16_PAGE_BYTES {
+            self.map16_file_status = Some(format!(
+                "Map16 import failed: expected a 0x800-byte page file, got {} bytes",
+                raw.len()
+            ));
+            return;
         }
-        let import = if raw.len() == map16_file::MAP16_PAGE_BYTES {
-            Import::Page(raw)
-        } else {
-            match Map16SetFile::decode(&raw) {
-                Ok(set) => Import::Set(set),
-                Err(e) => {
-                    self.map16_file_status = Some(format!(
-                        "Map16 import failed: not a 0x800-byte page or .s16set file: {e}"
-                    ));
-                    return;
-                }
-            }
-        };
 
         let (page, _) = PAGE_OPTIONS[self.map16_page_idx.min(PAGE_OPTIONS.len() - 1)];
         let tileset = self.map16_tileset_idx.min(4);
-        let describe = match &import {
-            Import::Page(_) => format!(
-                "{} (tileset {tileset})",
-                map16_file::page_name(page)
-            ),
-            Import::Set(set) => {
-                let names: Vec<String> =
-                    set.pages.iter().map(|p| format!("{:02X}", p.page)).collect();
-                format!("set with pages [{}]", names.join(", "))
-            }
-        };
+        let describe =
+            format!("{} (tileset {tileset})", map16_file::page_name(page));
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let mut prompt = format!(
             "Import '{file_name}' ({describe}) into the ROM?\n\nThis overwrites Map16 data at fixed ROM addresses."
@@ -201,14 +138,7 @@ impl UiLevelEditor {
         let result = (|| -> anyhow::Result<String> {
             let mut rom_bytes = std::fs::read(&self.rom_path)?;
             let header_offset = smc_header_offset(&rom_bytes);
-            match import {
-                Import::Page(data) => {
-                    map16_file::import_page(&mut rom_bytes, page, tileset, &data, header_offset)?;
-                }
-                Import::Set(set) => {
-                    map16_file::import_set(&mut rom_bytes, &set, header_offset)?;
-                }
-            }
+            map16_file::import_page(&mut rom_bytes, page, tileset, &raw, header_offset)?;
             write_rom_file_atomic(&self.rom_path, &rom_bytes)?;
             // Re-parse so the editor reflects the import; drop stale edits.
             let fresh = SmwRom::from_file(&self.rom_path)?;
@@ -269,9 +199,6 @@ impl UiLevelEditor {
         ui.horizontal(|ui| {
             if ui.button("Export page…").clicked() {
                 self.export_map16_page();
-            }
-            if ui.button("Export FG+BG set…").clicked() {
-                self.export_map16_set();
             }
             if ui.button("Import…").clicked() {
                 self.import_map16();

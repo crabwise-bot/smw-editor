@@ -335,7 +335,7 @@ fn main() -> anyhow::Result<()> {
         ink,
     );
     y += 40;
-    for (i, label) in ["Export page…", "Export FG+BG set…", "Import…"].iter().enumerate() {
+    for (i, label) in ["Export page…", "Import…"].iter().enumerate() {
         let bx = lx + i as u32 * 150;
         fill_rect(&mut img, bx, y, 140, 32, Rgb([0xFF, 0xFF, 0xFF]));
         rect_border(&mut img, bx, y, 140, 32, Rgb([0x99, 0x99, 0x99]));
@@ -361,16 +361,6 @@ fn main() -> anyhow::Result<()> {
     );
     y += 26;
     draw_text(&mut img, &sans, &format!("first 16 bytes: {hexline}"), lx as i32, y as i32, 13.0, gray);
-    y += 26;
-    draw_text(
-        &mut img,
-        &sans,
-        "…+ .s16set container for multi-page sets (FG pages 0-1 + BG pages)",
-        lx as i32,
-        y as i32,
-        13.0,
-        gray,
-    );
 
     // Right: the real atlas + before/after strip for the changed rows.
     let ax = 540u32;
