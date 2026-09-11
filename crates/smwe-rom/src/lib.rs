@@ -3,12 +3,14 @@
 pub mod block_behavior;
 pub mod compression;
 pub mod font_map;
+pub mod freespace;
 pub mod message_raster;
 pub mod music;
 pub mod graphics;
 pub mod internal_header;
 pub mod level;
 pub mod message_boxes;
+pub mod mwl;
 pub mod objects;
 pub mod overworld;
 pub mod snes_utils;

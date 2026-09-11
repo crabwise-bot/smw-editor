@@ -36,6 +36,12 @@ impl UiLevelEditor {
             if tbtn(ui, icon::ARROW_CLOCKWISE, "Reload level from ROM (discards unsaved edits)", false) {
                 self.load_level();
             }
+            if tbtn(ui, icon::DOWNLOAD_SIMPLE, "Export level to Lunar Magic .mwl file", false) {
+                self.export_mwl();
+            }
+            if tbtn(ui, icon::UPLOAD_SIMPLE, "Import Lunar Magic .mwl file into this level", false) {
+                self.import_mwl();
+            }
             ui.separator();
 
             // The iconic Lunar Magic level-number box.
@@ -179,6 +185,10 @@ impl UiLevelEditor {
                 ui.monospace(format!("{} sprite(s) selected", self.selected_sprite_indices.len()));
             } else {
                 ui.monospace(format!("{} object(s) selected", self.selected_object_indices.len()));
+            }
+            if let Some(status) = self.mwl_status.clone() {
+                ui.separator();
+                ui.label(RichText::new(status).monospace().color(Color32::LIGHT_GREEN));
             }
         });
     }
