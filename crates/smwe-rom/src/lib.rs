@@ -4,6 +4,7 @@ pub mod block_behavior;
 pub mod compression;
 pub mod font_map;
 pub mod message_raster;
+pub mod music;
 pub mod graphics;
 pub mod internal_header;
 pub mod level;
