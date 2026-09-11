@@ -250,6 +250,12 @@ pub struct UiWorldEditor {
     level_name_for: Option<u8>,
     /// Validation error from the last rejected name edit, if any.
     level_name_error: Option<String>,
+    /// Event-ownership table (`$05D608` events-by-translevel): raw byte per
+    /// translevel (`0x00`–`0x5C`), `$FF` = no event. Edited via the
+    /// event-ownership panel; written back in place on save.
+    event_ownership: Vec<u8>,
+    /// True if any event-ownership assignment has been changed.
+    event_ownership_dirty: bool,
 }
 
 impl UiWorldEditor {
@@ -268,6 +274,15 @@ impl UiWorldEditor {
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
             smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false).unwrap_or_default();
+        // Decode the vanilla event-ownership table ($05D608) the same way.
+        let event_ownership = smwe_rom::overworld::event_ownership::EventOwnership::parse(rom.rom_bytes(), 0)
+            .map(|eo| eo.table)
+            .unwrap_or_else(|_| {
+                vec![
+                    smwe_rom::overworld::event_ownership::NO_EVENT;
+                    smwe_rom::overworld::event_ownership::EVENT_OWNERSHIP_COUNT
+                ]
+            });
         let mut editor = Self {
             gl,
             rom,
@@ -302,6 +317,8 @@ impl UiWorldEditor {
             level_name_edit: String::new(),
             level_name_for: None,
             level_name_error: None,
+            event_ownership,
+            event_ownership_dirty: false,
         };
         editor.load_submap();
         editor
@@ -361,6 +378,7 @@ impl DockableEditorTool for UiWorldEditor {
 
     fn on_save_succeeded(&mut self) {
         self.has_edits = false;
+        self.event_ownership_dirty = false;
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -455,6 +473,17 @@ impl DockableEditorTool for UiWorldEditor {
             let header_offset = usize::from(has_smc_header) * 0x200;
             ln::apply_to_rom(rom_bytes, header_offset, &encoded)
                 .map_err(|e| anyhow::anyhow!("Cannot apply level-name patch: {e}"))?;
+        }
+
+        // ── Event ownership (which event each level triggers) ────────────────
+        // In-place write of the 93-byte `$05D608` table; only touches the ROM
+        // if the user actually changed an assignment.
+        if self.event_ownership_dirty {
+            use smwe_rom::overworld::event_ownership as eo;
+            let ownership = eo::EventOwnership { table: self.event_ownership.clone() };
+            ownership
+                .apply_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot apply event ownership edits: {e}"))?;
         }
 
         Ok(())
@@ -554,6 +583,55 @@ impl UiWorldEditor {
         });
     }
 
+    /// Event-ownership editor: which event each level (translevel) triggers when
+    /// beaten — the `$05D608` events-by-translevel table. The game reads
+    /// `DATA_05D608[TranslevelNo]` into `OverworldEvent` on level completion;
+    /// Lunar Magic has no UI for choosing these assignments.
+    fn event_ownership_panel(&mut self, ui: &mut Ui) {
+        use smwe_rom::overworld::event_ownership as eo;
+        ui.collapsing("Event ownership (by level)", |ui| {
+            ui.label("Which event triggers when each level is beaten ($05D608).");
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for tl in 0..eo::EVENT_OWNERSHIP_COUNT {
+                    let name = self
+                        .custom_level_names
+                        .get(&(tl as u8))
+                        .cloned()
+                        .or_else(|| self.vanilla_level_names.get(tl).cloned())
+                        .unwrap_or_default();
+                    let cur: Option<u8> = match self.event_ownership.get(tl).copied() {
+                        Some(b) if b != eo::NO_EVENT => Some(b),
+                        _ => None,
+                    };
+                    let mut new = cur;
+                    ui.horizontal(|ui| {
+                        ui.label(format!("0x{tl:02X} {name}"));
+                        egui::ComboBox::from_id_salt(("world_editor.event_ownership", tl))
+                            .selected_text(event_option_label(cur, &self.rom))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut new, None, event_option_label(None, &self.rom));
+                                for e in 0..smwe_rom::overworld::OW_EVENT_COUNT as u8 {
+                                    ui.selectable_value(
+                                        &mut new,
+                                        Some(e),
+                                        event_option_label(Some(e), &self.rom),
+                                    );
+                                }
+                            });
+                    });
+                    if new != cur {
+                        if let Some(slot) = self.event_ownership.get_mut(tl) {
+                            *slot = new.unwrap_or(eo::NO_EVENT);
+                        }
+                        self.event_ownership_dirty = true;
+                        self.has_edits = true;
+                    }
+                }
+            });
+        });
+    }
+
     fn left_panel(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Overworld");
@@ -592,6 +670,9 @@ impl UiWorldEditor {
 
             ui.separator();
             self.events_panel(ui);
+
+            ui.separator();
+            self.event_ownership_panel(ui);
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();
@@ -1148,6 +1229,23 @@ fn ow_tile(x: u32, y: u32, t: u16) -> Tile {
     let scale = 8u32;
     let params = scale | (pal << 8) | (t32 & 0xC000);
     Tile([x, y, tile, params])
+}
+
+/// Label for an event-ownership combo option: the event number plus the
+/// overworld tile it reveals (when the event has a reveal-tile entry), so the
+/// user can pick events by what they visibly do.
+fn event_option_label(event: Option<u8>, rom: &SmwRom) -> String {
+    match event {
+        None => "None (no event)".to_string(),
+        Some(e) => {
+            let off = rom.overworld_events.tile_offsets.get(e as usize).copied().unwrap_or(0);
+            if off == 0 {
+                format!("Event {e}")
+            } else {
+                format!("Event {e} — reveals tile {off:#06X}")
+            }
+        }
+    }
 }
 
 /// Write `active_events` (indices 0..OW_EVENT_COUNT) into the emulated

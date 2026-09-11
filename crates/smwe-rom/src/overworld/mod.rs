@@ -6,6 +6,7 @@
 //! Layer 1 (interactive tiles) lives uncompressed at ROM $0CF7DF → WRAM $7EC800.
 //! Layer 2 (background) is RLE-compressed at $04A533/$04C02B → WRAM $7F4000.
 
+pub mod event_ownership;
 pub mod level_names;
 
 use crate::snes_utils::{
