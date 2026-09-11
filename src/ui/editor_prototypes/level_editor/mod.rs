@@ -7,6 +7,7 @@ mod message_editor;
 mod left_panel;
 mod level_renderer;
 mod map16_editor;
+mod map16_file;
 mod mwl;
 mod object_layer;
 mod palette_editor;
@@ -195,6 +196,11 @@ pub struct UiLevelEditor {
     // Lunar Magic `.mwl` level import/export.
     rom_path: PathBuf,
     mwl_status: Option<String>,
+
+    // Map16 page import/export.
+    map16_file_status: Option<String>,
+    map16_page_idx: usize,
+    map16_tileset_idx: usize,
 }
 
 impl UiLevelEditor {
@@ -305,6 +311,9 @@ impl UiLevelEditor {
             credits_editor_selected: 0,
             rom_path: rom_path.clone(),
             mwl_status: None,
+            map16_file_status: None,
+            map16_page_idx: 0,
+            map16_tileset_idx: 0,
         };
         editor.load_level();
         Ok(editor)

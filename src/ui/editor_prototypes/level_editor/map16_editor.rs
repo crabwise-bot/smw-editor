@@ -153,6 +153,8 @@ impl UiLevelEditor {
                     self.map16_edits.remove(&block_id);
                 }
             }
+
+            self.map16_file_controls(ui);
         });
         self.show_map16_editor = open;
     }
