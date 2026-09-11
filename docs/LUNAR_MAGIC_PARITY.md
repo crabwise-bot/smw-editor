@@ -29,7 +29,7 @@ search — "find all references" for sprites, objects, tiles, music, and exits.)
 | Map16 tile picker & editor | ✅ | `tile_picker.rs`, `map16_editor.rs` |
 | Palette editor (BG/FG/sprite) | ✅ | `palette_editor.rs` |
 | Layer 2/3 background editing | 🟡 | `background_layer.rs` minimal (~510 bytes); L2 header copied verbatim, not user-editable (`level_editor/mod.rs:342`) |
-| Music selection | 🟡 | Raw nibble slider only, no track-name mapping |
+| Music selection | ✅ | Named vanilla track picker (`crates/smwe-rom/src/music.rs`, derived from SMWDisX `LevelMusicTable` in `bank_05.asm`): all 8 tracks with raw-value fallback for remapped ROMs; xref search also shows track names |
 | Custom level names (overworld name table) | ⛔ | Not found |
 | Message box / dialog text editor | ✅ | `crates/smwe-rom/src/message_boxes.rs` + `level_editor/message_editor.rs` — all 22 vanilla messages, verified against real ROM (exact byte boundaries derived from `symbols/SMW_U.sym` label addresses; total size matches the ROM's already-100%-utilized 2854-byte budget exactly). PR #5 added a read-only WYSIWYG preview: true GFX2A message font rasterization (SNES $0BCB7B, 2bpp, 128 tiles) plus a `CODE_05B1BC` stripe capture, shown as an 8×18 raster per message, validated against the real ROM. Phase 2 (this PR) made the text itself editable: a multiline field shows decoded text (`\n` = line break; the real routine has no other control codes) and typing re-encodes to tile bytes live, with per-message byte-budget enforcement (`used / budget`, over-budget input refused, not truncated). Non-text graphic tiles (Yoshi's signature, bonus-star icons) show as `�` and are preserved in place. Decode→encode round-trips all 22 vanilla messages byte-exactly |
 | Import/export level as `.mwl` | ⛔ | Not found |
@@ -82,7 +82,7 @@ search — "find all references" for sprites, objects, tiles, music, and exits.)
 
 | Feature | Status | Notes |
 |---|---|---|
-| Music track selection (header nibble) | 🟡 | Editable but no track-name mapping |
+| Music track selection (header nibble) | ✅ | Named picker with all 8 vanilla tracks (SMWDisX `LevelMusicTable`); raw byte shown alongside for custom/remapped ROMs |
 | Music/SPC data import or editing | ⛔ | Not found |
 
 ## Data / ASM / Patches

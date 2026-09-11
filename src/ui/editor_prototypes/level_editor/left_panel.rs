@@ -505,7 +505,28 @@ impl UiLevelEditor {
                 }
                 ui.end_row();
 
-                row_slider!("Music:", p.music, 0..=7_i32);
+                ui.label("Music:");
+                {
+                    // Named vanilla track list (SMWDisX `LevelMusicTable`);
+                    // the raw header value stays visible so ROM hacks with a
+                    // remapped music table remain identifiable.
+                    let before = p.music;
+                    egui::ComboBox::from_id_salt("music_track_picker")
+                        .selected_text(smwe_rom::music::format_music_track(p.music))
+                        .show_ui(ui, |ui| {
+                            for t in 0..smwe_rom::music::MUSIC_TRACK_COUNT {
+                                ui.selectable_value(
+                                    &mut p.music,
+                                    t,
+                                    smwe_rom::music::format_music_track(t),
+                                );
+                            }
+                        });
+                    if p.music != before {
+                        changed = true;
+                    }
+                }
+                ui.end_row();
                 row_slider!("Timer:", p.timer, 0..=3_i32);
                 row_slider_hex!("BG Palette:", p.palette_bg, 0..=7_i32, 1);
                 row_slider_hex!("FG Palette:", p.palette_fg, 0..=7_i32, 1);

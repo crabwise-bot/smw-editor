@@ -146,6 +146,19 @@ impl UiLevelEditor {
                         search_now = true;
                     }
                 });
+                if state.query_kind == XrefQueryKind::Music {
+                    match parse_query_value(&state.query_text, 7) {
+                        Ok(v) => {
+                            ui.small(format!(
+                                "Track: {}",
+                                smwe_rom::music::format_music_track(v as u8)
+                            ));
+                        }
+                        Err(_) => {
+                            ui.small("Enter a music track 0-7.");
+                        }
+                    }
+                }
 
                 if search_now {
                     match &state.index {
