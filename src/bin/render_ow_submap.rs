@@ -35,7 +35,7 @@ fn main() {
         return;
     }
 
-    let mut emu_rom = EmuRom::new(rom_bytes);
+    let mut emu_rom = EmuRom::new(rom_bytes.clone());
     emu_rom.load_symbols(include_str!("../../symbols/SMW_U.sym"));
     let mut cpu = Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
 
@@ -79,6 +79,11 @@ fn main() {
     }
 
     let img = ImageBuffer::<Rgb<u8>, _>::from_raw(w, h, pixels).expect("image buffer");
+    let img = if let Some(spec) = args.iter().find_map(|a| a.strip_prefix("--l2-markers=")) {
+        draw_l2_markers(&rom_bytes, img, spec)
+    } else {
+        img
+    };
     img.save(output).expect("save png");
     println!("wrote {output}");
 }
@@ -384,4 +389,129 @@ fn read_color(cgram: &[u8], idx: usize) -> [u8; 3] {
     let hi = cgram[off + 1] as u16;
     let rgb = lo | (hi << 8);
     [((rgb & 0x1F) << 3) as u8, (((rgb >> 5) & 0x1F) << 3) as u8, (((rgb >> 10) & 0x1F) << 3) as u8]
+}
+
+/// Draw Layer 2 event target markers over a rendered overworld map image.
+///
+/// `spec` is `"all"` or a comma-separated list of destruction-event numbers
+/// (e.g. `"1,6,20"`). For each chosen event, every entry in its
+/// `entries_for_event` range plus its silent L2 rows gets a ring marker at the
+/// entry's `target_tile()`: cyan = VRAM tile stream, orange = tilemap copy.
+/// A header band labels the events and marker count. Every position and kind
+/// comes from the real parsed ROM tables (`OverworldL2Events`), and the map
+/// underneath is the real emulated render.
+fn draw_l2_markers(
+    rom_bytes: &[u8], img: ImageBuffer<Rgb<u8>, Vec<u8>>, spec: &str,
+) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    use smwe_rom::overworld::{L2EventKind, OverworldL2Events, OW_EVENT_COUNT};
+    let rom = smwe_rom::snes_utils::rom::Rom::new(rom_bytes.to_vec()).expect("rom parse");
+    let l2 = OverworldL2Events::parse(&rom).expect("L2 events parse");
+
+    let events: Vec<usize> = if spec == "all" {
+        (0..OW_EVENT_COUNT).collect()
+    } else {
+        spec.split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .filter(|&e| e < OW_EVENT_COUNT)
+            .collect()
+    };
+
+    const HEADER: u32 = 34;
+    let (w, h) = (img.width(), img.height());
+    let mut out = ImageBuffer::from_fn(w, h + HEADER, |x, y| {
+        if y < HEADER {
+            Rgb([18, 18, 24])
+        } else {
+            *img.get_pixel(x, y - HEADER)
+        }
+    });
+
+    let mut markers: Vec<(u32, u32, Rgb<u8>)> = Vec::new();
+    for &event in &events {
+        let mut push = |entry: &smwe_rom::overworld::L2EventEntry| {
+            let (col, row) = entry.target_tile();
+            let color = match entry.kind() {
+                L2EventKind::TileStream(_) => Rgb([0, 220, 255]),
+                L2EventKind::TilemapCopy(_) => Rgb([255, 170, 0]),
+            };
+            markers.push((col as u32 * 8 + 4, row as u32 * 8 + 4, color));
+        };
+        if let Some(range) = l2.entries_for_event(event) {
+            for idx in range {
+                if let Some(entry) = l2.entries.get(idx) {
+                    push(entry);
+                }
+            }
+        }
+        for s in l2.silent_l2_events_for(event as u8) {
+            push(&s.as_entry());
+        }
+    }
+    for (cx, cy, color) in &markers {
+        draw_ring(&mut out, *cx, *cy + HEADER, 5, *color);
+        out.put_pixel(*cx, *cy + HEADER, *color);
+    }
+
+    let ev_label = if events.len() == 1 {
+        format!("event {}", events[0])
+    } else {
+        format!("events [{}]", events.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(","))
+    };
+    let title =
+        format!("L2 event targets — {ev_label} ({} markers; cyan=stream, orange=tilemap copy)", markers.len());
+    draw_text_simple(&mut out, &title, 8, 20);
+    out
+}
+
+fn draw_ring(img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, cx: u32, cy: u32, r: u32, color: Rgb<u8>) {
+    let r2 = (r * r) as i32;
+    let inner = ((r.saturating_sub(2)) * (r.saturating_sub(2))) as i32;
+    for dy in 0..=r as i32 {
+        for dx in 0..=r as i32 {
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r2 && d2 >= inner {
+                for (sx, sy) in
+                    [(cx as i32 + dx, cy as i32 + dy), (cx as i32 - dx, cy as i32 + dy),
+                     (cx as i32 + dx, cy as i32 - dy), (cx as i32 - dx, cy as i32 - dy)]
+                {
+                    if sx >= 0 && sy >= 0 && (sx as u32) < img.width() && (sy as u32) < img.height() {
+                        img.put_pixel(sx as u32, sy as u32, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_text_simple(img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, text: &str, x: i32, baseline_y: i32) {
+    use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
+    let data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf").expect("font");
+    let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+    let font = FontRef::try_from_slice(leaked).expect("font parse");
+    let px = 15.0;
+    let scaled = font.as_scaled(PxScale::from(px));
+    let mut caret_x = x as f32;
+    let mut prev = None;
+    for ch in text.chars() {
+        let id = font.glyph_id(ch);
+        if let Some(p) = prev {
+            caret_x += scaled.kern(p, id);
+        }
+        let glyph = Glyph { id, scale: PxScale::from(px), position: Point { x: caret_x, y: baseline_y as f32 } };
+        if let Some(o) = scaled.outline_glyph(glyph) {
+            let bb = o.px_bounds();
+            o.draw(|gx, gy, v| {
+                let px_x = bb.min.x as i32 + gx as i32;
+                let px_y = bb.min.y as i32 + gy as i32;
+                if px_x >= 0 && px_y >= 0 {
+                    let (px_x, px_y) = (px_x as u32, px_y as u32);
+                    if px_x < img.width() && px_y < img.height() && v > 0.5 {
+                        img.put_pixel(px_x, px_y, Rgb([235, 235, 240]));
+                    }
+                }
+            });
+        }
+        prev = Some(id);
+        caret_x += scaled.h_advance(id);
+    }
 }

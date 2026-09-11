@@ -30,7 +30,9 @@ use smwe_render::{
 };
 use smwe_rom::compression::lc_rle2;
 use smwe_rom::{
-    overworld::{OWL1_TILE_DATA_SIZE, OWL1_TILE_DATA_SNES, SUBMAP_NAMES},
+    overworld::{
+        L2EventEntry, L2EventKind, OWL1_TILE_DATA_SIZE, OWL1_TILE_DATA_SNES, OW_EVENT_COUNT, SUBMAP_NAMES,
+    },
     snes_utils::addr::{AddrPc, AddrSnes},
     SmwRom,
 };
@@ -227,6 +229,8 @@ pub struct UiWorldEditor {
     /// considered active for preview purposes. Defaults to all-on, matching the
     /// previous blanket "activate everything" behavior.
     active_events: Vec<bool>,
+    /// Whether the Layer 2 event target markers are drawn over the map.
+    show_l2_event_markers: bool,
 
     /// Per-tile (index into `layer1_tiles`) level-number overrides. Absent
     /// entries use the vanilla scan-order-derived level number unchanged.
@@ -309,6 +313,7 @@ impl UiWorldEditor {
             has_unsavable_changes: false,
             edit_state,
             active_events: vec![true; smwe_rom::overworld::OW_EVENT_COUNT],
+            show_l2_event_markers: true,
             custom_level_numbers: HashMap::new(),
             level_numbers_dirty: false,
             vanilla_level_names,
@@ -578,6 +583,46 @@ impl UiWorldEditor {
                 }
                 if changed {
                     self.load_submap();
+                }
+            });
+        });
+
+        ui.collapsing("Layer 2 events", |ui| {
+            ui.checkbox(&mut self.show_l2_event_markers, "Show target markers on map");
+            let l2 = &self.rom.overworld_l2_events;
+            let events_with_l2: Vec<usize> = (0..OW_EVENT_COUNT)
+                .filter(|&e| {
+                    !l2.entries_for_event(e).unwrap_or(0..0).is_empty()
+                        || !l2.silent_l2_events_for(e as u8).is_empty()
+                })
+                .collect();
+            ui.label(format!(
+                "{} table entries · {} events with L2 data · {} silent L2 rows",
+                l2.entry_count(),
+                events_with_l2.len(),
+                l2.silent_events.iter().filter(|s| s.is_l2).count(),
+            ));
+            ui.label("Markers follow the event checkboxes above. The animated L2 sequence itself runs in-game;");
+            ui.label("this panel shows where each event's Layer 2 tiles land.");
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for event in events_with_l2 {
+                    let range = l2.entries_for_event(event).unwrap_or(0..0);
+                    let silent = l2.silent_l2_events_for(event as u8);
+                    let header = if range.is_empty() {
+                        format!("Event {event}: silent row only")
+                    } else {
+                        format!("Event {event}: entries {}..{}", range.start, range.end)
+                    };
+                    ui.collapsing(header, |ui| {
+                        for idx in range {
+                            if let Some(entry) = l2.entries.get(idx) {
+                                ui.monospace(format!("[{idx:3}] {}", describe_l2_entry(entry)));
+                            }
+                        }
+                        for s in &silent {
+                            ui.monospace(format!("[silent] {}", describe_l2_entry(&s.as_entry())));
+                        }
+                    });
                 }
             });
         });
@@ -1120,6 +1165,42 @@ impl UiWorldEditor {
             }
         }
 
+        // ── Layer 2 event target markers ──────────────────────────────────────
+        // Cyan ring = VRAM tile stream, orange ring = tilemap copy. Follows the
+        // event checkboxes in the left panel (only active events are drawn).
+        if self.show_l2_event_markers {
+            let (crop_x, crop_y) = visible_map_crop(self.submap);
+            let tile_sz = 8.0 * z;
+            let l2 = &self.rom.overworld_l2_events;
+            for (event, active) in self.active_events.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let mut mark = |entry: &L2EventEntry| {
+                    let (col, row) = entry.target_tile();
+                    let sx = origin.x + (col as f32 * 8.0 - crop_x as f32) * z;
+                    let sy = origin.y + (row as f32 * 8.0 - crop_y as f32) * z;
+                    let center = egui::pos2(sx + tile_sz * 0.5, sy + tile_sz * 0.5);
+                    if !view_rect.contains(center) {
+                        return;
+                    }
+                    let color = l2_marker_color(entry.kind());
+                    painter.circle_stroke(center, tile_sz * 0.45, Stroke::new(1.5, color));
+                    painter.circle_filled(center, 1.5, color);
+                };
+                if let Some(range) = l2.entries_for_event(event) {
+                    for idx in range {
+                        if let Some(entry) = l2.entries.get(idx) {
+                            mark(entry);
+                        }
+                    }
+                }
+                for s in l2.silent_l2_events_for(event as u8) {
+                    mark(&s.as_entry());
+                }
+            }
+        }
+
         // ── Hover / click (Map16 block granularity) ───────────────────────────
         if let Some(cursor) = resp.hover_pos() {
             let rel = (cursor - origin) / map16_sz;
@@ -1263,6 +1344,25 @@ fn apply_active_events_to_wram(cpu: &mut Cpu, active_events: &[bool]) {
             }
         }
         cpu.mem.store_u8(0x1F02 + byte_idx, byte);
+    }
+}
+
+/// One-line human description of a Layer 2 event table entry for the events
+/// panel, e.g. `stream 36 tiles -> (12,7)` or `tilemap copy $7F8000+0x0900 -> (6,15)`.
+fn describe_l2_entry(entry: &L2EventEntry) -> String {
+    let (col, row) = entry.target_tile();
+    match entry.kind() {
+        L2EventKind::TileStream(n) => format!("stream {n} tiles -> ({col},{row})"),
+        L2EventKind::TilemapCopy(off) => format!("tilemap copy WRAM+{off:#06X} -> ({col},{row})"),
+    }
+}
+
+/// Marker color for a Layer 2 event entry on the map: cyan for VRAM tile
+/// streams, orange for tilemap copies.
+fn l2_marker_color(kind: L2EventKind) -> Color32 {
+    match kind {
+        L2EventKind::TileStream(_) => Color32::from_rgb(0, 220, 255),
+        L2EventKind::TilemapCopy(_) => Color32::from_rgb(255, 170, 0),
     }
 }
 
