@@ -7,6 +7,7 @@ mod message_editor;
 mod left_panel;
 mod level_renderer;
 mod map16_editor;
+mod mwl;
 mod object_layer;
 mod palette_editor;
 mod properties;
@@ -190,6 +191,10 @@ pub struct UiLevelEditor {
     title_credits_dirty: bool,
     show_title_credits_editor: bool,
     credits_editor_selected: usize,
+
+    // Lunar Magic `.mwl` level import/export.
+    rom_path: PathBuf,
+    mwl_status: Option<String>,
 }
 
 impl UiLevelEditor {
@@ -298,6 +303,8 @@ impl UiLevelEditor {
             title_credits_dirty: false,
             show_title_credits_editor: false,
             credits_editor_selected: 0,
+            rom_path: rom_path.clone(),
+            mwl_status: None,
         };
         editor.load_level();
         Ok(editor)
