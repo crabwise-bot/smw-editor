@@ -236,6 +236,20 @@ pub struct UiWorldEditor {
     /// doesn't need new ASM code, just different data.
     custom_level_numbers: HashMap<usize, u8>,
     level_numbers_dirty: bool,
+    /// Vanilla level names decoded from the ROM (93 entries, index =
+    /// translevel). Used as the base for custom name edits.
+    vanilla_level_names: Vec<String>,
+    /// Custom level names by translevel. Absent entries use the vanilla name.
+    custom_level_names: HashMap<u8, String>,
+    /// True if any level name has been customized (requires the name-table
+    /// relocation patch on save).
+    level_names_dirty: bool,
+    /// Level-name text field buffer, synced to `level_name_for`.
+    level_name_edit: String,
+    /// Translevel the name field (and error) currently belong to.
+    level_name_for: Option<u8>,
+    /// Validation error from the last rejected name edit, if any.
+    level_name_error: Option<String>,
 }
 
 impl UiWorldEditor {
@@ -251,6 +265,9 @@ impl UiWorldEditor {
         let source_layer1_tiles = rom.overworld.layer1_tiles.clone();
         let edit_state =
             UndoableData::new(OverworldEditState { layer1_tiles: source_layer1_tiles, layer2_words: Vec::new() });
+        // Decode vanilla level names before `rom` is moved into the struct.
+        let vanilla_level_names =
+            smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false).unwrap_or_default();
         let mut editor = Self {
             gl,
             rom,
@@ -279,6 +296,12 @@ impl UiWorldEditor {
             active_events: vec![true; smwe_rom::overworld::OW_EVENT_COUNT],
             custom_level_numbers: HashMap::new(),
             level_numbers_dirty: false,
+            vanilla_level_names,
+            custom_level_names: HashMap::new(),
+            level_names_dirty: false,
+            level_name_edit: String::new(),
+            level_name_for: None,
+            level_name_error: None,
         };
         editor.load_submap();
         editor
@@ -411,6 +434,27 @@ impl DockableEditorTool for UiWorldEditor {
                 + header_offset;
             let bytes = table_snes.0.to_le_bytes();
             rom_bytes[patch_pc..patch_pc + 3].copy_from_slice(&bytes[..3]);
+        }
+
+        // ── Custom level names ──────────────────────────────────────────────
+        // Encodes all 93 names (vanilla + overrides) into the relocated
+        // fragment tables and applies the patch. Only touches the ROM if the
+        // user has actually customized a name.
+        if !self.custom_level_names.is_empty() {
+            use smwe_rom::overworld::level_names as ln;
+            // Start from vanilla names decoded at load; apply overrides.
+            let mut names = self.vanilla_level_names.clone();
+            // Ensure 93 entries (in case decode failed at load).
+            names.resize(ln::LEVEL_NAMES_COUNT, String::new());
+            for (&translevel, custom) in &self.custom_level_names {
+                if (translevel as usize) < names.len() {
+                    names[translevel as usize] = custom.clone();
+                }
+            }
+            let encoded = ln::encode_names(&names).map_err(|e| anyhow::anyhow!("Cannot encode level names: {e}"))?;
+            let header_offset = usize::from(has_smc_header) * 0x200;
+            ln::apply_to_rom(rom_bytes, header_offset, &encoded)
+                .map_err(|e| anyhow::anyhow!("Cannot apply level-name patch: {e}"))?;
         }
 
         Ok(())
@@ -766,6 +810,88 @@ impl UiWorldEditor {
                                     egui::Color32::from_rgb(220, 160, 60),
                                     "  Overridden — needs the level-number patch on save",
                                 );
+                            }
+
+                            // ── Level name editor ───────────────────────────
+                            // Translevel indexes into the 93-entry name table.
+                            let translevel_u8 = (translevel & 0xFF) as u8;
+                            let vanilla_name =
+                                self.vanilla_level_names.get(translevel as usize).cloned().unwrap_or_default();
+                            // Keep the text buffer synced: selecting a
+                            // different level tile re-decodes it.
+                            if self.level_name_for != Some(translevel_u8) {
+                                self.level_name_edit = self
+                                    .custom_level_names
+                                    .get(&translevel_u8)
+                                    .cloned()
+                                    .unwrap_or_else(|| vanilla_name.clone());
+                                self.level_name_for = Some(translevel_u8);
+                                self.level_name_error = None;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("  Level name:");
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.level_name_edit)
+                                        .desired_width(200.0)
+                                        .hint_text(&vanilla_name),
+                                );
+                                if resp.changed() {
+                                    use smwe_rom::overworld::level_names as ln;
+                                    let trimmed = self.level_name_edit.trim().to_string();
+                                    if trimmed.is_empty()
+                                        || trimmed.to_uppercase() == vanilla_name.to_uppercase()
+                                    {
+                                        self.custom_level_names.remove(&translevel_u8);
+                                        self.level_name_error = None;
+                                        self.level_names_dirty = true;
+                                        self.has_edits = true;
+                                    } else {
+                                        match ln::check_name(&trimmed) {
+                                            Ok(normalized) => {
+                                                self.custom_level_names
+                                                    .insert(translevel_u8, normalized);
+                                                self.level_name_error = None;
+                                                self.level_names_dirty = true;
+                                                self.has_edits = true;
+                                            }
+                                            Err(e) => {
+                                                // Refuse over-budget/invalid
+                                                // input; the field keeps the
+                                                // rejected text so the user
+                                                // can fix it.
+                                                self.level_name_error = Some(e.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            // Byte-budget feedback, mirroring the message-box
+                            // editor: the game draws at most MAX_NAME_CHARS
+                            // tiles per name (CODE_049D07's $26-byte stripe).
+                            {
+                                use smwe_rom::overworld::level_names as ln;
+                                let used = self.level_name_edit.trim().chars().count();
+                                let budget_color = if self.level_name_error.is_some()
+                                    || used > ln::MAX_NAME_CHARS
+                                {
+                                    egui::Color32::from_rgb(220, 60, 60)
+                                } else {
+                                    ui.style().visuals.text_color()
+                                };
+                                ui.colored_label(
+                                    budget_color,
+                                    format!("  Name encodes to {used} / {} tiles", ln::MAX_NAME_CHARS),
+                                );
+                                if let Some(err) = self.level_name_error.as_ref() {
+                                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), format!("  {err}"));
+                                }
+                            }
+                            if self.custom_level_names.contains_key(&translevel_u8) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 160, 60),
+                                    "  Custom name — needs the name-table relocation patch on save",
+                                );
+                                ui.small("  A–Z 0–9 space # ' supported");
                             }
                         }
                     }
