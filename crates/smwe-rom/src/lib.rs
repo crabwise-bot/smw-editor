@@ -13,6 +13,7 @@ pub mod message_boxes;
 pub mod mwl;
 pub mod objects;
 pub mod overworld;
+pub mod player_palette;
 pub mod snes_utils;
 pub mod sprite_tweakers;
 pub mod title_credits;

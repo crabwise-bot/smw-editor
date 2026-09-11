@@ -130,6 +130,12 @@ pub struct UiLevelEditor {
     palette_dirty: bool,
     selected_palette_group: u8,
     selected_palette_idx: usize,
+    // Player (Mario/Luigi) palettes: 4 global palettes x 10 colors, SNES
+    // $00B2C8 (see smwe_rom::player_palette). Edited in the Palette Editor's
+    // "Player Colors" section; saved through the same palette_dirty path.
+    player_palette_colors: [[u16; 10]; 4],
+    selected_player_palette: usize,
+    selected_player_color: Option<usize>,
 
     // Map16 editor
     map16_edits: HashMap<u16, [u16; 4]>,
@@ -273,6 +279,9 @@ impl UiLevelEditor {
             palette_dirty: false,
             selected_palette_group: 3, // none
             selected_palette_idx: 0,
+            player_palette_colors: [[0u16; 10]; 4],
+            selected_player_palette: 0,
+            selected_player_color: None,
             map16_edits: HashMap::new(),
             map16_block_ptrs: Vec::new(),
             selected_map16_block_for_edit: None,
@@ -756,6 +765,9 @@ impl DockableEditorTool for UiLevelEditor {
             write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &self.palette_bg_colors)?;
             write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &self.palette_fg_colors)?;
             write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &self.palette_sprite_colors)?;
+            // Player palettes (global): SNES $00B2C8, 4 palettes x 10 colors.
+            smwe_rom::player_palette::PlayerPalettes { palettes: self.player_palette_colors }
+                .write_to(rom_bytes, header_offset)?;
         }
 
         // ── Map16 block edits ─────────────────────────────────────────────────
@@ -935,6 +947,10 @@ impl UiLevelEditor {
             self.palette_bg_colors = read_palette(0x00B0B0 + p.palette_bg() as u32 * 0x18);
             self.palette_fg_colors = read_palette(0x00B190 + p.palette_fg() as u32 * 0x18);
             self.palette_sprite_colors = read_palette(0x00B318 + p.palette_sprite() as u32 * 0x18);
+            // Player palettes are global (not per-level): SNES $00B2C8, 4 x 10 colors.
+            self.player_palette_colors = smwe_rom::player_palette::PlayerPalettes::parse(&self.rom.rom)
+                .map(|pp| pp.palettes)
+                .unwrap_or([[0u16; 10]; 4]);
             self.palette_dirty = false;
         }
 
