@@ -85,6 +85,33 @@ pub const T2_SKIP_BYTE: u8 = 0x9F;
 /// Byte for an empty T1 fragment: bit 7 set, so `CODE_049D07` skips it.
 pub const T1_SKIP_BYTE: u8 = 0x80;
 
+/// Longest name the game will draw: `CODE_049D07` reserves `$26` stripe-image
+/// bytes (19 characters) for the composed name, then pads with blanks.
+/// A longer name's extra characters are silently dropped by the game, so the
+/// editor refuses them instead of truncating.
+pub const MAX_NAME_CHARS: usize = 19;
+
+/// Validate a level name typed in the editor.
+///
+/// Returns the normalized name (trimmed, uppercased — the game only has
+/// uppercase glyphs). Errors when the name is empty, longer than
+/// [`MAX_NAME_CHARS`] characters, or contains a character with no
+/// overworld-name tile (allowed: `A-Z 0-9 space # '`).
+pub fn check_name(name: &str) -> anyhow::Result<String> {
+    let normalized = name.trim().to_uppercase();
+    anyhow::ensure!(!normalized.is_empty(), "name is empty");
+    let len = normalized.chars().count();
+    anyhow::ensure!(
+        len <= MAX_NAME_CHARS,
+        "name is {len} characters; the game draws at most {MAX_NAME_CHARS}"
+    );
+    for c in normalized.chars() {
+        let ok = matches!(c, 'A'..='Z' | '0'..='9' | ' ' | '#' | '\'');
+        anyhow::ensure!(ok, "character {c:?} has no overworld-name tile (A-Z 0-9 space # ' only)");
+    }
+    Ok(normalized)
+}
+
 /// Encode a character to an overworld-name tile value.
 ///
 /// Uppercase ASCII letters map to tiles `$00-$19`, space to `$1F`, `#` to
@@ -615,6 +642,24 @@ mod tests {
             let back = tile_to_char(tile);
             assert_eq!(back, c, "round trip failed for {c}");
         }
+    }
+
+    #[test]
+    fn check_name_enforces_budget_and_charset() {
+        // Normalization: trim + uppercase.
+        assert_eq!(check_name("  yoshi's hideout ").unwrap(), "YOSHI'S HIDEOUT");
+        // Exactly at the budget is fine.
+        assert!(check_name(&"A".repeat(MAX_NAME_CHARS)).is_ok());
+        // One over is refused, not truncated.
+        let err = check_name(&"A".repeat(MAX_NAME_CHARS + 1)).unwrap_err();
+        assert!(err.to_string().contains("at most 19"), "unexpected error: {err}");
+        // Unknown characters are refused.
+        let err = check_name("DONUT-PLAINS").unwrap_err();
+        assert!(err.to_string().contains("has no overworld-name tile"), "unexpected error: {err}");
+        // Empty is refused.
+        assert!(check_name("   ").is_err());
+        // The allowed set passes.
+        assert_eq!(check_name("#7 LARRY'S CASTLE 9").unwrap(), "#7 LARRY'S CASTLE 9");
     }
 
     #[test]
