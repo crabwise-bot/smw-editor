@@ -21,6 +21,7 @@ fn main() {
     let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("ow_render.png");
     let full = args.iter().any(|a| a == "--full");
     let activate_events = !args.iter().any(|a| a == "--no-events");
+    let anim_ticks = args.iter().find_map(|a| a.strip_prefix("--anim-ticks=")).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
     let raw = std::fs::read(rom_path).expect("cannot read smw.smc");
     let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
@@ -43,6 +44,9 @@ fn main() {
         activate_all_overworld_events(&mut cpu);
     }
     smwe_emu::emu::load_overworld(&mut cpu, submap);
+    for _ in 0..anim_ticks {
+        smwe_emu::emu::advance_ow_anim_frame(&mut cpu);
+    }
 
     if args.iter().any(|a| a == "--dump-l1-atlas") {
         dump_l1_atlas(&mut cpu, output);

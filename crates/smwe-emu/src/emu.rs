@@ -197,6 +197,7 @@ fn run_routines(cpu: &mut Cpu<CheckedMem>, routines: &[&str], cycle_limit: u64) 
     cpu.dbr = 0x00;
     cpu.trace = false;
 
+    // Resolve targets up front (panics on unknown symbol, as before).
     let mut addr = 0x2000u32;
     for symbol in routines {
         cpu.mem.store(addr, 0x22);
@@ -360,6 +361,89 @@ pub fn advance_anim_frame(cpu: &mut Cpu<CheckedMem>) {
     let counter = cpu.mem.load_u8(0x0014).wrapping_add(1);
     cpu.mem.store(0x0014, counter);
     fetch_anim_frame(cpu);
+}
+
+/// Replicates the overworld VBlank upload in `CODE_00A4E3` (`bank_00.asm`): the
+/// 352-byte `GfxDecompOWAni` animated-tile buffer ($7E0AF6) is DMA'd to VRAM
+/// word address $0750 every frame, so VRAM tiles 117-127 show the current
+/// animation frame. The game reaches the buffer through the bank-$00 WRAM
+/// mirror ($000AF6); the DMA register setup below matches the game's.
+fn upload_ow_anim_tiles(cpu: &mut Cpu<CheckedMem>) {
+    cpu.mem.store(0x2115, 0x80); // VRAM auto-increment: one word per write
+    cpu.mem.store_u16(0x2116, 0x0750); // VRAM destination (word address)
+    cpu.mem.store(0x4320, 0x01); // DMA mode: two-register write
+    cpu.mem.store(0x4321, 0x18); // B-bus: VRAM data port $2118
+    cpu.mem.store_u16(0x4322, 0x0AF6); // source address low word
+    cpu.mem.store(0x4324, 0x00); // source bank $00 (WRAM mirror of $7E0AF6)
+    cpu.mem.store_u16(0x4325, 0x0160); // 352 bytes
+    cpu.mem.process_dma_ch(0x20); // DMA channel 2, like the game's MDMAEN=$04
+}
+
+/// Advance the overworld animated tiles by one visible frame, replicating
+/// `OW_Tile_Animation` (`bank_04.asm`) in Rust. The real routine runs once per
+/// game frame and only changes graphics when `TrueFrame` ($13) hits a multiple
+/// of 8, so each visible step is 8 frames (133ms at 60fps). We bump $13 by 8
+/// per call so every call produces the next visible frame, then replicate the
+/// VBlank DMA that carries the buffer into VRAM tiles 117-127.
+///
+/// We transcribe rather than execute the ASM because the emulator's
+/// `run_routines` trampoline cannot faithfully invoke these bank-$04
+/// RTS-terminated routines (dbr/D/pbr invariants differ from the real
+/// same-bank JSR call path).
+pub fn advance_ow_anim_frame(cpu: &mut Cpu<CheckedMem>) -> u64 {
+    let counter = cpu.mem.load_u8(0x0013).wrapping_add(8);
+    cpu.mem.store(0x0013, counter);
+    // OW_Tile_Animation only animates when TrueFrame & 7 == 0, which is always
+    // true here since we bump by 8.
+    ow_anim_tick_water(cpu);
+    upload_ow_anim_tiles(cpu);
+    // Cycle count is nominal; the transcription is not cycle-accurate.
+    1000
+}
+
+/// Replicates the water bit-rotation in `OW_Tile_Animation` (bank_04.asm
+/// `CODE_0480E8`): each of the 32 bytes in buffer[0x00..0x20] is rotated by 1
+/// bit, left for even 8-byte groups and right for odd groups.
+fn ow_anim_tick_water(cpu: &mut Cpu<CheckedMem>) {
+    for x in (0..0x20u32).rev() {
+        let addr = 0x7E0AF6 + x;
+        let v = cpu.mem.load_u8(addr);
+        let nv = if x & 8 == 0 {
+            // ASL _0 / ROL buffer[X]: rotate left through original bit 7
+            (v << 1) | (v >> 7)
+        } else {
+            // LSR _0 / ROR buffer[X]: rotate right through original bit 0
+            (v >> 1) | (v << 7)
+        };
+        cpu.mem.store_u8(addr, nv);
+    }
+    // Waterfall tiles (buffer[0x40..0x60]): rotate left (ASM at $048103).
+    for x in (0..0x20u32).rev() {
+        let addr = 0x7E0AF6 + 0x40 + x;
+        let v = cpu.mem.load_u8(addr);
+        cpu.mem.store_u8(addr, (v << 1) | (v >> 7));
+    }
+}
+
+/// Initialize the overworld animated-tile water buffer ($7E0AF6, 96 bytes)
+/// from decompressed GFX14 data, replicating `CODE_048086` + `CODE_0480B9`
+/// (bank_04.asm) in Rust. See `advance_ow_anim_frame` for why we transcribe.
+fn init_ow_anim_water(cpu: &mut Cpu<CheckedMem>) {
+    // DATA_048000: three 32-byte source chunks in bank $7E.
+    const SRCS: [u32; 3] = [0x7EB480, 0x7EB498, 0x7EB4B0];
+    for (i, src) in SRCS.iter().enumerate() {
+        let dst = 0x7E0AF6 + (i as u32) * 0x20;
+        // CODE_0480B9 first loop: 8 words.
+        for j in 0..8u32 {
+            let w = cpu.mem.load_u16(src + j * 2);
+            cpu.mem.store_u16(dst + j * 2, w);
+        }
+        // CODE_0480B9 second loop: 8 bytes -> 8 words (low byte only).
+        for j in 0..8u32 {
+            let b = cpu.mem.load_u8(src + 16 + j);
+            cpu.mem.store_u16(dst + 16 + j * 2, b as u16);
+        }
+    }
 }
 
 pub fn upload_sprite_tileset(cpu: &mut Cpu<CheckedMem>, sprite_tileset: u8) -> u64 {
@@ -872,6 +956,16 @@ pub fn load_overworld(cpu: &mut Cpu<CheckedMem>, submap: u8) -> u64 {
         cpu.mem.process_dma();
     }
     log::debug!("load_overworld(submap={submap}) took {}µs", now.elapsed().as_micros());
+    // Initialize the overworld animated-tile buffer ($7E0AF6) from the
+    // decompressed GFX14 data, as the real game does on overworld entry
+    // (bank_04.asm CODE_048EE1: JSR CODE_048086, then OW_Tile_Animation).
+    // This runs as a separate step (not in the JSL chain above) because the
+    // chain aborts early if an earlier routine hits an unemulated opcode,
+    // which would silently skip the init and leave the buffer zeroed.
+    // Initialize the overworld animated-tile water buffer ($7E0AF6) from the
+    // decompressed GFX14 data, as the real game does on overworld entry
+    // (bank_04.asm CODE_048EE1: JSR CODE_048086, then OW_Tile_Animation).
+    init_ow_anim_water(cpu);
     cy
 }
 
@@ -995,5 +1089,41 @@ mod lm_map16_tests {
             regs,
             "registers disturbed"
         );
+    }
+
+    /// Overworld animated tiles: init fills the buffer from GFX14, tick rotates
+    /// bits, and VRAM tile 117 changes. Requires ROM_PATH.
+    #[test]
+    #[ignore]
+    fn ow_anim_init_and_tick() {
+        let rom_path = std::env::var("ROM_PATH").expect("ROM_PATH must be set");
+        let raw = std::fs::read(&rom_path).expect("read rom");
+        let bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sym = std::fs::read_to_string(root.join("symbols/SMW_U.sym")).expect("symbols");
+        let mut rom = Rom::new(bytes);
+        rom.load_symbols(&sym);
+        let mut cpu = Cpu::new(CheckedMem::new(Arc::new(rom)));
+
+        super::load_overworld(&mut cpu, 0);
+
+        // Buffer should be non-zero after init (water data from GFX14).
+        let buf: Vec<u8> = (0..0x60u32).map(|i| cpu.mem.load_u8(0x7E0AF6 + i)).collect();
+        assert!(buf.iter().any(|&b| b != 0), "OW anim buffer is zero after init");
+
+        // VRAM tile 117 (word $0750) should have data.
+        let tile0: Vec<u8> = (0..32usize).map(|i| cpu.mem.vram[0x0EA0 + i]).collect();
+        assert!(tile0.iter().any(|&b| b != 0), "VRAM tile 117 is zero");
+
+        // Tick should change the buffer (bit rotation) and VRAM.
+        super::advance_ow_anim_frame(&mut cpu);
+        let buf1: Vec<u8> = (0..0x60u32).map(|i| cpu.mem.load_u8(0x7E0AF6 + i)).collect();
+        assert_ne!(buf, buf1, "OW anim buffer did not change after tick");
+
+        let tile1: Vec<u8> = (0..32usize).map(|i| cpu.mem.vram[0x0EA0 + i]).collect();
+        assert_ne!(tile0, tile1, "VRAM tile 117 did not change after tick");
+
+        // TrueFrame ($13) should have advanced by 8.
+        assert_eq!(cpu.mem.load_u8(0x0013) & 7, 0, "TrueFrame not multiple of 8");
     }
 }

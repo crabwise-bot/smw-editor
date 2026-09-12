@@ -12,10 +12,9 @@ corrected the first draft (sprite extra-bits were wrongly marked missing;
 freespace-finding was undersold as overworld-only). Treat ⛔ rows as "not
 found by grep," not proven absent — re-verify with a grep/read before relying
 on a row for planning if it's been a while since the file was touched. Missing
-areas not yet cross-checked in depth: overworld animated tiles/indicator
-sprites, layer 3 "tide"/water settings across levels, direct Map16
-import/export file format, and player (Mario/Yoshi) graphics customization.
-(ROM search/analysis is now covered: PR #4 added ROM-wide cross-reference
+areas not yet cross-checked in depth: layer 3 "tide"/water settings across
+levels, direct Map16 import/export file format, and player (Mario/Yoshi)
+graphics customization. (ROM search/analysis is now covered: PR #4 added ROM-wide cross-reference
 search — "find all references" for sprites, objects, tiles, music, and exits.)
 
 ## Level Editing
@@ -52,7 +51,7 @@ search — "find all references" for sprites, objects, tiles, music, and exits.)
 | Level-number free reassignment (LM-style, arbitrary) | ✅ | Turned out not to need code injection: a single existing instruction (`LDA.L $7ED000,X` at SNES `$05D89B`, confirmed byte-for-byte against a real ROM: `BF 00 D0 7E`) is repointed to a custom ROM table instead of the vanilla WRAM-computed one, using the same `layer1_tiles` index space. `encode_custom_level_number` inverts the vanilla remap so the existing (unmodified) remap code still produces the right final number; verified with an exhaustive round-trip test over all 220 representable values (0x00-0xDB). UI in `world_editor/mod.rs` tile-inspect panel; only touches the ROM if the user actually overrides a level number, so untouched hacks stay byte-identical to vanilla in this area. Known limitation: repeated saves with active overrides allocate a fresh table each time rather than reusing one in place (documented in code, harmless but wasteful) |
 | Custom level names (overworld name table) | ✅ | `crates/smwe-rom/src/overworld/level_names.rs`: decodes the 93-entry `LevelNames` table (SNES `$04A0FC`) via the three fragment tables (`$049C91`/`$049CCF`/`$049CED`, `CODE_049D07` in `bank_04.asm`). The vanilla 460-byte string pool is 100% full, so customized names trigger a relocation patch: tables move to `$FF`-filled space at `$04A1B6` (93/16/16 slots; T2/T3 capped at 16 by the 4-bit packed entry format), pool expands in place to 578 bytes, and three `LDA.W` address constants are rewritten. Encoder splits names into shared (prefix, middle, suffix) fragments, merging rare fragments into T1 to fit the slot caps. UI: text field in `world_editor` tile-inspect panel per translevel, vanilla name as hint, and byte-budget enforcement (`check_name`: at most 19 tiles — the game's `$26`-byte stripe buffer — `A–Z 0–9 space # '` only; over-long/invalid input refused with a red error, mirroring the message-box editor). Verified: all 93 vanilla names decode correctly; encode→patch→decode round-trip passes on the real ROM. See `docs/custom_level_names.md` and `docs/screenshots/custom-level-names.png` |
 | Layer 2 scroll properties (not raw tiles) | ⛔ | Not found |
-| Animated overworld tiles editing | ⛔ | Not found |
+| Animated overworld tiles (preview) | 🟡 | `smwe-emu::emu::{init_ow_anim_water, advance_ow_anim_frame}`: Rust transcription of `CODE_048086`/`OW_Tile_Animation` (`bank_04.asm`). Initializes the 96-byte water/waterfall buffer at `$7E0AF6` from decompressed GFX14 (`GFX14_OWAnimation`) via `DATA_048000` pointers (`$7EB480/$7EB498/$7EB4B0`), then rotates bits per visible frame (8 game-frames = 133ms). VBlank DMA replica uploads 352 bytes to VRAM word `$0750` (4bpp tiles 117–127). World editor ticks every 133ms and re-uploads. Editing the animation data (not just previewing) is not implemented — no LM-parity editable table was found. Indicator sprites were investigated: `OWScrollArrowStripe` is a fixed border graphic, and Mario/OW sprites are gameplay rendering, not an LM-style editable indicator list. See `docs/screenshots/ow-animated-tiles.gif` |
 | Overworld undo/redo | ✅ | Added 2026 (commit `77dfc73`) |
 
 ## Graphics / Map16 / Palette Tools

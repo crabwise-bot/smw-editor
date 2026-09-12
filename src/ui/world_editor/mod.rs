@@ -260,6 +260,8 @@ pub struct UiWorldEditor {
     event_ownership: Vec<u8>,
     /// True if any event-ownership assignment has been changed.
     event_ownership_dirty: bool,
+    /// Last time the overworld animated tiles were ticked.
+    last_anim_tick: std::time::Instant,
 }
 
 impl UiWorldEditor {
@@ -324,6 +326,7 @@ impl UiWorldEditor {
             level_name_error: None,
             event_ownership,
             event_ownership_dirty: false,
+            last_anim_tick: std::time::Instant::now(),
         };
         editor.load_submap();
         editor
@@ -1130,6 +1133,19 @@ impl UiWorldEditor {
             let screen_sz = view_rect.size() * ppp;
             let gl_offset = self.offset;
             let gl_zoom = z * ppp;
+
+            // ── Overworld animated tiles ─────────────────────────────
+            // SMW advances each animated tile slot once every 8 game-frames at
+            // 60 fps, so each distinct animation frame shows for ~133ms.  We tick
+            // at the same interval to match the real game's visual speed.
+            const ANIM_INTERVAL: std::time::Duration = std::time::Duration::from_millis(133);
+            if self.last_anim_tick.elapsed() >= ANIM_INTERVAL {
+                self.last_anim_tick = std::time::Instant::now();
+                smwe_emu::emu::advance_ow_anim_frame(&mut self.cpu);
+                let r = self.renderer.lock().expect("Cannot lock overworld renderer");
+                r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+            }
+            ui.ctx().request_repaint_after(ANIM_INTERVAL);
 
             ui.painter().add(PaintCallback {
                 rect: view_rect,
