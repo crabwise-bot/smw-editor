@@ -92,6 +92,12 @@ pub struct UiLevelEditor {
     editing_mode: EditingMode,
     selected_object_indices: HashSet<usize>,
     selected_sprite_indices: HashSet<usize>,
+    /// In-progress Lunar Magic-style object drag (body move or handle resize).
+    /// Transient: not part of the undoable layer; committed once on release.
+    object_drag: Option<editing::ObjectDrag>,
+    /// Set for one frame when an object drag ends with a change, so the
+    /// release click doesn't also trigger click-select/tile-inspect.
+    suppress_click_select: bool,
     draw_object_id: u8,
     draw_object_settings: u8,
     draw_block_id: u16,
@@ -250,6 +256,8 @@ impl UiLevelEditor {
             editing_mode: EditingMode::Select,
             selected_object_indices: HashSet::new(),
             selected_sprite_indices: HashSet::new(),
+            object_drag: None,
+            suppress_click_select: false,
             draw_object_id: 0x00,
             draw_object_settings: 0x00,
             draw_block_id: 0x25,
