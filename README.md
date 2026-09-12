@@ -1,7 +1,7 @@
 # SMW Editor
 
 > [!NOTE]
-> This is a community fork of the [original SMW Editor](https://github.com/SMW-Editor/smw-editor).
+> This is an AI-generated community fork of the [original SMW Editor](https://github.com/SMW-Editor/smw-editor).
 
 ![Overworld Editor](assets/overworld.png)
 
