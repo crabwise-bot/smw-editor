@@ -31,7 +31,7 @@ use crate::{
     },
     message_boxes::MessageBoxes,
     objects::tilesets::Tilesets,
-    overworld::{OverworldData, OverworldEvents},
+    overworld::{OverworldData, OverworldEvents, OverworldL2Events},
     snes_utils::{
         addr::AddrSnes,
         rom::{Rom, RomError},
@@ -53,6 +53,7 @@ pub struct SmwRom {
     pub map16_tilesets:      Tilesets,
     pub overworld:           OverworldData,
     pub overworld_events:    OverworldEvents,
+    pub overworld_l2_events: OverworldL2Events,
     pub sprite_tweakers:     SpriteTweakers,
     pub message_boxes:       MessageBoxes,
     pub title_credits:       TitleCreditsData,
@@ -107,6 +108,16 @@ impl SmwRom {
             }
         });
 
+        log::info!("Parsing overworld Layer 2 event data");
+        let overworld_l2_events = OverworldL2Events::parse(&rom).unwrap_or_else(|e| {
+            log::warn!("Could not parse overworld Layer 2 event data: {e}");
+            OverworldL2Events {
+                entries:       Vec::new(),
+                boundaries:    Vec::new(),
+                silent_events: Vec::new(),
+            }
+        });
+
         log::info!("Parsing sprite tweaker bytes");
         let sprite_tweakers = SpriteTweakers::parse(&rom).unwrap_or_else(|e| {
             log::warn!("Could not parse sprite tweaker bytes: {e}");
@@ -141,6 +152,7 @@ impl SmwRom {
             map16_tilesets,
             overworld,
             overworld_events,
+            overworld_l2_events,
             sprite_tweakers,
             message_boxes,
             title_credits,
