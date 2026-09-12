@@ -14,36 +14,6 @@ permissions:
   contents: write
 
 jobs:
-  lint:
-    name: Deny warnings
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libglx-dev libgl1-mesa-dev libwayland-dev libx11-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: lint-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            lint-cargo-
-
-      - name: Check (warnings denied)
-        env:
-          RUSTFLAGS: -D warnings
-        run: cargo check --workspace --all-targets
-
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -83,7 +53,14 @@ jobs:
           restore-keys: |
             ${{ matrix.target }}-cargo-
 
+      - name: Check (warnings denied)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
       - name: Build
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Windows)
