@@ -64,10 +64,20 @@ pub const LEVEL_COUNT: usize = 0x200;
 
 // -------------------------------------------------------------------------------------------------
 
+/// Size of the Layer 2 object-data header in bytes.
+///
+/// When a level's Layer 2 pointer does not have bank `$FF`, the pointer leads
+/// with a 5-byte header that the game skips outright (`SMWDisX bank_05.asm`:
+/// `ADC #$05` — "to ignore Layer 2's header") before loading the object
+/// stream. In the vanilla ROM it usually mirrors the level's own primary
+/// header, but the game never reads it, so the editor treats it as
+/// user-editable bytes instead of copying it verbatim on save.
+pub const LAYER2_HEADER_SIZE: usize = 5;
+
 #[derive(Debug, Clone)]
 pub enum Layer2Data {
     Background(BackgroundData),
-    Objects(ObjectLayer),
+    Objects { header: [u8; LAYER2_HEADER_SIZE], objects: ObjectLayer },
 }
 
 #[derive(Debug, Clone)]
@@ -124,9 +134,14 @@ impl Level {
             let (background, _) = BackgroundData::read_from(bytes).map_err(LevelParseError::Layer2BackgroundRead)?;
             Ok(Layer2Data::Background(background))
         } else {
-            let bytes = rom.slice_from(l2_ptr + PRIMARY_HEADER_SIZE as u32).map_err(LevelParseError::Layer2Read)?;
+            let header_slice = SnesSlice::new(l2_ptr, LAYER2_HEADER_SIZE);
+            let header_bytes = rom.slice_lorom(header_slice).map_err(LevelParseError::Layer2Read)?;
+            let mut header = [0u8; LAYER2_HEADER_SIZE];
+            header.copy_from_slice(header_bytes);
+            let bytes =
+                rom.slice_from(l2_ptr + LAYER2_HEADER_SIZE as u32).map_err(LevelParseError::Layer2Read)?;
             let (objects, _) = parse_bytes(bytes, ObjectLayer::parse).map_err(LevelParseError::Layer2Read)?;
-            Ok(Layer2Data::Objects(objects))
+            Ok(Layer2Data::Objects { header, objects })
         }
     }
 
@@ -147,5 +162,79 @@ impl Level {
         };
 
         Ok((sprite_header, sprite_layer))
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        snes_utils::addr::{AddrPc, AddrSnes},
+        SmwRom,
+    };
+
+    /// Real-ROM tests: need `ROM_PATH` pointing at a headerless SMW ROM.
+    fn test_rom() -> Option<SmwRom> {
+        let path = std::env::var("ROM_PATH").ok()?;
+        SmwRom::from_file(&path).ok()
+    }
+
+    fn l2_pointer_pc(rom_bytes: &[u8], level_num: u32) -> u32 {
+        let tbl_pc = AddrPc::try_from_lorom(AddrSnes(0x05E600 + level_num * 3)).unwrap().as_index() as u32;
+        let s = &rom_bytes[tbl_pc as usize..tbl_pc as usize + 3];
+        u32::from_le_bytes([s[0], s[1], s[2], 0])
+    }
+
+    /// The 5-byte Layer 2 object header extracted by `parse_l2` must be
+    /// exactly the bytes at the level's Layer 2 pointer in the vanilla ROM.
+    #[test]
+    #[ignore]
+    fn real_rom_l2_object_headers_match_pointer_bytes() {
+        let rom = test_rom().expect("ROM_PATH must point at a headerless SMW ROM");
+        let rom_bytes = rom.rom.bytes();
+        let mut object_levels = 0u32;
+        for (level_num, level) in rom.levels.iter().enumerate() {
+            let Layer2Data::Objects { header, .. } = &level.layer2 else { continue };
+            object_levels += 1;
+            let l2_ptr = l2_pointer_pc(rom_bytes, level_num as u32);
+            assert_ne!(l2_ptr >> 16, 0xFF, "level {level_num:03X}: parsed as objects but pointer bank is $FF");
+            let data_pc = AddrPc::try_from_lorom(AddrSnes(l2_ptr)).unwrap().as_index() as usize;
+            assert_eq!(
+                &rom_bytes[data_pc..data_pc + LAYER2_HEADER_SIZE],
+                header,
+                "level {level_num:03X}: parsed L2 header != ROM bytes at the Layer 2 pointer",
+            );
+        }
+        assert!(object_levels > 0, "expected some levels with Layer 2 objects in the vanilla ROM");
+    }
+
+    /// Simulate the editor flow: edit the L2 header bytes, write them at the
+    /// Layer 2 pointer (as `save_to_rom` does), re-parse — the new header
+    /// must come back and the object stream must be untouched.
+    #[test]
+    #[ignore]
+    fn real_rom_l2_header_edit_round_trips() {
+        let rom = test_rom().expect("ROM_PATH must point at a headerless SMW ROM");
+        // Level 0x9 has Layer 2 objects in the vanilla ROM.
+        let Layer2Data::Objects { header, objects } = &rom.levels[0x9].layer2 else {
+            panic!("level 009 should have Layer 2 objects in the vanilla ROM");
+        };
+
+        let edited = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x00];
+        assert_ne!(&edited, header, "test edit must differ from the vanilla header");
+
+        let mut bytes = rom.rom.bytes().to_vec();
+        let l2_ptr = l2_pointer_pc(&bytes, 0x9);
+        let data_pc = AddrPc::try_from_lorom(AddrSnes(l2_ptr)).unwrap().as_index() as usize;
+        bytes[data_pc..data_pc + LAYER2_HEADER_SIZE].copy_from_slice(&edited);
+
+        let reparsed = Level::parse(&Rom::new(bytes).unwrap(), 0x9).unwrap();
+        let Layer2Data::Objects { header: header2, objects: objects2 } = &reparsed.layer2 else {
+            panic!("level 009 lost its Layer 2 objects after the header edit");
+        };
+        assert_eq!(&edited, header2, "edited L2 header did not round-trip through re-parse");
+        assert_eq!(objects.as_bytes(), objects2.as_bytes(), "object stream changed by the header edit");
     }
 }

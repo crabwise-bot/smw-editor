@@ -30,6 +30,10 @@ pub(super) struct LevelProperties {
     pub bg_initial_pos: u8,
     pub no_yoshi_level: bool,
     pub unknown_vertical_pos_level: bool,
+
+    // Layer 2 object-data header (5 bytes at the Layer 2 pointer, game-ignored).
+    // Only meaningful when `has_layer2` is true.
+    pub layer2_header: [u8; 5],
 }
 
 impl LevelProperties {
@@ -37,7 +41,11 @@ impl LevelProperties {
         let h = &level.primary_header;
         let s = &level.secondary_header;
         let is_vertical = s.vertical_level();
-        let has_layer2 = matches!(level.layer2, Layer2Data::Objects(_));
+        let has_layer2 = matches!(level.layer2, Layer2Data::Objects { .. });
+        let layer2_header = match &level.layer2 {
+            Layer2Data::Objects { header, .. } => *header,
+            Layer2Data::Background(_) => [0u8; 5],
+        };
         let (_, _) = s.main_entrance_xy_pos();
         Self {
             palette_bg: h.palette_bg(),
@@ -63,6 +71,7 @@ impl LevelProperties {
             bg_initial_pos: s.bg_initial_pos(),
             no_yoshi_level: s.no_yoshi_level(),
             unknown_vertical_pos_level: s.unknown_vertical_pos_level(),
+            layer2_header,
         }
     }
 

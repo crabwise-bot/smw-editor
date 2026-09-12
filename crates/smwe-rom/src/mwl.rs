@@ -43,7 +43,7 @@ use crate::{
     compression::lc_rle1,
     freespace,
     level::headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
-    level::{Layer2Data, Level, PRIMARY_HEADER_SIZE, SPRITE_HEADER_SIZE},
+    level::{Layer2Data, Level, LAYER2_HEADER_SIZE, PRIMARY_HEADER_SIZE, SPRITE_HEADER_SIZE},
     snes_utils::{
         addr::{AddrPc, AddrSnes},
         rom::{Rom, RomError},
@@ -397,12 +397,13 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
         }
         encode_section(bg_descriptor(high), l2_ptr, &payload)
     } else {
-        // Layer 2 objects: 5-byte header at the pointer + object stream.
-        let header = rom.rom.slice_lorom(SnesSlice::new(AddrSnes(l2_ptr), 5))?;
-        let Layer2Data::Objects(objs) = &level.layer2 else {
+        // Layer 2 objects: 5-byte header + object stream. The header comes
+        // from the parsed model (it is user-editable in the level editor),
+        // which matches the ROM bytes it was parsed from.
+        let Layer2Data::Objects { header, objects: objs } = &level.layer2 else {
             unreachable!("layer2 pointer is not $FF but parsed data is a background");
         };
-        let mut payload = Vec::with_capacity(5 + objs.as_bytes().len());
+        let mut payload = Vec::with_capacity(LAYER2_HEADER_SIZE + objs.as_bytes().len());
         payload.extend_from_slice(header);
         payload.extend_from_slice(objs.as_bytes());
         encode_section(0, l2_ptr, &payload)

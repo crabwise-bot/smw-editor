@@ -159,7 +159,7 @@ impl LevelRefs {
             }
         };
         index_objects(&level.layer1);
-        if let Layer2Data::Objects(objects) = &level.layer2 {
+        if let Layer2Data::Objects { objects, .. } = &level.layer2 {
             index_objects(objects);
         }
         if let Layer2Data::Background(bg) = &level.layer2 {
@@ -193,7 +193,10 @@ mod tests {
             secondary_header: SecondaryHeader([0, 0, 0, 0]),
             sprite_header: SpriteHeader(0),
             layer1: crate::level::ObjectLayer::parse(object_bytes).unwrap().1.0,
-            layer2: Layer2Data::Objects(crate::level::ObjectLayer::parse(&[0xFF]).unwrap().1.0),
+            layer2: Layer2Data::Objects {
+                header: [0u8; crate::level::LAYER2_HEADER_SIZE],
+                objects: crate::level::ObjectLayer::parse(&[0xFF]).unwrap().1.0,
+            },
             sprite_layer: crate::level::SpriteLayer::parse(&sprite_stream).unwrap().1.0,
         }
     }
@@ -245,7 +248,10 @@ mod tests {
         let mut level = test_level(&[], &[0xFF], 0);
         // Extended object 0x77 placed on layer 2 (objects variant).
         let l2_bytes = [0x00u8, 0x00, 0x77, 0xFF];
-        level.layer2 = Layer2Data::Objects(crate::level::ObjectLayer::parse(&l2_bytes).unwrap().1.0);
+        level.layer2 = Layer2Data::Objects {
+            header: [0u8; crate::level::LAYER2_HEADER_SIZE],
+            objects: crate::level::ObjectLayer::parse(&l2_bytes).unwrap().1.0,
+        };
         let index = XrefIndex::build(std::slice::from_ref(&level));
 
         assert_eq!(index.levels_using_extended_object(0x77), vec![0]);
