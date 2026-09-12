@@ -9,6 +9,7 @@ const VRAM_L2_TILEMAP_BASE: usize = 0x3000 * 2;
 const OW_L2_COLS: u32 = 64;
 const OW_L2_ROWS: u32 = 64;
 
+use smw_editor::render_util::{read_color, render_tile};
 fn main() {
     let args: Vec<String> = env::args().collect();
     let rom_path = args
@@ -346,53 +347,6 @@ fn render_bg_full(vram: &[u8], tilemap_base: usize, width: u32, cgram: &[u8], pi
             );
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_tile(
-    vram: &[u8], cgram: &[u8], tile_id: usize, palette: usize, flip_x: bool, flip_y: bool, x0: u32, y0: u32,
-    width: u32, pixels: &mut [u8],
-) {
-    let tile_base = tile_id * 32;
-    for ty in 0..8u32 {
-        for tx in 0..8u32 {
-            let px = if flip_x { 7 - tx } else { tx };
-            let py = if flip_y { 7 - ty } else { ty };
-            let row_off = tile_base + (py as usize) * 2;
-            if row_off + 17 >= vram.len() {
-                continue;
-            }
-            let b0 = vram[row_off];
-            let b1 = vram[row_off + 1];
-            let b2 = vram[row_off + 16];
-            let b3 = vram[row_off + 17];
-            let bit = 7 - px as usize;
-            let color_idx =
-                (((b0 >> bit) & 1) | (((b1 >> bit) & 1) << 1) | (((b2 >> bit) & 1) << 2) | (((b3 >> bit) & 1) << 3))
-                    as usize;
-            if color_idx == 0 {
-                continue;
-            }
-            let rgb = read_color(cgram, palette * 16 + color_idx);
-            let off = (((y0 + ty) * width + x0 + tx) * 3) as usize;
-            if off + 2 < pixels.len() {
-                pixels[off] = rgb[0];
-                pixels[off + 1] = rgb[1];
-                pixels[off + 2] = rgb[2];
-            }
-        }
-    }
-}
-
-fn read_color(cgram: &[u8], idx: usize) -> [u8; 3] {
-    let off = idx * 2;
-    if off + 1 >= cgram.len() {
-        return [0, 0, 0];
-    }
-    let lo = cgram[off] as u16;
-    let hi = cgram[off + 1] as u16;
-    let rgb = lo | (hi << 8);
-    [((rgb & 0x1F) << 3) as u8, (((rgb >> 5) & 0x1F) << 3) as u8, (((rgb >> 10) & 0x1F) << 3) as u8]
 }
 
 /// Draw Layer 2 event target markers over a rendered overworld map image.
