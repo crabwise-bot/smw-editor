@@ -20,13 +20,13 @@ use smwe_rom::{
 use super::UiLevelEditor;
 
 /// Does this ROM image carry a 0x200-byte SMC copier header?
-fn smc_header_offset(rom_bytes: &[u8]) -> usize {
+pub(super) fn smc_header_offset(rom_bytes: &[u8]) -> usize {
     if rom_bytes.len() % 0x400 == 0x200 { 0x200 } else { 0 }
 }
 
 /// Write `rom_bytes` back to the ROM file with a `.bak` backup and an atomic
 /// temp-file rename, mirroring the main save path.
-fn write_rom_file_atomic(rom_path: &std::path::Path, rom_bytes: &[u8]) -> anyhow::Result<()> {
+pub(super) fn write_rom_file_atomic(rom_path: &std::path::Path, rom_bytes: &[u8]) -> anyhow::Result<()> {
     if rom_path.exists() {
         let bak_path = rom_path.with_extension(format!(
             "{}.bak",

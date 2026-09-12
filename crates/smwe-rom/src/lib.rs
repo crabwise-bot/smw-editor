@@ -9,6 +9,7 @@ pub mod music;
 pub mod graphics;
 pub mod internal_header;
 pub mod level;
+pub mod map16_file;
 pub mod message_boxes;
 pub mod mwl;
 pub mod objects;
