@@ -19,17 +19,30 @@ impl UiLevelEditor {
         let z = self.zoom;
         let tile_sz = TILE_PX * z;
 
-        let props = &self.level_properties;
-        let (level_w, level_h) = props.level_dimensions_in_tiles();
+        let (level_w, level_h) = self.level_properties.level_dimensions_in_tiles();
         let canvas_w = level_w as f32 * tile_sz;
         let canvas_h = level_h as f32 * tile_sz;
 
         // Level canvas origin in screen space
         let origin = view_rect.min + self.offset * z;
 
+        // ── LM-style object drag (move/resize) ─────────────────
+        // Runs before panning so a drag that starts on the selected
+        // object (or one of its handles) suppresses canvas panning.
+        // (level_w/level_h are copied first: update_object_drag needs
+        // &mut self while `props` below borrows it immutably.)
+        self.update_object_drag(&resp, origin, tile_sz, level_w, level_h);
+
+        let props = &self.level_properties;
+        let (scr_w, scr_h) = props.screen_dimensions_in_tiles();
+        let num_screens = props.num_screens();
+        let is_vertical = props.is_vertical;
+
         // ── Pan with middle-mouse or left-drag ────────────────
         if resp.dragged_by(egui::PointerButton::Middle)
-            || (resp.dragged_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.is_none()))
+            || (resp.dragged_by(egui::PointerButton::Primary)
+                && ui.input(|i| i.modifiers.is_none())
+                && self.object_drag.is_none())
         {
             self.offset += resp.drag_delta() / z;
         }
@@ -104,10 +117,8 @@ impl UiLevelEditor {
         painter.rect_stroke(level_rect, CornerRadius::ZERO, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
 
         // ── Screen dividers ───────────────────────────────────
-        let (scr_w, scr_h) = props.screen_dimensions_in_tiles();
-        let screens = props.num_screens();
-        for s in 0..screens {
-            let (lx, ly) = if props.is_vertical {
+        for s in 0..num_screens {
+            let (lx, ly) = if is_vertical {
                 (0.0, s as f32 * scr_h as f32 * tile_sz)
             } else {
                 (s as f32 * scr_w as f32 * tile_sz, 0.0)
@@ -143,8 +154,8 @@ impl UiLevelEditor {
         if let Some(layer_data) = self.editing_objects() {
             layer_data.read(|layer| {
                 for exit in &layer.exits {
-                    let sx = if props.is_vertical { 0 } else { exit.screen as u32 };
-                    let sy = if props.is_vertical { exit.screen as u32 } else { 0 };
+                    let sx = if is_vertical { 0 } else { exit.screen as u32 };
+                    let sy = if is_vertical { exit.screen as u32 } else { 0 };
                     let ex = (sx * scr_w) as f32 * tile_sz;
                     let ey = (sy * scr_h) as f32 * tile_sz;
                     let er = Rect::from_min_size(origin + vec2(ex, ey), Vec2::splat(tile_sz * 2.0));
@@ -260,8 +271,17 @@ impl UiLevelEditor {
                             (w.max(1), h.max(1))
                         };
 
-                        let pos = origin + vec2(obj.x as f32 * tile_sz, obj.y as f32 * tile_sz);
-                        let rect = Rect::from_min_size(pos, vec2(w as f32 * tile_sz, h as f32 * tile_sz));
+                        // Live drag feedback: draw the object at its dragged
+                        // position/size while a drag is in progress.
+                        let (dx, dy, dw, dh) = match &self.object_drag {
+                            Some(drag) if drag.index == i => {
+                                (drag.cur_x, drag.cur_y, drag.cur_w, drag.cur_h)
+                            }
+                            _ => (obj.x, obj.y, w, h),
+                        };
+                        let pos = origin + vec2(dx as f32 * tile_sz, dy as f32 * tile_sz);
+                        let rect =
+                            Rect::from_min_size(pos, vec2(dw as f32 * tile_sz, dh as f32 * tile_sz));
                         if rect.max.x < view_rect.min.x
                             || rect.min.x > view_rect.max.x
                             || rect.max.y < view_rect.min.y
@@ -289,6 +309,23 @@ impl UiLevelEditor {
                             );
                         }
 
+                        // Lunar Magic-style drag handles: 8 white squares
+                        // (corners + edge midpoints) on the single selected
+                        // object. Extended (1x1) objects can't be resized,
+                        // so they get the selection outline only.
+                        if selected && self.selected_object_indices.len() == 1 && !obj.is_extended {
+                            let handle_px = (7.0 * z).clamp(6.0, 14.0);
+                            for (_, hrect) in super::editing::drag_handle_rects(rect, handle_px) {
+                                painter.rect_filled(hrect, CornerRadius::ZERO, Color32::WHITE);
+                                painter.rect_stroke(
+                                    hrect,
+                                    CornerRadius::ZERO,
+                                    Stroke::new(1.0, Color32::BLACK),
+                                    StrokeKind::Outside,
+                                );
+                            }
+                        }
+
                         if self.show_object_labels && z >= 0.9 {
                             let label = if obj.is_extended {
                                 format!("E{:02X}", obj.extended_id)
@@ -305,6 +342,48 @@ impl UiLevelEditor {
                         }
                     }
                 });
+            }
+        }
+
+        // ── Drag-handle hover cursors (LM feel) ────────────────
+        if let Some(cursor) = resp.hover_pos() {
+            if self.selected_object_indices.len() == 1
+                && !self.edit_sprites
+                && (self.editing_mode == EditingMode::Select || self.editing_mode == EditingMode::Probe)
+            {
+                let idx = *self.selected_object_indices.iter().next().expect("len == 1");
+                if let Some(layer_data) = self.editing_objects() {
+                    let hit = layer_data.read(|layer| {
+                        layer.objects.get(idx).map(|obj| {
+                            let (w, h) = super::editing::object_dims(obj.settings, obj.is_extended);
+                            let rect = Rect::from_min_size(
+                                origin + vec2(obj.x as f32 * tile_sz, obj.y as f32 * tile_sz),
+                                vec2(w as f32 * tile_sz, h as f32 * tile_sz),
+                            );
+                            let handle_px = (7.0 * z).clamp(6.0, 14.0);
+                            let on_handle = if obj.is_extended {
+                                None
+                            } else {
+                                super::editing::handle_at(rect, handle_px, cursor)
+                            };
+                            (on_handle, rect.contains(cursor))
+                        })
+                    });
+                    if let Some((on_handle, on_body)) = hit {
+                        use super::editing::DragHandle::*;
+                        let icon = match on_handle {
+                            Some(Nw) | Some(Se) => egui::CursorIcon::ResizeNwSe,
+                            Some(Ne) | Some(Sw) => egui::CursorIcon::ResizeNeSw,
+                            Some(N) | Some(S) => egui::CursorIcon::ResizeVertical,
+                            Some(E) | Some(W) => egui::CursorIcon::ResizeHorizontal,
+                            Option::None if on_body => egui::CursorIcon::Grab,
+                            _ => egui::CursorIcon::Default,
+                        };
+                        if !matches!(icon, egui::CursorIcon::Default) {
+                            ui.output_mut(|o| o.cursor_icon = icon);
+                        }
+                    }
+                }
             }
         }
 
@@ -369,6 +448,7 @@ impl UiLevelEditor {
                 // Tile inspection click (only in Select mode with no object selected,
                 // or always when holding Alt for quick inspection)
                 let inspect_click = resp.clicked_by(egui::PointerButton::Primary)
+                    && !self.suppress_click_select
                     && (self.editing_mode == EditingMode::Select || ui.input(|i| i.modifiers.alt));
                 if inspect_click {
                     self.selected_tile = Some((tx as u32, ty as u32));
