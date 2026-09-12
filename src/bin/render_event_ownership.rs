@@ -42,21 +42,6 @@ struct Fonts {
     sans_bold: FontRef<'static>,
 }
 
-fn fill_rect(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, c: Rgb<u8>) {
-    for yy in y..(y + h).min(img.height()) {
-        for xx in x..(x + w).min(img.width()) {
-            img.put_pixel(xx, yy, c);
-        }
-    }
-}
-
-fn rect_border(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, c: Rgb<u8>) {
-    fill_rect(img, x, y, w, 1, c);
-    fill_rect(img, x, y + h - 1, w, 1, c);
-    fill_rect(img, x, y, 1, h, c);
-    fill_rect(img, x + w - 1, y, 1, h, c);
-}
-
 /// Draw one line of text; returns the advance width in px.
 fn draw_text(
     img: &mut RgbImage,
@@ -134,6 +119,7 @@ fn event_label(events: &OverworldEvents, event: Option<u8>) -> String {
     }
 }
 
+use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let output = args

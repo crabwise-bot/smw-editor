@@ -25,14 +25,6 @@ fn load_font(path: &str) -> FontRef<'static> {
     FontRef::try_from_slice(leaked).expect("font parse")
 }
 
-fn fill_rect(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, c: Rgb<u8>) {
-    for yy in y..(y + h).min(img.height()) {
-        for xx in x..(x + w).min(img.width()) {
-            img.put_pixel(xx, yy, c);
-        }
-    }
-}
-
 fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, baseline_y: i32, px: f32, color: Rgb<u8>) {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
@@ -81,6 +73,7 @@ fn describe(entry: &L2EventEntry) -> String {
     }
 }
 
+use smw_editor::render_util::{fill_rect};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rom_path = args

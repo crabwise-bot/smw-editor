@@ -29,21 +29,6 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
     anyhow::bail!("no font file found; tried {candidates:?}")
 }
 
-fn fill_rect(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, c: Rgb<u8>) {
-    for yy in y..(y + h).min(img.height()) {
-        for xx in x..(x + w).min(img.width()) {
-            img.put_pixel(xx, yy, c);
-        }
-    }
-}
-
-fn rect_border(img: &mut RgbImage, x: u32, y: u32, w: u32, h: u32, c: Rgb<u8>) {
-    fill_rect(img, x, y, w, 1, c);
-    fill_rect(img, x, y + h - 1, w, 1, c);
-    fill_rect(img, x, y, 1, h, c);
-    fill_rect(img, x + w - 1, y, 1, h, c);
-}
-
 fn draw_text(
     img: &mut RgbImage,
     font: &FontRef,
@@ -97,6 +82,7 @@ fn draw_text(
     }
 }
 
+use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let output = args
