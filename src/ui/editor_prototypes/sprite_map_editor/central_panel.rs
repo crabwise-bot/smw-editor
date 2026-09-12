@@ -160,7 +160,7 @@ impl UiSpriteMapEditor {
         // Grid
         if self.always_show_grid || ui.input(|i| i.modifiers.shift_only()) {
             let spacing = self.zoom * self.tile_size_px / self.pixels_per_point;
-            let stroke = Stroke::new(1., Color32::from_white_alpha(tweak!(70)));
+            let stroke = Stroke::new(1_f32, Color32::from_white_alpha(tweak!(70)));
             for cell in 0..33 {
                 let position = cell as f32 * spacing;
                 ui.painter().hline(canvas_rect.min.x..=canvas_rect.max.x, canvas_rect.min.y + position, stroke);
@@ -176,7 +176,7 @@ impl UiSpriteMapEditor {
                 ui.painter().rect_stroke(
                     bounds.to_screen(self.pixels_per_point, self.zoom).0.translate(canvas_rect.left_top().to_vec2()),
                     CornerRadius::ZERO,
-                    Stroke::new(2., Color32::BLUE),
+                    Stroke::new(2_f32, Color32::BLUE),
                     StrokeKind::Outside,
                 );
             }
@@ -213,7 +213,7 @@ impl UiSpriteMapEditor {
                     ui.painter().rect_stroke(
                         selection_rect.0,
                         CornerRadius::ZERO,
-                        Stroke::new(1., ui.visuals().selection.bg_fill),
+                        Stroke::new(1_f32, ui.visuals().selection.bg_fill),
                         StrokeKind::Outside,
                     );
                 }

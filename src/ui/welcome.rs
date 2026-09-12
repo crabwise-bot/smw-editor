@@ -72,7 +72,7 @@ pub fn draw_welcome(ui: &mut Ui, open_requested: &mut bool) -> Option<PathBuf> {
             ];
             for (icon, name, desc) in features {
                 Frame::NONE
-                    .stroke(Stroke::new(1.0, Color32::from_gray(55)))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(55)))
                     .corner_radius(8)
                     .inner_margin(Margin::same(12))
                     .show(ui, |ui| {

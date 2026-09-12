@@ -809,7 +809,7 @@ impl UiWorldEditor {
                         ui.painter().rect_stroke(
                             sel_rect,
                             egui::CornerRadius::ZERO,
-                            egui::Stroke::new(2.0, Color32::YELLOW),
+                            egui::Stroke::new(2.0_f32, Color32::YELLOW),
                             egui::StrokeKind::Outside,
                         );
                     }
@@ -846,7 +846,7 @@ impl UiWorldEditor {
                     ui.painter().rect_stroke(
                         sel_rect,
                         egui::CornerRadius::ZERO,
-                        egui::Stroke::new(2.0, Color32::YELLOW),
+                        egui::Stroke::new(2.0_f32, Color32::YELLOW),
                         egui::StrokeKind::Outside,
                     );
                 }
@@ -1160,13 +1160,13 @@ impl UiWorldEditor {
         painter.rect_stroke(
             ow_rect,
             CornerRadius::ZERO,
-            Stroke::new(2.0, Color32::from_white_alpha(140)),
+            Stroke::new(2.0_f32, Color32::from_white_alpha(140)),
             StrokeKind::Outside,
         );
 
         // ── Grid (Map16 block grid, aligned to L1) ───────────────────────────
         if self.show_grid || ui.input(|i| i.modifiers.shift_only()) {
-            let stroke = Stroke::new(0.5, Color32::from_white_alpha(25));
+            let stroke = Stroke::new(0.5_f32, Color32::from_white_alpha(25));
             let start_col = ((view_rect.min.x - origin.x) / map16_sz).floor() as i32;
             let end_col = ((view_rect.max.x - origin.x) / map16_sz).ceil() as i32;
             for c in start_col..=end_col {
@@ -1192,7 +1192,7 @@ impl UiWorldEditor {
                 if !active {
                     continue;
                 }
-                let mut mark = |entry: &L2EventEntry| {
+                let mark = |entry: &L2EventEntry| {
                     let (col, row) = entry.target_tile();
                     let sx = origin.x + (col as f32 * 8.0 - crop_x as f32) * z;
                     let sy = origin.y + (row as f32 * 8.0 - crop_y as f32) * z;
@@ -1201,7 +1201,7 @@ impl UiWorldEditor {
                         return;
                     }
                     let color = l2_marker_color(entry.kind());
-                    painter.circle_stroke(center, tile_sz * 0.45, Stroke::new(1.5, color));
+                    painter.circle_stroke(center, tile_sz * 0.45, Stroke::new(1.5_f32, color));
                     painter.circle_filled(center, 1.5, color);
                 };
                 if let Some(range) = l2.entries_for_event(event) {
@@ -1232,7 +1232,7 @@ impl UiWorldEditor {
                 painter.rect_stroke(
                     tile_rect,
                     CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::WHITE),
+                    Stroke::new(1.0_f32, Color32::WHITE),
                     StrokeKind::Outside,
                 );
 
@@ -1280,7 +1280,7 @@ impl UiWorldEditor {
             painter.rect_stroke(
                 r,
                 CornerRadius::ZERO,
-                Stroke::new(2.0, Color32::from_rgb(255, 220, 0)),
+                Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 0)),
                 StrokeKind::Outside,
             );
         }
