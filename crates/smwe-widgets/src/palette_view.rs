@@ -94,7 +94,7 @@ impl Widget for PaletteView<'_> {
                 ui.painter().rect_stroke(
                     selection_rect,
                     CornerRadius::same(2),
-                    Stroke::new(2., Color32::from_rgba_premultiplied(200, 100, 30, 100)),
+                    Stroke::new(2_f32, Color32::from_rgba_premultiplied(200, 100, 30, 100)),
                     StrokeKind::Outside,
                 );
             }
@@ -122,7 +122,7 @@ impl Widget for PaletteView<'_> {
                 ui.painter().rect_stroke(
                     selection_rect,
                     CornerRadius::same(2),
-                    Stroke::new(2., Color32::from_rgba_premultiplied(200, 100, 30, 100)),
+                    Stroke::new(2_f32, Color32::from_rgba_premultiplied(200, 100, 30, 100)),
                     StrokeKind::Outside,
                 );
             }

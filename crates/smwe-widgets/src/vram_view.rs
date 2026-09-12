@@ -132,7 +132,7 @@ impl Widget for VramView<'_> {
             ui.painter().rect_stroke(
                 selection_rect.translate(vec2(selection.0 as f32, selection.1 as f32) * scale * zoom),
                 CornerRadius::same(tweak!(3.) as u8),
-                Stroke::new(tweak!(2.), Color32::from_rgba_premultiplied(200, 100, 30, 100)),
+                Stroke::new(tweak!(2_f32), Color32::from_rgba_premultiplied(200, 100, 30, 100)),
                 StrokeKind::Outside,
             );
         }

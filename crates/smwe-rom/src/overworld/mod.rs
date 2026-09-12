@@ -602,7 +602,7 @@ mod tests {
             let dest = dest as u16;
             let (col, row) = l2_entry(0, dest).target_tile();
             let x_px = (((dest & 0x3E) << 2) & 0xFF) as u8;
-            let y_px = (((dest >> 3) as u8) & 0xF8);
+            let y_px = ((dest >> 3) as u8) & 0xF8;
             assert_eq!((col, row), (x_px / 8, y_px / 8), "dest_word={dest:#06X}");
         }
         // First vanilla entry: dest 0x23CC -> x_px = 0x30, y_px = 0x78.

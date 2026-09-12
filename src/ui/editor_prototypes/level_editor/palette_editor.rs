@@ -60,7 +60,7 @@ impl UiLevelEditor {
             ui.painter().rect_stroke(
                 cell_rect,
                 egui::CornerRadius::ZERO,
-                egui::Stroke::new(1.0, Color32::from_gray(80)),
+                egui::Stroke::new(1.0_f32, Color32::from_gray(80)),
                 egui::StrokeKind::Outside,
             );
 
@@ -72,7 +72,7 @@ impl UiLevelEditor {
                 ui.painter().rect_stroke(
                     cell_rect,
                     egui::CornerRadius::ZERO,
-                    egui::Stroke::new(2.0, Color32::WHITE),
+                    egui::Stroke::new(2.0_f32, Color32::WHITE),
                     egui::StrokeKind::Outside,
                 );
             }

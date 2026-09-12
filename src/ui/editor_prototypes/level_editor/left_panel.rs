@@ -136,7 +136,7 @@ impl UiLevelEditor {
             ui.painter().rect_stroke(
                 sel_rect,
                 egui::CornerRadius::ZERO,
-                egui::Stroke::new(2.0, Color32::YELLOW),
+                egui::Stroke::new(2.0_f32, Color32::YELLOW),
                 egui::StrokeKind::Outside,
             );
         }

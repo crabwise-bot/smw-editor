@@ -114,7 +114,7 @@ impl UiLevelEditor {
         }
 
         // Level bounding box
-        painter.rect_stroke(level_rect, CornerRadius::ZERO, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+        painter.rect_stroke(level_rect, CornerRadius::ZERO, Stroke::new(2.0_f32, Color32::WHITE), StrokeKind::Outside);
 
         // ── Screen dividers ───────────────────────────────────
         for s in 0..num_screens {
@@ -136,7 +136,7 @@ impl UiLevelEditor {
             painter.rect_stroke(
                 scr_rect,
                 CornerRadius::ZERO,
-                Stroke::new(0.5, Color32::from_white_alpha(25)),
+                Stroke::new(0.5_f32, Color32::from_white_alpha(25)),
                 StrokeKind::Outside,
             );
             if z >= 0.8 {
@@ -163,7 +163,7 @@ impl UiLevelEditor {
                     painter.rect_stroke(
                         er,
                         CornerRadius::same(3),
-                        Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 200, 0, 200)),
+                        Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(255, 200, 0, 200)),
                         StrokeKind::Outside,
                     );
                     if z >= 0.8 {
@@ -228,7 +228,7 @@ impl UiLevelEditor {
 
         // ── Grid overlay ──────────────────────────────────────
         if self.always_show_grid || ui.input(|i| i.modifiers.shift_only()) {
-            let stroke = Stroke::new(0.5, Color32::from_white_alpha(40));
+            let stroke = Stroke::new(0.5_f32, Color32::from_white_alpha(40));
             let off_x = origin.x.rem_euclid(tile_sz);
             let off_y = origin.y.rem_euclid(tile_sz);
 
@@ -296,7 +296,7 @@ impl UiLevelEditor {
                         painter.rect_stroke(
                             rect,
                             CornerRadius::same(2),
-                            Stroke::new(1.0, fill.linear_multiply(2.0)),
+                            Stroke::new(1.0_f32, fill.linear_multiply(2.0)),
                             StrokeKind::Outside,
                         );
 
@@ -304,7 +304,7 @@ impl UiLevelEditor {
                             painter.rect_stroke(
                                 rect.expand(1.0),
                                 CornerRadius::same(2),
-                                Stroke::new(2.0, Color32::from_rgb(255, 220, 0)),
+                                Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 0)),
                                 StrokeKind::Outside,
                             );
                         }
@@ -320,7 +320,7 @@ impl UiLevelEditor {
                                 painter.rect_stroke(
                                     hrect,
                                     CornerRadius::ZERO,
-                                    Stroke::new(1.0, Color32::BLACK),
+                                    Stroke::new(1.0_f32, Color32::BLACK),
                                     StrokeKind::Outside,
                                 );
                             }
@@ -413,7 +413,7 @@ impl UiLevelEditor {
                     rect,
                     CornerRadius::same(2),
                     Stroke::new(
-                        2.0,
+                        2.0_f32,
                         if selected { Color32::from_rgb(255, 120, 0) } else { Color32::from_rgb(255, 80, 80) },
                     ),
                     StrokeKind::Outside,
@@ -441,7 +441,7 @@ impl UiLevelEditor {
                 painter.rect_stroke(
                     tile_rect,
                     CornerRadius::ZERO,
-                    Stroke::new(1.0, Color32::WHITE),
+                    Stroke::new(1.0_f32, Color32::WHITE),
                     StrokeKind::Outside,
                 );
 
@@ -500,7 +500,7 @@ impl UiLevelEditor {
             painter.rect_stroke(
                 r,
                 CornerRadius::ZERO,
-                Stroke::new(2.0, Color32::from_rgb(255, 220, 0)),
+                Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 0)),
                 StrokeKind::Outside,
             );
         }
