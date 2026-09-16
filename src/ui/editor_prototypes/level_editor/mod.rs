@@ -2,6 +2,7 @@ mod background_layer;
 mod central_panel;
 mod editing;
 mod gfx_editor;
+mod gfx_slot_browser;
 mod message_editor;
 
 mod left_panel;
@@ -158,6 +159,10 @@ pub struct UiLevelEditor {
     gfx_edits:           HashMap<usize, Vec<u8>>,
     show_gfx_editor:     bool,
     gfx_editor_file_num: usize,
+
+    // Per-level GFX slot browser (FG1/FG2/FG3/BG1 + SP1-SP4) cross-linked to
+    // the 8x8 tile editor.
+    show_gfx_slots: bool,
 
     // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
     // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
@@ -324,6 +329,7 @@ impl UiLevelEditor {
             tweaker_editor_sprite_id: 0,
             gfx_edits: HashMap::new(),
             show_gfx_editor: false,
+            show_gfx_slots: false,
             gfx_editor_file_num: 0,
             show_tile_editor: false,
             tile_editor_file_num: 0,
@@ -387,6 +393,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.map16_editor_window(&ctx);
         self.sprite_tweaker_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
+        self.gfx_slot_browser_window(&ctx);
         self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
         self.xref_search_window(&ctx);
