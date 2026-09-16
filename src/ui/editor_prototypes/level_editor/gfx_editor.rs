@@ -101,6 +101,9 @@ impl UiLevelEditor {
 
         let raw_bytes = GfxFile { tile_format: format, tiles }.to_raw_bytes();
         self.gfx_edits.insert(file_num, raw_bytes);
+        // A whole-file import supersedes any staged per-tile pixel edits.
+        self.tile_editor_staged.remove(&file_num);
+        self.tile_editor_revision += 1;
         self.has_edits = true;
     }
 }

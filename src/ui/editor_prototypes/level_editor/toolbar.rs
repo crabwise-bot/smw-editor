@@ -128,6 +128,9 @@ impl UiLevelEditor {
             if tbtn(ui, icon::IMAGE, "Edit 8×8 tiles (GFX / ExGFX)", self.show_gfx_editor) {
                 self.show_gfx_editor = !self.show_gfx_editor;
             }
+            if tbtn(ui, icon::PENCIL_SIMPLE, "Edit 8×8 tile pixels (pixel editor)", self.show_tile_editor) {
+                self.show_tile_editor = !self.show_tile_editor;
+            }
             if tbtn(ui, icon::PALETTE, "Edit colors (palette)", self.show_palette_editor) {
                 self.show_palette_editor = !self.show_palette_editor;
             }

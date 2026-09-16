@@ -16,6 +16,7 @@ mod secondary_entrance_editor;
 mod sprite_catalog;
 mod sprite_layer;
 mod sprite_tweaker_editor;
+mod tile_editor;
 mod tile_picker;
 mod title_credits_editor;
 mod toolbar;
@@ -158,6 +159,22 @@ pub struct UiLevelEditor {
     show_gfx_editor: bool,
     gfx_editor_file_num: usize,
 
+    // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
+    // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
+    // editor's working state.
+    show_tile_editor: bool,
+    tile_editor_file_num: usize,
+    tile_editor_palette: usize,
+    tile_editor_selected: usize,
+    tile_editor_pixels: [u8; 64],
+    tile_editor_paint_color: u8,
+    tile_editor_dirty: bool,
+    tile_editor_staged: HashMap<usize, Vec<smwe_rom::graphics::gfx_file::Tile>>,
+    tile_editor_grid_tex: Option<egui::TextureHandle>,
+    tile_editor_grid_key: (usize, usize, u64),
+    tile_editor_revision: u64,
+    tile_editor_handoff_note: Option<String>,
+
     // Message box (dialog text) editor: global, raw tile-index bytes.
     message_boxes: smwe_rom::message_boxes::MessageBoxes,
     message_boxes_dirty: bool,
@@ -297,6 +314,18 @@ impl UiLevelEditor {
             gfx_edits: HashMap::new(),
             show_gfx_editor: false,
             gfx_editor_file_num: 0,
+            show_tile_editor: false,
+            tile_editor_file_num: 0,
+            tile_editor_palette: 0,
+            tile_editor_selected: 0,
+            tile_editor_pixels: [0u8; 64],
+            tile_editor_paint_color: 1,
+            tile_editor_dirty: false,
+            tile_editor_staged: HashMap::new(),
+            tile_editor_grid_tex: None,
+            tile_editor_grid_key: (usize::MAX, usize::MAX, u64::MAX),
+            tile_editor_revision: 0,
+            tile_editor_handoff_note: None,
             message_boxes,
             message_boxes_dirty: false,
             show_message_editor: false,
@@ -339,6 +368,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.map16_editor_window(&ctx);
         self.sprite_tweaker_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
+        self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
         self.xref_search_window(&ctx);
         self.title_credits_editor_window(&ctx);

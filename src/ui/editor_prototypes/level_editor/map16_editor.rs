@@ -94,13 +94,18 @@ impl UiLevelEditor {
                         image,
                         egui::TextureOptions::NEAREST,
                     );
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(PREVIEW_PX as f32), Sense::hover());
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::splat(PREVIEW_PX as f32), Sense::click());
                     ui.painter().image(
                         tex.id(),
                         rect,
                         Rect::from_min_size(egui::pos2(0., 0.), vec2(1., 1.)),
                         Color32::WHITE,
                     );
+                    if response.double_clicked() {
+                        self.open_tile_editor_from_map16(block_id, sub_i, t);
+                    }
+                    response.on_hover_text("Double-click to edit this 8×8 tile's pixels");
 
                     // Tile word fields
                     let mut tile_num = (t & 0x3FF) as i32;
