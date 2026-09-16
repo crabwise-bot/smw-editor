@@ -609,6 +609,18 @@ pub fn read_oam_snapshot(cpu: &mut Cpu<CheckedMem>) -> Vec<RawOamEntry> {
     entries
 }
 
+/// Run the real title-screen palette setup (`CODE_00ADA6` + `CODE_00922F`).
+///
+/// `CODE_00ADA6` (SMWDisX bank_00.asm) copies `TitleScreenColors` over the
+/// upper half of CGRAM palettes 0 and 1 inside `MainPalette`; `CODE_00922F`
+/// then uploads `MainPalette` to CGRAM. The real game runs both in
+/// `GM04PrepTitleScreen` right after loading the title screen level, so call
+/// this after [`decompress_sublevel`] with the title screen level (0xEB) to
+/// reproduce the title screen's exact CGRAM state.
+pub fn load_title_screen_palette(cpu: &mut Cpu<CheckedMem>) -> u64 {
+    run_routines(cpu, &["CODE_00ADA6", "CODE_00922F"], 10_000_000)
+}
+
 pub fn decompress_sublevel(cpu: &mut Cpu<CheckedMem>, id: u16) -> u64 {
     let now = std::time::Instant::now();
     cpu.emulation = false;

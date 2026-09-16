@@ -198,6 +198,17 @@ pub struct UiLevelEditor {
     title_credits_dirty: bool,
     show_title_credits_editor: bool,
     credits_editor_selected: usize,
+    // Title screen WYSIWYG stripe editor: parsed 64x64 tile grid, its
+    // rendered preview, and the VRAM/CGRAM snapshots the preview is drawn
+    // from (captured from a scratch CPU running the real title init).
+    title_grid: Option<smwe_rom::title_stripe::TitleTileGrid>,
+    title_grid_tex: Option<egui::TextureHandle>,
+    title_grid_vram: Option<Vec<u8>>,
+    title_grid_cgram: Option<Vec<u8>>,
+    title_grid_for_stripe_len: Option<usize>,
+    title_selected_cell: Option<(usize, usize)>,
+    title_paint_word: u16,
+    title_grid_error: Option<String>,
 
     // Lunar Magic `.mwl` level import/export.
     rom_path: PathBuf,
@@ -317,6 +328,14 @@ impl UiLevelEditor {
             title_credits_dirty: false,
             show_title_credits_editor: false,
             credits_editor_selected: 0,
+            title_grid: None,
+            title_grid_tex: None,
+            title_grid_vram: None,
+            title_grid_cgram: None,
+            title_grid_for_stripe_len: None,
+            title_selected_cell: None,
+            title_paint_word: 0x2C58,
+            title_grid_error: None,
             rom_path: rom_path.clone(),
             mwl_status: None,
             map16_file_status: None,
