@@ -34,21 +34,13 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
 }
 
 struct Fonts {
-    mono: FontRef<'static>,
-    sans: FontRef<'static>,
+    mono:      FontRef<'static>,
+    sans:      FontRef<'static>,
     sans_bold: FontRef<'static>,
 }
 
 /// Draw one line of text; returns the advance width in px.
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) -> i32 {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) -> i32 {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -101,10 +93,8 @@ fn draw_field(img: &mut RgbImage, fonts: &Fonts, x: u32, y: u32, w: u32, text: &
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/custom-level-names.png");
+    let output =
+        args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/custom-level-names.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -112,8 +102,8 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or("smw.smc");
 
     let fonts = Fonts {
-        mono: load_font(MONO_CANDIDATES)?,
-        sans: load_font(SANS_CANDIDATES)?,
+        mono:      load_font(MONO_CANDIDATES)?,
+        sans:      load_font(SANS_CANDIDATES)?,
         sans_bold: load_font(SANS_BOLD_CANDIDATES)?,
     };
 
@@ -211,17 +201,17 @@ fn main() -> anyhow::Result<()> {
                 orange,
             );
             y += 28;
-            draw_text(&mut img, &fonts.sans, "A\u{2013}Z 0\u{2013}9 space # ' supported", x as i32, y as i32, 13.0, gray);
-        } else {
             draw_text(
                 &mut img,
                 &fonts.sans,
-                &format!("Vanilla: {vanilla}"),
+                "A\u{2013}Z 0\u{2013}9 space # ' supported",
                 x as i32,
                 y as i32,
                 13.0,
                 gray,
             );
+        } else {
+            draw_text(&mut img, &fonts.sans, &format!("Vanilla: {vanilla}"), x as i32, y as i32, 13.0, gray);
         }
     }
 

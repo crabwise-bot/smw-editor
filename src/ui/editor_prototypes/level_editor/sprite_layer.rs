@@ -4,9 +4,9 @@ use crate::undo::Undo;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct EditableSprite {
-    pub x: u32,
-    pub y: u32,
-    pub sprite_id: u8,
+    pub x:          u32,
+    pub y:          u32,
+    pub sprite_id:  u8,
     pub extra_bits: u8,
 }
 
@@ -117,10 +117,12 @@ mod tests {
     #[test]
     fn undo_snapshot_round_trips_vertical_sprite_coordinates() {
         let layer = EditableSpriteLayer {
-            sprites: vec![
-                EditableSprite { x: 31, y: 511, sprite_id: 0x35, extra_bits: 3 },
-                EditableSprite { x: 0, y: 0, sprite_id: 0x01, extra_bits: 0 },
-            ],
+            sprites: vec![EditableSprite { x: 31, y: 511, sprite_id: 0x35, extra_bits: 3 }, EditableSprite {
+                x:          0,
+                y:          0,
+                sprite_id:  0x01,
+                extra_bits: 0,
+            }],
         };
 
         let restored = EditableSpriteLayer::from_bytes(layer.to_bytes());

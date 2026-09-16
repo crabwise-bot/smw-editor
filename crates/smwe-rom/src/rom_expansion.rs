@@ -178,10 +178,8 @@ mod tests {
         // Header: size byte 0x09 -> 0x0C (4096 KB).
         assert_eq!(bytes[ROM_SIZE_OFFSET], 0x0C);
         // Checksum pair is complementary and self-consistent.
-        let stored_cpl =
-            u16::from_le_bytes([bytes[COMPLEMENT_OFFSET], bytes[COMPLEMENT_OFFSET + 1]]);
-        let stored_csm =
-            u16::from_le_bytes([bytes[CHECKSUM_OFFSET], bytes[CHECKSUM_OFFSET + 1]]);
+        let stored_cpl = u16::from_le_bytes([bytes[COMPLEMENT_OFFSET], bytes[COMPLEMENT_OFFSET + 1]]);
+        let stored_csm = u16::from_le_bytes([bytes[CHECKSUM_OFFSET], bytes[CHECKSUM_OFFSET + 1]]);
         assert_eq!(stored_cpl ^ stored_csm, 0xFFFF);
         assert_eq!(compute_checksum(bytes), stored_csm);
         // Map mode untouched.
@@ -210,18 +208,12 @@ mod tests {
         assert!(matches!(expand_rom(&rom, 0x30_0000), Err(ExpansionError::UnsupportedTarget(_))));
         // Valid target, but not larger than the current image.
         let two_mb = synthetic_rom(0x20_0000, 0x0B);
-        assert!(matches!(
-            expand_rom(&two_mb, 0x10_0000),
-            Err(ExpansionError::TargetNotLarger(_, _))
-        ));
+        assert!(matches!(expand_rom(&two_mb, 0x10_0000), Err(ExpansionError::TargetNotLarger(_, _))));
         let odd = Rom::new(vec![0xFFu8; 0x90000]).unwrap();
         assert!(matches!(expand_rom(&odd, 0x40_0000), Err(ExpansionError::UnsupportedSize(_))));
         let maxed = synthetic_rom(0x40_0000, 0x0C);
         // Already at the LoROM cap: not expandable at all.
-        assert!(matches!(
-            expand_rom(&maxed, 0x40_0000),
-            Err(ExpansionError::UnsupportedSize(_))
-        ));
+        assert!(matches!(expand_rom(&maxed, 0x40_0000), Err(ExpansionError::UnsupportedSize(_))));
     }
 
     #[test]

@@ -19,8 +19,21 @@ use std::{
 };
 
 use egui::{
-    vec2, CentralPanel, Color32, CornerRadius, Frame, Key, PaintCallback, Rect, Sense, SidePanel, Stroke, StrokeKind,
-    Ui, Vec2, WidgetText,
+    vec2,
+    CentralPanel,
+    Color32,
+    CornerRadius,
+    Frame,
+    Key,
+    PaintCallback,
+    Rect,
+    Sense,
+    SidePanel,
+    Stroke,
+    StrokeKind,
+    Ui,
+    Vec2,
+    WidgetText,
 };
 use egui_glow::CallbackFn;
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
@@ -28,11 +41,9 @@ use smwe_render::{
     gfx_buffers::GfxBuffers,
     tile_renderer::{Tile, TileRenderer, TileUniforms},
 };
-use smwe_rom::compression::lc_rle2;
 use smwe_rom::{
-    overworld::{
-        L2EventEntry, L2EventKind, OWL1_TILE_DATA_SIZE, OWL1_TILE_DATA_SNES, OW_EVENT_COUNT, SUBMAP_NAMES,
-    },
+    compression::lc_rle2,
+    overworld::{L2EventEntry, L2EventKind, OWL1_TILE_DATA_SIZE, OWL1_TILE_DATA_SNES, OW_EVENT_COUNT, SUBMAP_NAMES},
     snes_utils::addr::{AddrPc, AddrSnes},
     SmwRom,
 };
@@ -99,18 +110,18 @@ fn l1_vram_addr_for_map16(submap: u8, map16_x: u32, map16_y: u32) -> usize {
 
 #[derive(Debug)]
 struct OverworldRenderer {
-    layer1: TileRenderer,
-    layer2: TileRenderer,
-    gfx_bufs: GfxBuffers,
+    layer1:    TileRenderer,
+    layer2:    TileRenderer,
+    gfx_bufs:  GfxBuffers,
     destroyed: bool,
 }
 
 impl OverworldRenderer {
     fn new(gl: &glow::Context) -> Self {
         Self {
-            layer1: TileRenderer::new(gl),
-            layer2: TileRenderer::new(gl),
-            gfx_bufs: GfxBuffers::new(gl),
+            layer1:    TileRenderer::new(gl),
+            layer2:    TileRenderer::new(gl),
+            gfx_bufs:  GfxBuffers::new(gl),
             destroyed: false,
         }
     }
@@ -194,33 +205,33 @@ impl Undo for OverworldEditState {
 // ── Editor ────────────────────────────────────────────────────────────────────
 
 pub struct UiWorldEditor {
-    gl: Arc<glow::Context>,
+    gl:       Arc<glow::Context>,
     #[allow(dead_code)]
-    rom: Arc<SmwRom>,
-    cpu: Cpu,
+    rom:      Arc<SmwRom>,
+    cpu:      Cpu,
     renderer: Arc<Mutex<OverworldRenderer>>,
 
     submap: u8,
 
-    offset: Vec2,
-    zoom: f32,
-    show_grid: bool,
-    show_layer1: bool,
-    show_layer2: bool,
+    offset:        Vec2,
+    zoom:          f32,
+    show_grid:     bool,
+    show_layer1:   bool,
+    show_layer2:   bool,
     selected_tile: Option<(u32, u32)>,
-    needs_center: bool,
+    needs_center:  bool,
 
     // Editing state
-    editing_mode: EditingMode,
-    draw_tile_num: u8,
-    draw_palette: u8,
-    draw_tile_attr: u8,
-    tile_picker: ow_tile_picker::OwTilePicker,
-    l1_tile_picker: ow_tile_picker::OwL1TilePicker,
-    edit_layer: u8, // 1 or 2
-    preview_texture: Option<egui::TextureHandle>,
-    preview_for: Option<(u32, u32)>,
-    has_edits: bool,
+    editing_mode:          EditingMode,
+    draw_tile_num:         u8,
+    draw_palette:          u8,
+    draw_tile_attr:        u8,
+    tile_picker:           ow_tile_picker::OwTilePicker,
+    l1_tile_picker:        ow_tile_picker::OwL1TilePicker,
+    edit_layer:            u8, // 1 or 2
+    preview_texture:       Option<egui::TextureHandle>,
+    preview_for:           Option<(u32, u32)>,
+    has_edits:             bool,
     has_unsavable_changes: bool,
     pub(super) edit_state: UndoableData<OverworldEditState>,
 
@@ -228,7 +239,7 @@ pub struct UiWorldEditor {
     /// this "destruction" event (castle/fortress/switch palace beaten, etc.) is
     /// considered active for preview purposes. Defaults to all-on, matching the
     /// previous blanket "activate everything" behavior.
-    active_events: Vec<bool>,
+    active_events:         Vec<bool>,
     /// Whether the Layer 2 event target markers are drawn over the map.
     show_l2_event_markers: bool,
 
@@ -238,30 +249,30 @@ pub struct UiWorldEditor {
     /// read a custom table instead of the WRAM-computed one — see
     /// `smwe_rom::overworld::LEVEL_NUMBER_PATCH_OPERAND_SNES` for why this
     /// doesn't need new ASM code, just different data.
-    custom_level_numbers: HashMap<usize, u8>,
-    level_numbers_dirty: bool,
+    custom_level_numbers:  HashMap<usize, u8>,
+    level_numbers_dirty:   bool,
     /// Vanilla level names decoded from the ROM (93 entries, index =
     /// translevel). Used as the base for custom name edits.
-    vanilla_level_names: Vec<String>,
+    vanilla_level_names:   Vec<String>,
     /// Custom level names by translevel. Absent entries use the vanilla name.
-    custom_level_names: HashMap<u8, String>,
+    custom_level_names:    HashMap<u8, String>,
     /// True if any level name has been customized (requires the name-table
     /// relocation patch on save).
-    level_names_dirty: bool,
+    level_names_dirty:     bool,
     /// Level-name text field buffer, synced to `level_name_for`.
-    level_name_edit: String,
+    level_name_edit:       String,
     /// Translevel the name field (and error) currently belong to.
-    level_name_for: Option<u8>,
+    level_name_for:        Option<u8>,
     /// Validation error from the last rejected name edit, if any.
-    level_name_error: Option<String>,
+    level_name_error:      Option<String>,
     /// Event-ownership table (`$05D608` events-by-translevel): raw byte per
     /// translevel (`0x00`–`0x5C`), `$FF` = no event. Edited via the
     /// event-ownership panel; written back in place on save.
-    event_ownership: Vec<u8>,
+    event_ownership:       Vec<u8>,
     /// True if any event-ownership assignment has been changed.
     event_ownership_dirty: bool,
     /// Last time the overworld animated tiles were ticked.
-    last_anim_tick: std::time::Instant,
+    last_anim_tick:        std::time::Instant,
 }
 
 impl UiWorldEditor {
@@ -595,8 +606,7 @@ impl UiWorldEditor {
             let l2 = &self.rom.overworld_l2_events;
             let events_with_l2: Vec<usize> = (0..OW_EVENT_COUNT)
                 .filter(|&e| {
-                    !l2.entries_for_event(e).unwrap_or(0..0).is_empty()
-                        || !l2.silent_l2_events_for(e as u8).is_empty()
+                    !l2.entries_for_event(e).unwrap_or(0..0).is_empty() || !l2.silent_l2_events_for(e as u8).is_empty()
                 })
                 .collect();
             ui.label(format!(
@@ -660,11 +670,7 @@ impl UiWorldEditor {
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut new, None, event_option_label(None, &self.rom));
                                 for e in 0..smwe_rom::overworld::OW_EVENT_COUNT as u8 {
-                                    ui.selectable_value(
-                                        &mut new,
-                                        Some(e),
-                                        event_option_label(Some(e), &self.rom),
-                                    );
+                                    ui.selectable_value(&mut new, Some(e), event_option_label(Some(e), &self.rom));
                                 }
                             });
                     });
@@ -967,9 +973,7 @@ impl UiWorldEditor {
                                 if resp.changed() {
                                     use smwe_rom::overworld::level_names as ln;
                                     let trimmed = self.level_name_edit.trim().to_string();
-                                    if trimmed.is_empty()
-                                        || trimmed.to_uppercase() == vanilla_name.to_uppercase()
-                                    {
+                                    if trimmed.is_empty() || trimmed.to_uppercase() == vanilla_name.to_uppercase() {
                                         self.custom_level_names.remove(&translevel_u8);
                                         self.level_name_error = None;
                                         self.level_names_dirty = true;
@@ -977,8 +981,7 @@ impl UiWorldEditor {
                                     } else {
                                         match ln::check_name(&trimmed) {
                                             Ok(normalized) => {
-                                                self.custom_level_names
-                                                    .insert(translevel_u8, normalized);
+                                                self.custom_level_names.insert(translevel_u8, normalized);
                                                 self.level_name_error = None;
                                                 self.level_names_dirty = true;
                                                 self.has_edits = true;
@@ -1000,9 +1003,7 @@ impl UiWorldEditor {
                             {
                                 use smwe_rom::overworld::level_names as ln;
                                 let used = self.level_name_edit.trim().chars().count();
-                                let budget_color = if self.level_name_error.is_some()
-                                    || used > ln::MAX_NAME_CHARS
-                                {
+                                let budget_color = if self.level_name_error.is_some() || used > ln::MAX_NAME_CHARS {
                                     egui::Color32::from_rgb(220, 60, 60)
                                 } else {
                                     ui.style().visuals.text_color()
@@ -1148,7 +1149,7 @@ impl UiWorldEditor {
             ui.ctx().request_repaint_after(ANIM_INTERVAL);
 
             ui.painter().add(PaintCallback {
-                rect: view_rect,
+                rect:     view_rect,
                 callback: Arc::new(CallbackFn::new(move |_info, painter| {
                     let r = renderer.lock().expect("Cannot lock overworld renderer");
                     r.paint(painter.gl().as_ref(), screen_sz, gl_zoom, gl_offset, draw_l1, draw_l2);

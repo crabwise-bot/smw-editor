@@ -287,16 +287,12 @@ mod real_rom_tests {
 
         for (i, msg) in rom.message_boxes.messages.iter().enumerate() {
             let text = decode_editable_text(&map, msg);
-            let back =
-                encode_editable_text(&map, msg, &text).unwrap_or_else(|e| panic!("{}: re-encode failed: {e}", MESSAGE_NAMES[i]));
+            let back = encode_editable_text(&map, msg, &text)
+                .unwrap_or_else(|e| panic!("{}: re-encode failed: {e}", MESSAGE_NAMES[i]));
             assert_eq!(&back, msg, "{}: editable round-trip is not byte-exact", MESSAGE_NAMES[i]);
 
             // Report unmapped (graphic) bytes for the human-readable log.
-            let mut unmapped: Vec<u8> = msg
-                .iter()
-                .map(|b| b & 0x7F)
-                .filter(|b| map.char_for(*b).is_none())
-                .collect();
+            let mut unmapped: Vec<u8> = msg.iter().map(|b| b & 0x7F).filter(|b| map.char_for(*b).is_none()).collect();
             unmapped.sort_unstable();
             unmapped.dedup();
             println!("{:24} {:3} bytes  unmapped: {:02X?}", MESSAGE_NAMES[i], msg.len(), unmapped);
@@ -331,9 +327,7 @@ mod real_rom_tests {
         }
         println!("// ];");
         println!("// let control_codes: &[u8] = &[/* line break, end-of-message, ... */];");
-        println!(
-            "// let font_map = smwe_rom::font_map::derive_font_map(pairs, control_codes).unwrap();"
-        );
+        println!("// let font_map = smwe_rom::font_map::derive_font_map(pairs, control_codes).unwrap();");
     }
 
     /// Runs all 22 vanilla messages through the REAL `CODE_05B1BC` via the

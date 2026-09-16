@@ -37,15 +37,7 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
     anyhow::bail!("no font file found; tried {candidates:?}")
 }
 
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -55,11 +47,7 @@ fn draw_text(
         if let Some(p) = prev {
             caret_x += scaled.kern(p, id);
         }
-        let glyph = Glyph {
-            id,
-            scale: PxScale::from(px),
-            position: Point { x: caret_x, y: baseline },
-        };
+        let glyph = Glyph { id, scale: PxScale::from(px), position: Point { x: caret_x, y: baseline } };
         if let Some(o) = scaled.outline_glyph(glyph) {
             let bb = o.px_bounds();
             o.draw(|gx, gy, v| {
@@ -152,14 +140,7 @@ fn render_sub_tile(vram: &[u8], cgram: &[u8], t: u16, x0: u32, y0: u32, pixels: 
 /// Render one 16x16 Map16 block (four tile words) into `pixels` at `scale`
 /// with a checkerboard behind transparent pixels.
 fn render_block(
-    vram: &[u8],
-    cgram: &[u8],
-    words: &[u16; 4],
-    x0: u32,
-    y0: u32,
-    scale: u32,
-    pixels: &mut [u8],
-    stride: u32,
+    vram: &[u8], cgram: &[u8], words: &[u16; 4], x0: u32, y0: u32, scale: u32, pixels: &mut [u8], stride: u32,
 ) {
     // Checkerboard background for transparency.
     for y in 0..16 * scale {
@@ -199,10 +180,8 @@ fn render_block(
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/map16-import-export.png");
+    let output =
+        args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/map16-import-export.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -250,16 +229,14 @@ fn main() -> anyhow::Result<()> {
     let page_data2 = map16_file::export_page(&rom2, map16_file::PAGE_FG0, tileset)?;
     assert_eq!(page_data2, modified, "import round trip must be byte-identical");
     let blocks2 = map16_file::parse_page(&page_data2)?;
-    let status_import =
-        "Imported modified page → scratch ROM → re-export byte-identical ✓".to_string();
+    let status_import = "Imported modified page → scratch ROM → re-export byte-identical ✓".to_string();
 
     // Render the full page atlas: 16×16 grid of 16x16 blocks at 2x.
     const SCALE: u32 = 2;
     let atlas_px = 16 * 16 * SCALE;
     let mut atlas: Vec<u8> = vec![0u8; (atlas_px * atlas_px * 4) as usize];
     for (i, block) in blocks.iter().enumerate() {
-        let words =
-            [block.upper_left.0, block.lower_left.0, block.upper_right.0, block.lower_right.0];
+        let words = [block.upper_left.0, block.lower_left.0, block.upper_right.0, block.lower_right.0];
         render_block(
             &vram,
             &cgram,
@@ -311,15 +288,7 @@ fn main() -> anyhow::Result<()> {
     y += 34;
     draw_text(&mut img, &sans, "Page: [FG page 0 (tiles 000-0FF) ▾]", lx as i32, y as i32, 14.0, ink);
     y += 28;
-    draw_text(
-        &mut img,
-        &sans,
-        "Tileset: [0: Normal ▾]  (this level uses tileset 0)",
-        lx as i32,
-        y as i32,
-        14.0,
-        ink,
-    );
+    draw_text(&mut img, &sans, "Tileset: [0: Normal ▾]  (this level uses tileset 0)", lx as i32, y as i32, 14.0, ink);
     y += 40;
     for (i, label) in ["Export page…", "Import…"].iter().enumerate() {
         let bx = lx + i as u32 * 150;
@@ -386,11 +355,7 @@ fn main() -> anyhow::Result<()> {
     let strip_scale = 2u32;
     let word_sets: Vec<Vec<[u16; 4]>> = [&blocks, &blocks2]
         .iter()
-        .map(|bs| {
-            bs.iter()
-                .map(|b| [b.upper_left.0, b.lower_left.0, b.upper_right.0, b.lower_right.0])
-                .collect()
-        })
+        .map(|bs| bs.iter().map(|b| [b.upper_left.0, b.lower_left.0, b.upper_right.0, b.lower_right.0]).collect())
         .collect();
     for (k, words) in word_sets.iter().enumerate() {
         let label = if k == 0 { "before" } else { "after" };
@@ -406,11 +371,7 @@ fn main() -> anyhow::Result<()> {
                     let (r, g, b) = (tile_px[s], tile_px[s + 1], tile_px[s + 2]);
                     for dy in 0..strip_scale {
                         for dx in 0..strip_scale {
-                            img.put_pixel(
-                                bx + sx * strip_scale + dx,
-                                row_y + sy * strip_scale + dy,
-                                Rgb([r, g, b]),
-                            );
+                            img.put_pixel(bx + sx * strip_scale + dx, row_y + sy * strip_scale + dy, Rgb([r, g, b]));
                         }
                     }
                 }

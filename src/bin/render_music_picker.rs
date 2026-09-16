@@ -29,15 +29,7 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
     anyhow::bail!("no font file found; tried {candidates:?}")
 }
 
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -47,11 +39,7 @@ fn draw_text(
         if let Some(p) = prev {
             caret_x += scaled.kern(p, id);
         }
-        let glyph = Glyph {
-            id,
-            scale: PxScale::from(px),
-            position: Point { x: caret_x, y: baseline },
-        };
+        let glyph = Glyph { id, scale: PxScale::from(px), position: Point { x: caret_x, y: baseline } };
         if let Some(o) = scaled.outline_glyph(glyph) {
             let bb = o.px_bounds();
             o.draw(|gx, gy, v| {
@@ -85,10 +73,7 @@ fn draw_text(
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/music-picker.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/music-picker.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -168,14 +153,7 @@ fn main() -> anyhow::Result<()> {
         }
         draw_text(&mut img, &sans, &label, (combo_x + 10) as i32, (ry + 7) as i32, 15.0, ink);
     }
-    rect_border(
-        &mut img,
-        combo_x,
-        drop_y,
-        drop_w,
-        row_h * MUSIC_TRACK_COUNT as u32,
-        Rgb([0x66, 0x66, 0x66]),
-    );
+    rect_border(&mut img, combo_x, drop_y, drop_w, row_h * MUSIC_TRACK_COUNT as u32, Rgb([0x66, 0x66, 0x66]));
 
     // ---- Right: raw-byte fallback ----
     let rx = 560u32;

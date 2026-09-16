@@ -515,11 +515,7 @@ impl UiLevelEditor {
                         .selected_text(smwe_rom::music::format_music_track(p.music))
                         .show_ui(ui, |ui| {
                             for t in 0..smwe_rom::music::MUSIC_TRACK_COUNT {
-                                ui.selectable_value(
-                                    &mut p.music,
-                                    t,
-                                    smwe_rom::music::format_music_track(t),
-                                );
+                                ui.selectable_value(&mut p.music, t, smwe_rom::music::format_music_track(t));
                             }
                         });
                     if p.music != before {

@@ -101,10 +101,7 @@ pub fn check_name(name: &str) -> anyhow::Result<String> {
     let normalized = name.trim().to_uppercase();
     anyhow::ensure!(!normalized.is_empty(), "name is empty");
     let len = normalized.chars().count();
-    anyhow::ensure!(
-        len <= MAX_NAME_CHARS,
-        "name is {len} characters; the game draws at most {MAX_NAME_CHARS}"
-    );
+    anyhow::ensure!(len <= MAX_NAME_CHARS, "name is {len} characters; the game draws at most {MAX_NAME_CHARS}");
     for c in normalized.chars() {
         let ok = matches!(c, 'A'..='Z' | '0'..='9' | ' ' | '#' | '\'');
         anyhow::ensure!(ok, "character {c:?} has no overworld-name tile (A-Z 0-9 space # ' only)");
@@ -303,13 +300,13 @@ fn encode_fragment(text: &str) -> Vec<u8> {
 /// The encoded pool + tables + `LevelNames` entries, ready to write.
 pub struct EncodedNames {
     /// Pool bytes (fragments concatenated).
-    pub pool: Vec<u8>,
+    pub pool:    Vec<u8>,
     /// T1 offsets (pool-relative).
-    pub t1: Vec<u16>,
+    pub t1:      Vec<u16>,
     /// T2 offsets (pool-relative).
-    pub t2: Vec<u16>,
+    pub t2:      Vec<u16>,
     /// T3 offsets (pool-relative).
-    pub t3: Vec<u16>,
+    pub t3:      Vec<u16>,
     /// `LevelNames` entries (93 × u16).
     pub entries: Vec<u16>,
 }

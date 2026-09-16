@@ -11,19 +11,13 @@
 use std::sync::Arc;
 
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
-
-use crate::ui::tool::DockableEditorTool;
-use smwe_rom::{
-    map16_file,
-    objects::tilesets::object_tileset_to_map16_tileset,
-    snes_utils::rom::Rom,
-    SmwRom,
-};
+use smwe_rom::{map16_file, objects::tilesets::object_tileset_to_map16_tileset, snes_utils::rom::Rom, SmwRom};
 
 use super::{
     mwl::{smc_header_offset, write_rom_file_atomic},
     UiLevelEditor,
 };
+use crate::ui::tool::DockableEditorTool;
 
 /// Pages offered by the Map16 editor's page selector.
 pub(super) const PAGE_OPTIONS: [(u8, &str); 4] = [
@@ -53,11 +47,7 @@ impl UiLevelEditor {
     /// Export the selected page to a raw 0x800-byte file (LM-compatible).
     pub(super) fn export_map16_page(&mut self) {
         let (page, _) = PAGE_OPTIONS[self.map16_page_idx.min(PAGE_OPTIONS.len() - 1)];
-        let tileset = if map16_file::page_is_foreground(page) {
-            self.map16_tileset_idx.min(4)
-        } else {
-            0
-        };
+        let tileset = if map16_file::page_is_foreground(page) { self.map16_tileset_idx.min(4) } else { 0 };
         let default_name = if map16_file::page_is_foreground(page) {
             format!("map16-page{:02X}-ts{tileset}.bin", page)
         } else {
@@ -93,32 +83,25 @@ impl UiLevelEditor {
     /// Import a raw 0x800-byte page file into the ROM, with confirmation.
     /// The file goes into the currently selected page/tileset.
     pub(super) fn import_map16(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Map16 page", &["bin"])
-            .pick_file()
-        else {
+        let Some(path) = rfd::FileDialog::new().add_filter("Map16 page", &["bin"]).pick_file() else {
             return;
         };
         let raw = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                self.map16_file_status =
-                    Some(format!("Map16 import failed: cannot read {}: {e}", path.display()));
+                self.map16_file_status = Some(format!("Map16 import failed: cannot read {}: {e}", path.display()));
                 return;
             }
         };
         if raw.len() != map16_file::MAP16_PAGE_BYTES {
-            self.map16_file_status = Some(format!(
-                "Map16 import failed: expected a 0x800-byte page file, got {} bytes",
-                raw.len()
-            ));
+            self.map16_file_status =
+                Some(format!("Map16 import failed: expected a 0x800-byte page file, got {} bytes", raw.len()));
             return;
         }
 
         let (page, _) = PAGE_OPTIONS[self.map16_page_idx.min(PAGE_OPTIONS.len() - 1)];
         let tileset = self.map16_tileset_idx.min(4);
-        let describe =
-            format!("{} (tileset {tileset})", map16_file::page_name(page));
+        let describe = format!("{} (tileset {tileset})", map16_file::page_name(page));
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let mut prompt = format!(
             "Import '{file_name}' ({describe}) into the ROM?\n\nThis overwrites Map16 data at fixed ROM addresses."
@@ -168,13 +151,11 @@ impl UiLevelEditor {
         ui.horizontal(|ui| {
             ui.label("Page:");
             let mut idx = self.map16_page_idx.min(PAGE_OPTIONS.len() - 1);
-            egui::ComboBox::from_id_salt("map16_page_sel")
-                .selected_text(PAGE_OPTIONS[idx].1)
-                .show_ui(ui, |ui| {
-                    for (i, (_, name)) in PAGE_OPTIONS.iter().enumerate() {
-                        ui.selectable_value(&mut idx, i, *name);
-                    }
-                });
+            egui::ComboBox::from_id_salt("map16_page_sel").selected_text(PAGE_OPTIONS[idx].1).show_ui(ui, |ui| {
+                for (i, (_, name)) in PAGE_OPTIONS.iter().enumerate() {
+                    ui.selectable_value(&mut idx, i, *name);
+                }
+            });
             self.map16_page_idx = idx;
         });
 
@@ -183,13 +164,11 @@ impl UiLevelEditor {
             ui.horizontal(|ui| {
                 ui.label("Tileset:");
                 let mut ts = self.map16_tileset_idx.min(4);
-                egui::ComboBox::from_id_salt("map16_tileset_sel")
-                    .selected_text(TILESET_NAMES[ts])
-                    .show_ui(ui, |ui| {
-                        for (i, name) in TILESET_NAMES.iter().enumerate() {
-                            ui.selectable_value(&mut ts, i, *name);
-                        }
-                    });
+                egui::ComboBox::from_id_salt("map16_tileset_sel").selected_text(TILESET_NAMES[ts]).show_ui(ui, |ui| {
+                    for (i, name) in TILESET_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut ts, i, *name);
+                    }
+                });
                 self.map16_tileset_idx = ts;
                 let cur = current_level_tileset(self);
                 ui.small(format!("(this level uses tileset {cur})"));

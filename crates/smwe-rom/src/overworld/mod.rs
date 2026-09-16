@@ -169,11 +169,11 @@ pub const OW_EVENT_REVEAL_COUNT: usize = 22;
 #[derive(Debug)]
 pub struct OverworldEvents {
     /// `layer1_tiles` byte offset touched by each event, len `OW_EVENT_COUNT`.
-    pub tile_offsets: Vec<u16>,
+    pub tile_offsets:  Vec<u16>,
     /// "Before" tile IDs, len `OW_EVENT_REVEAL_COUNT`, parallel to `reveal_after`.
     pub reveal_before: Vec<u8>,
     /// "After" tile IDs, len `OW_EVENT_REVEAL_COUNT`, parallel to `reveal_before`.
-    pub reveal_after: Vec<u8>,
+    pub reveal_after:  Vec<u8>,
 }
 
 impl OverworldEvents {
@@ -320,10 +320,10 @@ impl L2EventEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SilentEvent {
     /// The destruction-event number (from `$04E8E4`).
-    pub event_no: u8,
+    pub event_no:  u8,
     /// Bit 0 of the `$04E910` flag: true = Layer 2 event, false = direct
     /// Map16 tile edit.
-    pub is_l2: bool,
+    pub is_l2:     bool,
     /// Data word (from `$04E994`); same meaning as [`L2EventEntry::data_word`].
     pub data_word: u16,
     /// Dest word (from `$04E93C`); same meaning as [`L2EventEntry::dest_word`].
@@ -343,9 +343,9 @@ impl SilentEvent {
 #[derive(Debug)]
 pub struct OverworldL2Events {
     /// 371 entries from [`OW_L2_EVENT_TABLE_SNES`].
-    pub entries: Vec<L2EventEntry>,
+    pub entries:       Vec<L2EventEntry>,
     /// 121 cumulative boundary words from [`OW_L2_EVENT_BOUNDARIES_SNES`].
-    pub boundaries: Vec<u16>,
+    pub boundaries:    Vec<u16>,
     /// 44 rows from the `$04E8E4`/`$04E910`/`$04E93C`/`$04E994` tables.
     pub silent_events: Vec<SilentEvent>,
 }
@@ -376,7 +376,12 @@ impl OverworldL2Events {
             })
             .collect();
 
-        let boundaries = Self::read_u16_words(rom, OW_L2_EVENT_BOUNDARIES_SNES, OW_L2_EVENT_BOUNDARY_COUNT, "OW L2 event boundaries")?;
+        let boundaries = Self::read_u16_words(
+            rom,
+            OW_L2_EVENT_BOUNDARIES_SNES,
+            OW_L2_EVENT_BOUNDARY_COUNT,
+            "OW L2 event boundaries",
+        )?;
         // The boundary table must be cumulative: event e uses entries
         // boundaries[e]..boundaries[e+1], and the last boundary is the entry
         // count. Validate rather than silently accepting a shifted ROM.
@@ -398,12 +403,14 @@ impl OverworldL2Events {
         if list_pc + OW_SILENT_EVENT_COUNT > rom.0.len() || flags_pc + OW_SILENT_EVENT_COUNT > rom.0.len() {
             anyhow::bail!("OW silent event list/flags extend past end of ROM");
         }
-        let dest_words = Self::read_u16_words(rom, OW_SILENT_EVENT_DEST_SNES, OW_SILENT_EVENT_COUNT, "OW silent event dest")?;
-        let data_words = Self::read_u16_words(rom, OW_SILENT_EVENT_DATA_SNES, OW_SILENT_EVENT_COUNT, "OW silent event data")?;
+        let dest_words =
+            Self::read_u16_words(rom, OW_SILENT_EVENT_DEST_SNES, OW_SILENT_EVENT_COUNT, "OW silent event dest")?;
+        let data_words =
+            Self::read_u16_words(rom, OW_SILENT_EVENT_DATA_SNES, OW_SILENT_EVENT_COUNT, "OW silent event data")?;
         let silent_events = (0..OW_SILENT_EVENT_COUNT)
             .map(|i| SilentEvent {
-                event_no: rom.0[list_pc + i],
-                is_l2: rom.0[flags_pc + i] & 0x01 != 0,
+                event_no:  rom.0[list_pc + i],
+                is_l2:     rom.0[flags_pc + i] & 0x01 != 0,
                 data_word: data_words[i],
                 dest_word: dest_words[i],
             })
@@ -502,12 +509,12 @@ mod tests {
     fn vanilla_events() -> OverworldEvents {
         // Values transcribed from SMWDisX bank_04.asm (DATA_04D85D/DATA_04DA1D/DATA_04DA33).
         OverworldEvents {
-            tile_offsets: vec![0x0000, 0x0000, 0x0000, 0x0469, 0x044B, 0x0429, 0x0409, 0x00D3, 0x00E5],
+            tile_offsets:  vec![0x0000, 0x0000, 0x0000, 0x0469, 0x044B, 0x0429, 0x0409, 0x00D3, 0x00E5],
             reveal_before: vec![
                 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x59, 0x53, 0x52, 0x83, 0x4D, 0x57, 0x5A, 0x76, 0x78,
                 0x7A, 0x7B, 0x7D, 0x7F, 0x54,
             ],
-            reveal_after: vec![
+            reveal_after:  vec![
                 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x58, 0x43, 0x44, 0x45, 0x25, 0x5E, 0x5F, 0x77, 0x79,
                 0x63, 0x7C, 0x7E, 0x80, 0x23,
             ],
@@ -615,10 +622,7 @@ mod tests {
 
     #[test]
     fn l2_entries_for_event_uses_cumulative_boundaries() {
-        let ev = l2_events_with(
-            vec![0, 3, 3, 5],
-            (0..5).map(|i| l2_entry(i, 0)).collect(),
-        );
+        let ev = l2_events_with(vec![0, 3, 3, 5], (0..5).map(|i| l2_entry(i, 0)).collect());
         assert_eq!(ev.entries_for_event(0), Some(0..3));
         assert_eq!(ev.entries_for_event(1), Some(3..3)); // empty range: no entries
         assert_eq!(ev.entries_for_event(2), Some(3..5));
@@ -636,8 +640,8 @@ mod tests {
     #[test]
     fn l2_silent_event_filtering() {
         let ev = OverworldL2Events {
-            entries: Vec::new(),
-            boundaries: Vec::new(),
+            entries:       Vec::new(),
+            boundaries:    Vec::new(),
             silent_events: vec![
                 SilentEvent { event_no: 0x06, is_l2: true, data_word: 0x24, dest_word: 0x215 },
                 SilentEvent { event_no: 0x06, is_l2: false, data_word: 0x68, dest_word: 0x235 },

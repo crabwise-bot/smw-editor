@@ -13,7 +13,6 @@
 
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
-
 use smwe_rom::overworld::{L2EventEntry, L2EventKind, OverworldL2Events, OW_EVENT_COUNT};
 
 const SANS: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
@@ -73,13 +72,10 @@ fn describe(entry: &L2EventEntry) -> String {
     }
 }
 
-use smw_editor::render_util::{fill_rect};
+use smw_editor::render_util::fill_rect;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let rom_path = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--rom="))
-        .unwrap_or("smw.smc");
+    let rom_path = args.iter().find_map(|a| a.strip_prefix("--rom=")).unwrap_or("smw.smc");
     let out = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("l2-events-panel.png");
 
     let raw = std::fs::read(rom_path).expect("cannot read ROM");
@@ -120,7 +116,8 @@ fn main() {
     // Expand event 1 (the first non-empty one); show one collapsed row after.
     for &event in &[1usize, 3] {
         let range = l2.entries_for_event(event).unwrap_or(0..0);
-        let header = format!("{} Event {event}: entries {}..{}", if event == 1 { "▾" } else { "▸" }, range.start, range.end);
+        let header =
+            format!("{} Event {event}: entries {}..{}", if event == 1 { "▾" } else { "▸" }, range.start, range.end);
         lines.push((28, header, false, 14.0, accent_c));
         if event == 1 {
             for idx in range {
@@ -134,9 +131,9 @@ fn main() {
         }
     }
     // One silent-only event for flavor: find the first event with silent rows but no table entries.
-    if let Some(ev) = (0..OW_EVENT_COUNT).find(|&e| {
-        l2.entries_for_event(e).unwrap_or(0..0).is_empty() && !l2.silent_l2_events_for(e as u8).is_empty()
-    }) {
+    if let Some(ev) = (0..OW_EVENT_COUNT)
+        .find(|&e| l2.entries_for_event(e).unwrap_or(0..0).is_empty() && !l2.silent_l2_events_for(e as u8).is_empty())
+    {
         lines.push((28, format!("▾ Event {ev}: silent row only"), false, 14.0, accent_c));
         for s in l2.silent_l2_events_for(ev as u8) {
             lines.push((52, format!("[silent] {}", describe(&s.as_entry())), true, 13.0, text_c));

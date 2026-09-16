@@ -2,12 +2,18 @@ use std::sync::Arc;
 
 use egui::{Context, ScrollArea, Slider};
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
-use smwe_rom::font_map::{decode_editable_text, encode_message_checked, FontMap};
-use smwe_rom::message_boxes::{
-    pointer_slot_for_message, MESSAGE_BOXES_MAX_SIZE, MESSAGE_BOXES_SNES, MESSAGE_NAMES,
-    MESSAGE_POINTER_COUNT, MESSAGE_POINTER_TABLE_SNES,
+use smwe_rom::{
+    font_map::{decode_editable_text, encode_message_checked, FontMap},
+    message_boxes::{
+        pointer_slot_for_message,
+        MESSAGE_BOXES_MAX_SIZE,
+        MESSAGE_BOXES_SNES,
+        MESSAGE_NAMES,
+        MESSAGE_POINTER_COUNT,
+        MESSAGE_POINTER_TABLE_SNES,
+    },
+    snes_utils::addr::{AddrPc, AddrSnes},
 };
-use smwe_rom::snes_utils::addr::{AddrPc, AddrSnes};
 
 use super::UiLevelEditor;
 

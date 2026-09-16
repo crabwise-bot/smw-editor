@@ -42,8 +42,14 @@ use thiserror::Error;
 use crate::{
     compression::lc_rle1,
     freespace,
-    level::headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
-    level::{Layer2Data, Level, LAYER2_HEADER_SIZE, PRIMARY_HEADER_SIZE, SPRITE_HEADER_SIZE},
+    level::{
+        headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
+        Layer2Data,
+        Level,
+        LAYER2_HEADER_SIZE,
+        PRIMARY_HEADER_SIZE,
+        SPRITE_HEADER_SIZE,
+    },
     snes_utils::{
         addr::{AddrPc, AddrSnes},
         rom::{Rom, RomError},
@@ -304,7 +310,11 @@ pub fn bg_words_to_legacy(words: &[u16; BG_WORD_COUNT]) -> Result<([u8; BG_LEGAC
 /// pointer: page 1 when the pointer is at/above `$E8FE` in bank `$0C`
 /// (i.e. `$FF:E8FE` before redirection), page 0 below it.
 pub fn bg_high_byte_for_pointer(ptr: u32) -> u8 {
-    if (ptr & 0xFFFF) as u16 >= LAYER2_BG_HIGH_BOUNDARY { 1 } else { 0 }
+    if (ptr & 0xFFFF) as u16 >= LAYER2_BG_HIGH_BOUNDARY {
+        1
+    } else {
+        0
+    }
 }
 
 /// The Layer 2 section descriptor for a legacy background: `$08` with the
@@ -386,10 +396,8 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
             unreachable!("layer2 pointer bank $FF but parsed data is not a background");
         };
         let high = bg_high_byte_for_pointer(l2_ptr);
-        let entries: &[u8; BG_LEGACY_LEN] = bg
-            .tile_ids()
-            .try_into()
-            .map_err(|_| MwlError::BadBackgroundSize(bg.tile_ids().len()))?;
+        let entries: &[u8; BG_LEGACY_LEN] =
+            bg.tile_ids().try_into().map_err(|_| MwlError::BadBackgroundSize(bg.tile_ids().len()))?;
         let words = bg_legacy_to_words(entries, high);
         let mut payload = Vec::with_capacity(BG_MWL_PAYLOAD_LEN);
         for w in words {
@@ -418,10 +426,10 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
     let section3 = encode_section(0, 0, &spr_payload);
 
     Ok(MwlFile {
-        version: MWL_VERSION,
-        flags: 0,
+        version:     MWL_VERSION,
+        flags:       0,
         attribution: mwl_attribution(),
-        sections: [
+        sections:    [
             section0,
             section1,
             section2,
@@ -456,7 +464,8 @@ fn snes_to_file(addr: u32, header_offset: usize) -> Result<usize, MwlError> {
 /// Write `data` at SNES address `addr` in raw ROM bytes.
 fn write_snes(rom_bytes: &mut [u8], addr: u32, data: &[u8], header_offset: usize) -> Result<(), MwlError> {
     let file = snes_to_file(addr, header_offset)?;
-    let end = file.checked_add(data.len()).ok_or(MwlError::Truncated { needed: usize::MAX, have: rom_bytes.len() })?;
+    let end =
+        file.checked_add(data.len()).ok_or(MwlError::Truncated { needed: usize::MAX, have: rom_bytes.len() })?;
     if end > rom_bytes.len() {
         return Err(MwlError::Truncated { needed: end, have: rom_bytes.len() });
     }
@@ -467,7 +476,8 @@ fn write_snes(rom_bytes: &mut [u8], addr: u32, data: &[u8], header_offset: usize
 /// Write `data` at PC address `pc` in raw ROM bytes.
 fn write_pc(rom_bytes: &mut [u8], pc: usize, data: &[u8], header_offset: usize) -> Result<(), MwlError> {
     let file = pc + header_offset;
-    let end = file.checked_add(data.len()).ok_or(MwlError::Truncated { needed: usize::MAX, have: rom_bytes.len() })?;
+    let end =
+        file.checked_add(data.len()).ok_or(MwlError::Truncated { needed: usize::MAX, have: rom_bytes.len() })?;
     if end > rom_bytes.len() {
         return Err(MwlError::Truncated { needed: end, have: rom_bytes.len() });
     }
@@ -478,11 +488,7 @@ fn write_pc(rom_bytes: &mut [u8], pc: usize, data: &[u8], header_offset: usize) 
 /// Find free space for `data` in LoROM bank `bank` (PC `bank * 0x8000`), write
 /// it there, and return the SNES address it was written to.
 fn write_to_bank(
-    rom_bytes: &mut [u8],
-    data: &[u8],
-    bank: u8,
-    label: &'static str,
-    header_offset: usize,
+    rom_bytes: &mut [u8], data: &[u8], bank: u8, label: &'static str, header_offset: usize,
 ) -> Result<u32, MwlError> {
     let pc_start = (bank as usize) * 0x8000;
     let pc = freespace::find_free_space(rom_bytes, data.len(), pc_start, header_offset)
@@ -498,10 +504,7 @@ fn write_to_bank(
 /// `rom_bytes` is the raw ROM image; `header_offset` is `0x200` for
 /// SMC-headered ROMs, `0` otherwise.
 pub fn import_level(
-    rom_bytes: &mut [u8],
-    mwl: &MwlFile,
-    target_level: u32,
-    header_offset: usize,
+    rom_bytes: &mut [u8], mwl: &MwlFile, target_level: u32, header_offset: usize,
 ) -> Result<(), MwlError> {
     if target_level >= 0x200 {
         return Err(MwlError::BadLevelNumber(target_level));
@@ -575,10 +578,7 @@ pub fn import_level(
 /// side of the `$E8FE` boundary the high byte requires, and point the level
 /// at it with bank `$FF`.
 fn import_background(
-    rom_bytes: &mut [u8],
-    payload: &[u8],
-    target_level: u32,
-    header_offset: usize,
+    rom_bytes: &mut [u8], payload: &[u8], target_level: u32, header_offset: usize,
 ) -> Result<(), MwlError> {
     if payload.len() != BG_MWL_PAYLOAD_LEN {
         return Err(MwlError::BadBackgroundSize(payload.len()));
@@ -597,11 +597,7 @@ fn import_background(
     // with page 1 at/above SNES $0CE8FE (PC 0x668FE), page 0 below it.
     const BANK0C_PC: usize = 0x0C * 0x8000;
     const BOUNDARY_PC: usize = BANK0C_PC + (LAYER2_BG_HIGH_BOUNDARY as usize - 0x8000);
-    let (pc_start, pc_end) = if high_byte == 1 {
-        (BOUNDARY_PC, BANK0C_PC + 0x8000)
-    } else {
-        (BANK0C_PC, BOUNDARY_PC)
-    };
+    let (pc_start, pc_end) = if high_byte == 1 { (BOUNDARY_PC, BANK0C_PC + 0x8000) } else { (BANK0C_PC, BOUNDARY_PC) };
     let pc = freespace::find_free_space_in(rom_bytes, compressed.len(), pc_start, pc_end, header_offset)
         .ok_or(MwlError::NoFreeSpace("Layer 2 background", compressed.len()))?;
     write_pc(rom_bytes, pc, &compressed, header_offset)?;
@@ -624,19 +620,10 @@ mod tests {
     #[test]
     fn container_round_trip() {
         let file = MwlFile {
-            version: MWL_VERSION,
-            flags: 0,
+            version:     MWL_VERSION,
+            flags:       0,
             attribution: mwl_attribution(),
-            sections: [
-                vec![1, 2, 3],
-                vec![4, 5],
-                vec![],
-                vec![6],
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-            ],
+            sections:    [vec![1, 2, 3], vec![4, 5], vec![], vec![6], vec![], vec![], vec![], vec![]],
         };
         let bytes = file.encode().unwrap();
         assert_eq!(&bytes[0..2], b"LM");
@@ -651,10 +638,10 @@ mod tests {
     #[test]
     fn rejects_bad_signature() {
         let mut bytes = MwlFile {
-            version: MWL_VERSION,
-            flags: 0,
+            version:     MWL_VERSION,
+            flags:       0,
             attribution: mwl_attribution(),
-            sections: Default::default(),
+            sections:    Default::default(),
         }
         .encode()
         .unwrap();

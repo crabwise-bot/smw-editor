@@ -1,7 +1,7 @@
 use egui::{ColorImage, Context, DragValue, Slider};
-use smwe_rom::title_credits::{self, ENEMY_NAME_COUNT, ENEMY_NAME_LABELS};
-use smwe_rom::title_stripe::{
-    TITLE_TILEMAP_BLANK, TITLE_TILEMAP_HEIGHT, TITLE_TILEMAP_WIDTH, TitleTileGrid,
+use smwe_rom::{
+    title_credits::{self, ENEMY_NAME_COUNT, ENEMY_NAME_LABELS},
+    title_stripe::{TitleTileGrid, TITLE_TILEMAP_BLANK, TITLE_TILEMAP_HEIGHT, TITLE_TILEMAP_WIDTH},
 };
 
 use super::UiLevelEditor;
@@ -106,8 +106,7 @@ impl UiLevelEditor {
                         // click/drag paints the selected tile word.
                         let avail = ui.available_width().min(512.0);
                         let scale = avail / 512.0;
-                        let (rect, response) =
-                            ui.allocate_exact_size(egui::vec2(avail, avail), egui::Sense::drag());
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(avail, avail), egui::Sense::drag());
                         ui.painter().image(
                             tex.id(),
                             rect,
@@ -188,7 +187,12 @@ impl UiLevelEditor {
                         let mut prio = ((self.title_paint_word >> 13) & 1) != 0;
                         let mut fx = ((self.title_paint_word >> 14) & 1) != 0;
                         let mut fy = ((self.title_paint_word >> 15) & 1) != 0;
-                        if ui.add(DragValue::new(&mut tile).range(0..=0x3FF).hexadecimal(3, false, false).prefix("tile ")).changed() {
+                        if ui
+                            .add(
+                                DragValue::new(&mut tile).range(0..=0x3FF).hexadecimal(3, false, false).prefix("tile "),
+                            )
+                            .changed()
+                        {
                             self.title_paint_word = (self.title_paint_word & !0x3FF) | (tile as u16 & 0x3FF);
                         }
                         if ui.add(DragValue::new(&mut pal).range(0..=7).prefix("pal ")).changed() {
@@ -211,9 +215,7 @@ impl UiLevelEditor {
                         egui::Grid::new("title_stripe_byte_grid").num_columns(8).spacing([4.0, 4.0]).show(ui, |ui| {
                             for (byte_i, byte) in self.title_credits.title_screen_stripe.iter_mut().enumerate() {
                                 let mut v = *byte as i32;
-                                if ui
-                                    .add(DragValue::new(&mut v).range(0..=0xFF).hexadecimal(2, false, false))
-                                    .changed()
+                                if ui.add(DragValue::new(&mut v).range(0..=0xFF).hexadecimal(2, false, false)).changed()
                                 {
                                     *byte = v as u8;
                                     self.title_credits_dirty = true;
@@ -228,10 +230,7 @@ impl UiLevelEditor {
                         });
                     });
                     if !self.title_credits.title_screen_stripe.ends_with(&[0xFF]) {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 80, 70),
-                            "Title stripe must end with FF.",
-                        );
+                        ui.colored_label(egui::Color32::from_rgb(220, 80, 70), "Title stripe must end with FF.");
                     }
                 });
 
@@ -315,6 +314,7 @@ impl UiLevelEditor {
 
         self.show_title_credits_editor = open;
     }
+
     /// Ensure the title grid is parsed from the current stripe bytes,
     /// invalidating the cache when the bytes changed (e.g. via the raw
     /// byte editor below).
@@ -366,11 +366,7 @@ impl UiLevelEditor {
                 return [0, 0, 0];
             }
             let rgb = cgram[off] as u16 | ((cgram[off + 1] as u16) << 8);
-            [
-                ((rgb & 0x1F) << 3) as u8,
-                (((rgb >> 5) & 0x1F) << 3) as u8,
-                (((rgb >> 10) & 0x1F) << 3) as u8,
-            ]
+            [((rgb & 0x1F) << 3) as u8, (((rgb >> 5) & 0x1F) << 3) as u8, (((rgb >> 10) & 0x1F) << 3) as u8]
         };
         // SNES backdrop color (CGRAM 0) behind transparent pixels.
         let backdrop = read_color(0);
@@ -405,8 +401,7 @@ impl UiLevelEditor {
                             continue;
                         }
                         let rgb = read_color(pal * 16 + ci);
-                        img[(tx * 8 + px, ty * 8 + py)] =
-                            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                        img[(tx * 8 + px, ty * 8 + py)] = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
                     }
                 }
             }

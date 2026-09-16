@@ -28,16 +28,8 @@ pub const MUSIC_TRACK_COUNT: u8 = 8;
 const MUSIC_TRACK_SPC_IDS: [u8; 8] = [2, 6, 1, 8, 7, 3, 5, 18];
 
 /// Display names for the 8 vanilla selectable tracks, in header-value order.
-const MUSIC_TRACK_NAMES: [&str; 8] = [
-    "Overworld",
-    "Underground",
-    "Athletic",
-    "Castle",
-    "Ghost House",
-    "Underwater",
-    "Boss Battle",
-    "Bonus Game",
-];
+const MUSIC_TRACK_NAMES: [&str; 8] =
+    ["Overworld", "Underground", "Athletic", "Castle", "Ghost House", "Underwater", "Boss Battle", "Bonus Game"];
 
 /// Display name for a level-header music value.
 ///

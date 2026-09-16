@@ -7,9 +7,11 @@
 
 use std::collections::BTreeSet;
 
-use crate::{
-    level::{Layer2Data, Level, ObjectLayer},
-    level::object_layer::{ExtendedInstance, ObjectInstance},
+use crate::level::{
+    object_layer::{ExtendedInstance, ObjectInstance},
+    Layer2Data,
+    Level,
+    ObjectLayer,
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -19,7 +21,7 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct LevelRefs {
     /// Sprite IDs placed in this level ([`SpriteLayer`](crate::level::SpriteLayer)).
-    pub sprites: BTreeSet<u8>,
+    pub sprites:          BTreeSet<u8>,
     /// Standard object IDs placed in this level.
     pub standard_objects: BTreeSet<u8>,
     /// Extended object IDs placed in this level (exit/screen-jump commands
@@ -29,11 +31,11 @@ pub struct LevelRefs {
     /// background, not objects).
     pub background_tiles: BTreeSet<u8>,
     /// Music track from the primary header (0-7).
-    pub music: u8,
+    pub music:            u8,
     /// Level numbers reachable through this level's normal exit objects.
     /// Secondary exits are intentionally excluded: they point at secondary
     /// entrances, not levels.
-    pub exits_to: BTreeSet<u16>,
+    pub exits_to:         BTreeSet<u16>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -118,12 +120,7 @@ impl XrefIndex {
     }
 
     fn matching(&self, pred: impl Fn(&LevelRefs) -> bool) -> Vec<u16> {
-        self.per_level
-            .iter()
-            .enumerate()
-            .filter(|(_, refs)| pred(refs))
-            .map(|(i, _)| i as u16)
-            .collect()
+        self.per_level.iter().enumerate().filter(|(_, refs)| pred(refs)).map(|(i, _)| i as u16).collect()
     }
 }
 
@@ -189,15 +186,15 @@ mod tests {
             .collect();
 
         Level {
-            primary_header: PrimaryHeader::new(&header_bytes),
+            primary_header:   PrimaryHeader::new(&header_bytes),
             secondary_header: SecondaryHeader([0, 0, 0, 0]),
-            sprite_header: SpriteHeader(0),
-            layer1: crate::level::ObjectLayer::parse(object_bytes).unwrap().1.0,
-            layer2: Layer2Data::Objects {
-                header: [0u8; crate::level::LAYER2_HEADER_SIZE],
-                objects: crate::level::ObjectLayer::parse(&[0xFF]).unwrap().1.0,
+            sprite_header:    SpriteHeader(0),
+            layer1:           crate::level::ObjectLayer::parse(object_bytes).unwrap().1 .0,
+            layer2:           Layer2Data::Objects {
+                header:  [0u8; crate::level::LAYER2_HEADER_SIZE],
+                objects: crate::level::ObjectLayer::parse(&[0xFF]).unwrap().1 .0,
             },
-            sprite_layer: crate::level::SpriteLayer::parse(&sprite_stream).unwrap().1.0,
+            sprite_layer:     crate::level::SpriteLayer::parse(&sprite_stream).unwrap().1 .0,
         }
     }
 
@@ -249,8 +246,8 @@ mod tests {
         // Extended object 0x77 placed on layer 2 (objects variant).
         let l2_bytes = [0x00u8, 0x00, 0x77, 0xFF];
         level.layer2 = Layer2Data::Objects {
-            header: [0u8; crate::level::LAYER2_HEADER_SIZE],
-            objects: crate::level::ObjectLayer::parse(&l2_bytes).unwrap().1.0,
+            header:  [0u8; crate::level::LAYER2_HEADER_SIZE],
+            objects: crate::level::ObjectLayer::parse(&l2_bytes).unwrap().1 .0,
         };
         let index = XrefIndex::build(std::slice::from_ref(&level));
 

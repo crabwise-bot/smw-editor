@@ -72,25 +72,25 @@ pub mod sizes {
 #[derive(Debug)]
 pub struct RomInternalHeader {
     pub internal_rom_name: String,
-    pub map_mode: MapMode,
-    pub rom_type: RomType,
-    pub rom_size: u8,
-    pub sram_size: u8,
-    pub region_code: RegionCode,
-    pub developer_id: u8,
-    pub version_number: u8,
+    pub map_mode:          MapMode,
+    pub rom_type:          RomType,
+    pub rom_size:          u8,
+    pub sram_size:         u8,
+    pub region_code:       RegionCode,
+    pub developer_id:      u8,
+    pub version_number:    u8,
     pub interrupt_vectors: Vec<AddrSnes>,
 }
 
 #[derive(Copy, Clone, Debug, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum MapMode {
-    SlowLoRom = 0b100000,
-    SlowHiRom = 0b100001,
+    SlowLoRom   = 0b100000,
+    SlowHiRom   = 0b100001,
     SlowExLoRom = 0b100010,
     SlowExHiRom = 0b100100,
-    FastLoRom = 0b110000,
-    FastHiRom = 0b110001,
+    FastLoRom   = 0b110000,
+    FastHiRom   = 0b110001,
     FastExLoRom = 0b110010,
     FastExHiRom = 0b110100,
 }
@@ -98,71 +98,71 @@ pub enum MapMode {
 #[derive(Copy, Clone, Debug, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum RomType {
-    Rom = 0x00,
-    RomRam = 0x01,
-    RomRamSram = 0x02,
+    Rom               = 0x00,
+    RomRam            = 0x01,
+    RomRamSram        = 0x02,
 
-    RomDsp = 0x03,
-    RomSuperFx = 0x13,
-    RomObc1 = 0x23,
-    RomSa1 = 0x33,
-    RomSdd1 = 0x43,
-    RomSrtc = 0x53,
-    RomOther = 0xE3,
-    RomCustom = 0xF3,
+    RomDsp            = 0x03,
+    RomSuperFx        = 0x13,
+    RomObc1           = 0x23,
+    RomSa1            = 0x33,
+    RomSdd1           = 0x43,
+    RomSrtc           = 0x53,
+    RomOther          = 0xE3,
+    RomCustom         = 0xF3,
 
-    RomDspRam = 0x04,
-    RomSuperFxRam = 0x14,
-    RomObc1Ram = 0x24,
-    RomSa1Ram = 0x34,
-    RomSdd1Ram = 0x44,
-    RomSRtcRam = 0x54,
-    RomOtherRam = 0xE4,
-    RomCustomRam = 0xF4,
+    RomDspRam         = 0x04,
+    RomSuperFxRam     = 0x14,
+    RomObc1Ram        = 0x24,
+    RomSa1Ram         = 0x34,
+    RomSdd1Ram        = 0x44,
+    RomSRtcRam        = 0x54,
+    RomOtherRam       = 0xE4,
+    RomCustomRam      = 0xF4,
 
-    RomDspRamSram = 0x05,
+    RomDspRamSram     = 0x05,
     RomSuperFxRamSram = 0x15,
-    RomObc1RamSram = 0x25,
-    RomSa1RamSram = 0x35,
-    RomSdd1RamSram = 0x45,
-    RomSRtcRamSram = 0x55,
-    RomOtherRamSram = 0xE5,
-    RomCustomRamSram = 0xF5,
+    RomObc1RamSram    = 0x25,
+    RomSa1RamSram     = 0x35,
+    RomSdd1RamSram    = 0x45,
+    RomSRtcRamSram    = 0x55,
+    RomOtherRamSram   = 0xE5,
+    RomCustomRamSram  = 0xF5,
 
-    RomDspSram = 0x06,
-    RomSuperFxSram = 0x16,
-    RomObc1Sram = 0x26,
-    RomSa1Sram = 0x36,
-    RomSdd1Sram = 0x46,
-    RomSRtcSram = 0x56,
-    RomOtherSram = 0xE6,
-    RomCustomSram = 0xF6,
+    RomDspSram        = 0x06,
+    RomSuperFxSram    = 0x16,
+    RomObc1Sram       = 0x26,
+    RomSa1Sram        = 0x36,
+    RomSdd1Sram       = 0x46,
+    RomSRtcSram       = 0x56,
+    RomOtherSram      = 0xE6,
+    RomCustomSram     = 0xF6,
 }
 
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u8)]
 pub enum RegionCode {
-    Japan = 0x00,
+    Japan        = 0x00,
     NorthAmerica = 0x01,
-    Europe = 0x02,
-    Sweden = 0x03,
-    Finland = 0x04,
-    Denmark = 0x05,
-    France = 0x06,
-    Netherlands = 0x07,
-    Spain = 0x08,
-    Germany = 0x09,
-    Italy = 0x0A,
-    China = 0x0B,
-    Indonesia = 0x0C,
-    Korea = 0x0D,
-    Global = 0x0E,
-    Canada = 0x0F,
-    Brazil = 0x10,
-    Australia = 0x11,
-    Other1 = 0x12,
-    Other2 = 0x13,
-    Other3 = 0x14,
+    Europe       = 0x02,
+    Sweden       = 0x03,
+    Finland      = 0x04,
+    Denmark      = 0x05,
+    France       = 0x06,
+    Netherlands  = 0x07,
+    Spain        = 0x08,
+    Germany      = 0x09,
+    Italy        = 0x0A,
+    China        = 0x0B,
+    Indonesia    = 0x0C,
+    Korea        = 0x0D,
+    Global       = 0x0E,
+    Canada       = 0x0F,
+    Brazil       = 0x10,
+    Australia    = 0x11,
+    Other1       = 0x12,
+    Other2       = 0x13,
+    Other3       = 0x14,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -174,19 +174,39 @@ impl RomInternalHeader {
         let byte_slice = name_slice.skip_forward(1).resize(1);
 
         Ok(Self {
-            internal_rom_name: rom.parse_pc(name_slice, map_res(many1(le_u8), |s| std::str::from_utf8(&s).map(String::from))).map_err(InternalHeaderParseError::ReadRomName)?,
-            map_mode: rom.parse_pc(byte_slice, map_res(le_u8, MapMode::try_from)).map_err(InternalHeaderParseError::ReadMapMode)?,
-            rom_type: rom.parse_pc(byte_slice.skip_forward(1), map_res(le_u8, RomType::try_from)).map_err(InternalHeaderParseError::ReadRomType)?,
-            rom_size: rom.parse_pc(byte_slice.skip_forward(2), le_u8).map_err(InternalHeaderParseError::ReadRomSize)?,
-            sram_size: rom.parse_pc(byte_slice.skip_forward(3), le_u8).map_err(InternalHeaderParseError::ReadSramSize)?,
-            region_code: rom.parse_pc(byte_slice.skip_forward(4), map_res(le_u8, RegionCode::try_from)).map_err(InternalHeaderParseError::ReadRegionCode)?,
-            developer_id: rom.parse_pc(byte_slice.skip_forward(5), le_u8).map_err(InternalHeaderParseError::ReadDeveloperId)?,
-            version_number: rom.parse_pc(byte_slice.skip_forward(6), le_u8).map_err(InternalHeaderParseError::ReadVersionNumber)?,
+            internal_rom_name: rom
+                .parse_pc(name_slice, map_res(many1(le_u8), |s| std::str::from_utf8(&s).map(String::from)))
+                .map_err(InternalHeaderParseError::ReadRomName)?,
+            map_mode:          rom
+                .parse_pc(byte_slice, map_res(le_u8, MapMode::try_from))
+                .map_err(InternalHeaderParseError::ReadMapMode)?,
+            rom_type:          rom
+                .parse_pc(byte_slice.skip_forward(1), map_res(le_u8, RomType::try_from))
+                .map_err(InternalHeaderParseError::ReadRomType)?,
+            rom_size:          rom
+                .parse_pc(byte_slice.skip_forward(2), le_u8)
+                .map_err(InternalHeaderParseError::ReadRomSize)?,
+            sram_size:         rom
+                .parse_pc(byte_slice.skip_forward(3), le_u8)
+                .map_err(InternalHeaderParseError::ReadSramSize)?,
+            region_code:       rom
+                .parse_pc(byte_slice.skip_forward(4), map_res(le_u8, RegionCode::try_from))
+                .map_err(InternalHeaderParseError::ReadRegionCode)?,
+            developer_id:      rom
+                .parse_pc(byte_slice.skip_forward(5), le_u8)
+                .map_err(InternalHeaderParseError::ReadDeveloperId)?,
+            version_number:    rom
+                .parse_pc(byte_slice.skip_forward(6), le_u8)
+                .map_err(InternalHeaderParseError::ReadVersionNumber)?,
             interrupt_vectors: {
                 let vectors_slice = byte_slice.skip_forward(15).resize(2 * 6);
                 let mut parse_vectors = count(map(le_u16, |addr| AddrSnes(addr as _)), 6);
-                let native = rom.parse_pc(vectors_slice, &mut parse_vectors).map_err(InternalHeaderParseError::ReadNativeModeInterruptVectors)?;
-                let emulation = rom.parse_pc(vectors_slice.skip_forward(1).offset_forward(4), &mut parse_vectors).map_err(InternalHeaderParseError::ReadEmulationModeInterruptVectors)?;
+                let native = rom
+                    .parse_pc(vectors_slice, &mut parse_vectors)
+                    .map_err(InternalHeaderParseError::ReadNativeModeInterruptVectors)?;
+                let emulation = rom
+                    .parse_pc(vectors_slice.skip_forward(1).offset_forward(4), &mut parse_vectors)
+                    .map_err(InternalHeaderParseError::ReadEmulationModeInterruptVectors)?;
                 native.into_iter().chain(emulation).collect()
             },
         })
@@ -199,8 +219,10 @@ impl RomInternalHeader {
         let lo_cpl_csm = HEADER_LOROM.offset_forward(offsets::COMPLEMENT_CHECK).resize(4);
         let hi_cpl_csm = HEADER_HIROM.offset_forward(offsets::COMPLEMENT_CHECK).resize(4);
 
-        let (lo_cpl, lo_csm) = rom.parse_pc(lo_cpl_csm, pair(le_u16, le_u16)).map_err(InternalHeaderParseError::ReadLoRomChecksum)?;
-        let (hi_cpl, hi_csm) = rom.parse_pc(hi_cpl_csm, pair(le_u16, le_u16)).map_err(InternalHeaderParseError::ReadHiRomChecksum)?;
+        let (lo_cpl, lo_csm) =
+            rom.parse_pc(lo_cpl_csm, pair(le_u16, le_u16)).map_err(InternalHeaderParseError::ReadLoRomChecksum)?;
+        let (hi_cpl, hi_csm) =
+            rom.parse_pc(hi_cpl_csm, pair(le_u16, le_u16)).map_err(InternalHeaderParseError::ReadHiRomChecksum)?;
 
         if (lo_csm ^ lo_cpl) == 0xFFFF {
             log::info!("Internal ROM header found at LoROM location: {:#X}", HEADER_LOROM.begin);
@@ -231,20 +253,16 @@ impl RomInternalHeader {
 impl fmt::Display for MapMode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use MapMode::*;
-        write!(
-            f,
-            "{}",
-            match self {
-                SlowLoRom => "LoROM",
-                SlowHiRom => "HiROM",
-                SlowExLoRom => "ExLoROM",
-                SlowExHiRom => "ExHiROM",
-                FastLoRom => "Fast LoROM",
-                FastHiRom => "Fast HiROM",
-                FastExLoRom => "Fast ExLoROM",
-                FastExHiRom => "Fast ExHiROM",
-            }
-        )
+        write!(f, "{}", match self {
+            SlowLoRom => "LoROM",
+            SlowHiRom => "HiROM",
+            SlowExLoRom => "ExLoROM",
+            SlowExHiRom => "ExHiROM",
+            FastLoRom => "Fast LoROM",
+            FastHiRom => "Fast HiROM",
+            FastExLoRom => "Fast ExLoROM",
+            FastExHiRom => "Fast ExHiROM",
+        })
     }
 }
 
@@ -263,68 +281,60 @@ impl fmt::Display for RomType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use RomType::*;
         let self_as_byte: u8 = (*self).into();
-        write!(
-            f,
-            "{}",
-            match self {
-                Rom => String::from("ROM"),
-                RomRam => String::from("ROM + RAM"),
-                RomRamSram => String::from("ROM + RAM + SRAM"),
-                _ => format!(
-                    "ROM + {}{}",
-                    match self_as_byte & 0xF0 {
-                        0x00 => "DSP",
-                        0x10 => "SuperFX",
-                        0x20 => "OBC-1",
-                        0x30 => "SA-1",
-                        0x40 => "SDD-1",
-                        0x50 => "S-RTC",
-                        0xE0 => "Other expansion chip",
-                        0xF0 => "Custom expansion chip",
-                        _ => "Unknown expansion chip",
-                    },
-                    match self_as_byte & 0x0F {
-                        0x3 => "",
-                        0x4 => " + RAM",
-                        0x5 => " + RAM + SRAM",
-                        0x6 => " + SRAM",
-                        _ => " + Unknown memory chip",
-                    }
-                ),
-            }
-        )
+        write!(f, "{}", match self {
+            Rom => String::from("ROM"),
+            RomRam => String::from("ROM + RAM"),
+            RomRamSram => String::from("ROM + RAM + SRAM"),
+            _ => format!(
+                "ROM + {}{}",
+                match self_as_byte & 0xF0 {
+                    0x00 => "DSP",
+                    0x10 => "SuperFX",
+                    0x20 => "OBC-1",
+                    0x30 => "SA-1",
+                    0x40 => "SDD-1",
+                    0x50 => "S-RTC",
+                    0xE0 => "Other expansion chip",
+                    0xF0 => "Custom expansion chip",
+                    _ => "Unknown expansion chip",
+                },
+                match self_as_byte & 0x0F {
+                    0x3 => "",
+                    0x4 => " + RAM",
+                    0x5 => " + RAM + SRAM",
+                    0x6 => " + SRAM",
+                    _ => " + Unknown memory chip",
+                }
+            ),
+        })
     }
 }
 
 impl fmt::Display for RegionCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use RegionCode::*;
-        write!(
-            f,
-            "{}",
-            match self {
-                Japan => "Japan",
-                NorthAmerica => "North America",
-                Europe => "Europe",
-                Sweden => "Sweden",
-                Finland => "Finland",
-                Denmark => "Denmark",
-                France => "France",
-                Netherlands => "Netherlands",
-                Spain => "Spain",
-                Germany => "Germany",
-                Italy => "Italy",
-                China => "China",
-                Indonesia => "Indonesia",
-                Korea => "Korea",
-                Global => "Global",
-                Canada => "Canada",
-                Brazil => "Brazil",
-                Australia => "Australia",
-                Other1 => "Other (1)",
-                Other2 => "Other (2)",
-                Other3 => "Other (3)",
-            }
-        )
+        write!(f, "{}", match self {
+            Japan => "Japan",
+            NorthAmerica => "North America",
+            Europe => "Europe",
+            Sweden => "Sweden",
+            Finland => "Finland",
+            Denmark => "Denmark",
+            France => "France",
+            Netherlands => "Netherlands",
+            Spain => "Spain",
+            Germany => "Germany",
+            Italy => "Italy",
+            China => "China",
+            Indonesia => "Indonesia",
+            Korea => "Korea",
+            Global => "Global",
+            Canada => "Canada",
+            Brazil => "Brazil",
+            Australia => "Australia",
+            Other1 => "Other (1)",
+            Other2 => "Other (2)",
+            Other3 => "Other (3)",
+        })
     }
 }

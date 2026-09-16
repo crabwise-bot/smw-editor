@@ -16,9 +16,8 @@
 
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
-use smwe_rom::rom_expansion::{compute_checksum, expand_rom, expansion_targets, format_size};
-
 use smw_editor::render_util::{fill_rect, rect_border};
+use smwe_rom::rom_expansion::{compute_checksum, expand_rom, expansion_targets, format_size};
 
 const SANS_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
 const SANS_BOLD_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"];
@@ -81,8 +80,7 @@ fn env_args() -> Vec<String> {
 
 fn main() -> anyhow::Result<()> {
     let args = env_args();
-    let rom_path =
-        args.iter().find_map(|a| a.strip_prefix("--rom=")).unwrap_or("smw.smc");
+    let rom_path = args.iter().find_map(|a| a.strip_prefix("--rom=")).unwrap_or("smw.smc");
 
     // Verification mode: expand a scratch copy in place and re-open it.
     if let Some(copy) = args.iter().find_map(|a| a.strip_prefix("--expand-copy=")) {
@@ -108,14 +106,16 @@ fn main() -> anyhow::Result<()> {
         let reopened = smwe_rom::SmwRom::from_file(copy)?;
         assert_eq!(reopened.rom.bytes().len(), target);
         assert_eq!(reopened.internal_header.rom_size_in_kb(), (target / 0x400) as u32);
-        println!("expanded {} -> {} and re-opened OK ({} levels parsed)", copy, format_size(target), reopened.levels.len());
+        println!(
+            "expanded {} -> {} and re-opened OK ({} levels parsed)",
+            copy,
+            format_size(target),
+            reopened.levels.len()
+        );
         return Ok(());
     }
 
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/rom-expand.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/rom-expand.png");
 
     // ---- Real data path, identical to the UI ----
     let rom = smwe_rom::SmwRom::from_file(rom_path)?;
@@ -210,10 +210,7 @@ fn main() -> anyhow::Result<()> {
     y += 8;
 
     // Free-space bars (real byte scans).
-    for (label, total_kb, free) in [
-        ("Before", before_kb, before_free),
-        ("After", after_kb, after_free),
-    ] {
+    for (label, total_kb, free) in [("Before", before_kb, before_free), ("After", after_kb, after_free)] {
         draw_text(
             &mut img,
             &sans,

@@ -59,11 +59,11 @@ impl XrefQueryKind {
 /// from the already-parsed levels the first time the window opens.
 #[derive(Default)]
 pub(super) struct XrefSearchState {
-    index: Option<XrefIndex>,
+    index:      Option<XrefIndex>,
     query_kind: XrefQueryKind,
     query_text: String,
-    results: Option<Vec<u16>>,
-    error: Option<String>,
+    results:    Option<Vec<u16>>,
+    error:      Option<String>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -112,11 +112,9 @@ impl UiLevelEditor {
         }
 
         let mut open = self.show_xref_search;
-        egui::Window::new("Cross-Reference Search")
-            .open(&mut open)
-            .resizable(true)
-            .default_size([420.0, 480.0])
-            .show(ctx, |ui| {
+        egui::Window::new("Cross-Reference Search").open(&mut open).resizable(true).default_size([420.0, 480.0]).show(
+            ctx,
+            |ui| {
                 let state = &mut self.xref_search;
                 ui.label("Find every level that uses a sprite, object, background tile, music track, or exit.");
                 if let Some(index) = &state.index {
@@ -126,13 +124,14 @@ impl UiLevelEditor {
 
                 ui.horizontal(|ui| {
                     ui.label("Look for:");
-                    ComboBox::from_id_salt("xref_query_kind")
-                        .selected_text(state.query_kind.label())
-                        .show_ui(ui, |ui| {
+                    ComboBox::from_id_salt("xref_query_kind").selected_text(state.query_kind.label()).show_ui(
+                        ui,
+                        |ui| {
                             for kind in XrefQueryKind::all() {
                                 ui.selectable_value(&mut state.query_kind, kind, kind.label());
                             }
-                        });
+                        },
+                    );
                 });
 
                 let mut search_now = false;
@@ -149,10 +148,7 @@ impl UiLevelEditor {
                 if state.query_kind == XrefQueryKind::Music {
                     match parse_query_value(&state.query_text, 7) {
                         Ok(v) => {
-                            ui.small(format!(
-                                "Track: {}",
-                                smwe_rom::music::format_music_track(v as u8)
-                            ));
+                            ui.small(format!("Track: {}", smwe_rom::music::format_music_track(v as u8)));
                         }
                         Err(_) => {
                             ui.small("Enter a music track 0-7.");
@@ -186,7 +182,11 @@ impl UiLevelEditor {
                         ui.small("No search run yet.");
                     }
                     Some(results) => {
-                        ui.label(format!("{} level{} found:", results.len(), if results.len() == 1 { "" } else { "s" }));
+                        ui.label(format!(
+                            "{} level{} found:",
+                            results.len(),
+                            if results.len() == 1 { "" } else { "s" }
+                        ));
                         ScrollArea::vertical().max_height(300.0).id_salt("xref_results").show(ui, |ui| {
                             let mut jump_to = None;
                             for level in results {
@@ -200,7 +200,8 @@ impl UiLevelEditor {
                         });
                     }
                 }
-            });
+            },
+        );
         self.show_xref_search = open;
     }
 }

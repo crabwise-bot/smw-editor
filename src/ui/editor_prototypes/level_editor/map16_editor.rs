@@ -94,8 +94,7 @@ impl UiLevelEditor {
                         image,
                         egui::TextureOptions::NEAREST,
                     );
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::splat(PREVIEW_PX as f32), Sense::click());
+                    let (rect, response) = ui.allocate_exact_size(Vec2::splat(PREVIEW_PX as f32), Sense::click());
                     ui.painter().image(
                         tex.id(),
                         rect,

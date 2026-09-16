@@ -21,7 +21,7 @@
 //!   layout the upload loop at `CODE_00AA35` produces: FG1 → VRAM tiles
 //!   0x00-0x7F, FG2 → 0x80-0xFF, FG3 → 0x100-0x17F, BG1 → 0x180-0x1FF.
 
-use egui::{Color32, Context, Rect, Sense, Slider, pos2, vec2};
+use egui::{pos2, vec2, Color32, Context, Rect, Sense, Slider};
 use smwe_rom::graphics::gfx_file::{self, GfxFile, Tile, TileFormat};
 
 use super::UiLevelEditor;
@@ -102,11 +102,9 @@ impl UiLevelEditor {
             return;
         }
         let mut open = self.show_tile_editor;
-        egui::Window::new("8x8 Tile Editor")
-            .open(&mut open)
-            .resizable(true)
-            .default_size([880.0, 560.0])
-            .show(ctx, |ui| {
+        egui::Window::new("8x8 Tile Editor").open(&mut open).resizable(true).default_size([880.0, 560.0]).show(
+            ctx,
+            |ui| {
                 ui.horizontal(|ui| {
                     ui.label("GFX file:");
                     let mut file_num = self.tile_editor_file_num as i32;
@@ -129,10 +127,7 @@ impl UiLevelEditor {
                 ui.horizontal(|ui| {
                     ui.label(format!("Format: {format}  •  {n_tiles} tiles"));
                     if self.tile_editor_staged.contains_key(&file_num) || self.gfx_edits.contains_key(&file_num) {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 160, 60),
-                            "Unsaved edits staged for this file.",
-                        );
+                        ui.colored_label(egui::Color32::from_rgb(220, 160, 60), "Unsaved edits staged for this file.");
                     }
                 });
                 if let Some(note) = self.tile_editor_handoff_note.clone() {
@@ -149,7 +144,8 @@ impl UiLevelEditor {
                         self.tile_editor_pixel_pane(ui, file_num, format);
                     });
                 });
-            });
+            },
+        );
         self.show_tile_editor = open;
     }
 
@@ -167,10 +163,8 @@ impl UiLevelEditor {
     fn sync_tile_editor_pixels(&mut self) {
         let sel = self.tile_editor_selected;
         let file_num = self.tile_editor_file_num;
-        let pixels: Option<[u8; 64]> = self
-            .tile_editor_tiles(file_num)
-            .get(sel)
-            .and_then(|tile| tile.color_indices.as_ref().try_into().ok());
+        let pixels: Option<[u8; 64]> =
+            self.tile_editor_tiles(file_num).get(sel).and_then(|tile| tile.color_indices.as_ref().try_into().ok());
         match pixels {
             Some(p) => self.tile_editor_pixels = p,
             None => self.tile_editor_pixels = [0u8; 64],
@@ -274,10 +268,8 @@ impl UiLevelEditor {
             let img = {
                 let palette = cgram_palette_row(&self.cpu.mem.cgram, self.tile_editor_palette);
                 let tiles = self.tile_editor_tiles(file_num);
-                let mut img = egui::ColorImage::new(
-                    [GRID_COLS * 8 * GRID_SCALE, rows * 8 * GRID_SCALE],
-                    Color32::TRANSPARENT,
-                );
+                let mut img =
+                    egui::ColorImage::new([GRID_COLS * 8 * GRID_SCALE, rows * 8 * GRID_SCALE], Color32::TRANSPARENT);
                 let mut px = [0u8; 8 * 8 * 4];
                 for (i, tile) in tiles.iter().enumerate() {
                     tile_rgba8(tile, &palette, false, &mut px);
@@ -285,8 +277,7 @@ impl UiLevelEditor {
                     for sy in 0..8usize {
                         for sx in 0..8usize {
                             let src = (sy * 8 + sx) * 4;
-                            let c =
-                                Color32::from_rgba_unmultiplied(px[src], px[src + 1], px[src + 2], px[src + 3]);
+                            let c = Color32::from_rgba_unmultiplied(px[src], px[src + 1], px[src + 2], px[src + 3]);
                             for dy in 0..GRID_SCALE {
                                 for dx in 0..GRID_SCALE {
                                     img[(tx + sx * GRID_SCALE + dx, ty + sy * GRID_SCALE + dy)] = c;
@@ -297,11 +288,7 @@ impl UiLevelEditor {
                 }
                 img
             };
-            let tex = ui.ctx().load_texture(
-                format!("tile_editor_grid_{file_num}"),
-                img,
-                egui::TextureOptions::NEAREST,
-            );
+            let tex = ui.ctx().load_texture(format!("tile_editor_grid_{file_num}"), img, egui::TextureOptions::NEAREST);
             self.tile_editor_grid_tex = Some(tex);
             self.tile_editor_grid_key = key;
         }
@@ -310,12 +297,7 @@ impl UiLevelEditor {
         let cell = 8.0 * GRID_SCALE as f32;
         let (rect, response) =
             ui.allocate_exact_size(vec2(GRID_COLS as f32 * cell, rows as f32 * cell), Sense::click());
-        ui.painter().image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 
         // Selection highlight.
         let sel = self.tile_editor_selected;
@@ -324,7 +306,12 @@ impl UiLevelEditor {
                 rect.min + vec2((sel % GRID_COLS) as f32 * cell, (sel / GRID_COLS) as f32 * cell),
                 vec2(cell, cell),
             );
-            ui.painter().rect_stroke(sel_rect, 0.0, egui::Stroke::new(2.0_f32, Color32::YELLOW), egui::StrokeKind::Outside);
+            ui.painter().rect_stroke(
+                sel_rect,
+                0.0,
+                egui::Stroke::new(2.0_f32, Color32::YELLOW),
+                egui::StrokeKind::Outside,
+            );
         }
 
         if response.clicked() {
@@ -367,15 +354,22 @@ impl UiLevelEditor {
         for py in 0..8usize {
             for px in 0..8usize {
                 let idx = self.tile_editor_pixels[py * 8 + px];
-                let cell =
-                    Rect::from_min_size(rect.min + vec2(px as f32 * PIXEL_CELL, py as f32 * PIXEL_CELL), vec2(PIXEL_CELL, PIXEL_CELL));
+                let cell = Rect::from_min_size(
+                    rect.min + vec2(px as f32 * PIXEL_CELL, py as f32 * PIXEL_CELL),
+                    vec2(PIXEL_CELL, PIXEL_CELL),
+                );
                 if idx == 0 {
                     let shade = if (px + py) % 2 == 0 { 46u8 } else { 74u8 };
                     painter.rect_filled(cell, 0.0, Color32::from_gray(shade));
                 } else {
                     painter.rect_filled(cell, 0.0, palette[(idx as usize).min(15)]);
                 }
-                painter.rect_stroke(cell, 0.0, egui::Stroke::new(0.5_f32, Color32::from_black_alpha(90)), egui::StrokeKind::Inside);
+                painter.rect_stroke(
+                    cell,
+                    0.0,
+                    egui::Stroke::new(0.5_f32, Color32::from_black_alpha(90)),
+                    egui::StrokeKind::Inside,
+                );
             }
         }
 
@@ -422,10 +416,7 @@ impl UiLevelEditor {
                         for cx in 0..2 {
                             let shade = if (cx + cy) % 2 == 0 { 46u8 } else { 74u8 };
                             ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    r.min + vec2(cx as f32 * 12.0, cy as f32 * 12.0),
-                                    vec2(12.0, 12.0),
-                                ),
+                                Rect::from_min_size(r.min + vec2(cx as f32 * 12.0, cy as f32 * 12.0), vec2(12.0, 12.0)),
                                 0.0,
                                 Color32::from_gray(shade),
                             );
@@ -435,7 +426,12 @@ impl UiLevelEditor {
                     ui.painter().rect_filled(r, 2.0, c);
                 }
                 if i == self.tile_editor_paint_color {
-                    ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Outside);
+                    ui.painter().rect_stroke(
+                        r,
+                        2.0,
+                        egui::Stroke::new(2.0_f32, Color32::WHITE),
+                        egui::StrokeKind::Outside,
+                    );
                 }
                 if resp.clicked() {
                     self.tile_editor_paint_color = i;
@@ -549,8 +545,7 @@ mod tests {
 
 #[cfg(test)]
 mod real_rom_tests {
-    use smwe_rom::objects::map16::Tile8x8;
-    use smwe_rom::SmwRom;
+    use smwe_rom::{objects::map16::Tile8x8, SmwRom};
 
     /// The OBJECTGFXLIST table the handoff mapping relies on must start at
     /// $00A92B with the documented "Normal 1" row ($14,$17,$19,$15) — the
@@ -563,20 +558,13 @@ mod real_rom_tests {
         let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH");
         let rom = SmwRom::from_file(rom_path).expect("parse ROM");
         let row0 = (0..4)
-            .map(|slot| {
-                rom.gfx
-                    .object_gfx_list
-                    .gfx_file_for_object_tile(Tile8x8(slot as u16 * 0x80), 0)
-            })
+            .map(|slot| rom.gfx.object_gfx_list.gfx_file_for_object_tile(Tile8x8(slot as u16 * 0x80), 0))
             .collect::<Vec<_>>();
         assert_eq!(row0, vec![0x14, 0x17, 0x19, 0x15], "tileset 0 must be the 'Normal 1' row");
         // Every referenced file must exist and hold at least 0x80 tiles (one
         // upload slot's worth).
         for file_num in row0 {
-            assert!(
-                rom.gfx.files[file_num].tiles.len() >= 0x80,
-                "file {file_num:02X} too small for an upload slot"
-            );
+            assert!(rom.gfx.files[file_num].tiles.len() >= 0x80, "file {file_num:02X} too small for an upload slot");
         }
     }
 }

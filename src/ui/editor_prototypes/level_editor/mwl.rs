@@ -9,8 +9,6 @@
 use std::sync::Arc;
 
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
-
-use crate::ui::tool::DockableEditorTool;
 use smwe_rom::{
     mwl::{self, MwlFile},
     snes_utils::rom::Rom,
@@ -18,27 +16,28 @@ use smwe_rom::{
 };
 
 use super::UiLevelEditor;
+use crate::ui::tool::DockableEditorTool;
 
 /// Does this ROM image carry a 0x200-byte SMC copier header?
 pub(super) fn smc_header_offset(rom_bytes: &[u8]) -> usize {
-    if rom_bytes.len() % 0x400 == 0x200 { 0x200 } else { 0 }
+    if rom_bytes.len() % 0x400 == 0x200 {
+        0x200
+    } else {
+        0
+    }
 }
 
 /// Write `rom_bytes` back to the ROM file with a `.bak` backup and an atomic
 /// temp-file rename, mirroring the main save path.
 pub(super) fn write_rom_file_atomic(rom_path: &std::path::Path, rom_bytes: &[u8]) -> anyhow::Result<()> {
     if rom_path.exists() {
-        let bak_path = rom_path.with_extension(format!(
-            "{}.bak",
-            rom_path.extension().and_then(|e| e.to_str()).unwrap_or("smc")
-        ));
+        let bak_path =
+            rom_path.with_extension(format!("{}.bak", rom_path.extension().and_then(|e| e.to_str()).unwrap_or("smc")));
         std::fs::copy(rom_path, &bak_path)?;
     }
     let dest_dir = rom_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let tmp_path = dest_dir.join(format!(
-        ".{}.tmp",
-        rom_path.file_name().and_then(|n| n.to_str()).unwrap_or("rom_save")
-    ));
+    let tmp_path =
+        dest_dir.join(format!(".{}.tmp", rom_path.file_name().and_then(|n| n.to_str()).unwrap_or("rom_save")));
     std::fs::write(&tmp_path, rom_bytes)?;
     std::fs::rename(&tmp_path, rom_path)?;
     Ok(())
@@ -79,8 +78,7 @@ impl UiLevelEditor {
 
     /// Import an `.mwl` file into the current level, with confirmation.
     pub(super) fn import_mwl(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Lunar Magic level", &["mwl"]).pick_file()
-        else {
+        let Some(path) = rfd::FileDialog::new().add_filter("Lunar Magic level", &["mwl"]).pick_file() else {
             return;
         };
         let raw = match std::fs::read(&path) {
