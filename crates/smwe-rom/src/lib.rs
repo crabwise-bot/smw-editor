@@ -6,6 +6,7 @@ pub mod font_map;
 pub mod freespace;
 pub mod message_raster;
 pub mod music;
+pub mod rom_expansion;
 pub mod graphics;
 pub mod internal_header;
 pub mod level;

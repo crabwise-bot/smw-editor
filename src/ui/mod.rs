@@ -7,7 +7,10 @@ mod tool;
 mod welcome;
 mod world_editor;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Context as _;
 use eframe::{CreationContext, Frame};
@@ -15,7 +18,11 @@ use egui::*;
 use egui_dock::{DockArea, DockState, Style as DockStyle};
 use egui_file_dialog::FileDialog;
 use egui_phosphor::Variant;
-use smwe_rom::SmwRom;
+use smwe_rom::{
+    rom_expansion::{expand_rom, expansion_targets, format_size, split_smc_header},
+    snes_utils::rom::Rom,
+    SmwRom,
+};
 
 use crate::{
     project::Project,
@@ -44,6 +51,12 @@ pub struct UiMainWindow {
     bps_export_dialog: FileDialog,
     /// In-egui file dialog for IPS patch export.
     ips_export_dialog: FileDialog,
+    /// Expand-ROM dialog (File > Expand ROM...).
+    show_expand_dialog: bool,
+    /// Selected expansion target size in bytes.
+    expand_target: usize,
+    /// Status line shown in the Expand-ROM dialog.
+    expand_status: Option<String>,
     /// Set when user tries to close the app with unsaved changes
     show_exit_dialog: bool,
 }
@@ -68,6 +81,9 @@ impl UiMainWindow {
             save_as_dialog: FileDialog::new(),
             bps_export_dialog: FileDialog::new(),
             ips_export_dialog: FileDialog::new(),
+            show_expand_dialog: false,
+            expand_target: 0,
+            expand_status: None,
             show_exit_dialog: false,
         }
     }
@@ -110,6 +126,62 @@ impl eframe::App for UiMainWindow {
             });
             if !open {
                 self.save_error = None;
+            }
+        }
+
+        // Expand ROM dialog.
+        if self.show_expand_dialog {
+            let mut open = true;
+            let mut close_requested = false;
+            let rom_len = rom.as_ref().map(|r| r.rom.bytes().len()).unwrap_or(0);
+            let targets = expansion_targets(rom_len);
+            Window::new("Expand ROM").open(&mut open).resizable(false).show(ctx, |ui| {
+                if let Some(r) = rom.as_ref() {
+                    ui.label(format!(
+                        "Current size: {} ({})",
+                        format_size(rom_len),
+                        r.internal_header.map_mode
+                    ));
+                }
+                ui.separator();
+                if targets.is_empty() {
+                    ui.label("This ROM is already at the maximum LoROM size (4 MB).");
+                } else {
+                    ui.label("Expand to:");
+                    for t in &targets {
+                        ui.radio_value(
+                            &mut self.expand_target,
+                            *t,
+                            format!("{} ({} Mbit)", format_size(*t), t / 0x2_0000),
+                        );
+                    }
+                    ui.separator();
+                    ui.label(
+                        "Appends $FF-filled banks and updates the internal header\n\
+                         (ROM size byte + checksum). A .bak backup of the original\n\
+                         file is kept next to the ROM. Unsaved edits are saved first.",
+                    )
+                    .on_hover_text("Same layout Lunar Magic produces for LoROM expansion");
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_expand = !targets.is_empty();
+                    if ui.add_enabled(can_expand, Button::new("Expand")).clicked() {
+                        let ctx2 = ctx.clone();
+                        self.perform_rom_expansion(&ctx2);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_requested = true;
+                    }
+                });
+                if let Some(status) = &self.expand_status.clone() {
+                    ui.separator();
+                    ui.label(status);
+                }
+            });
+            if !open || close_requested {
+                self.show_expand_dialog = false;
+                self.expand_status = None;
             }
         }
 
@@ -420,6 +492,18 @@ impl UiMainWindow {
                             ui.close_menu();
                         }
                         ui.separator();
+                        if ui.button("Expand ROM...").clicked() {
+                            // Default to the largest available target, like Lunar Magic.
+                            if let Some(r) = rom {
+                                let current = r.rom.bytes().len();
+                                self.expand_target =
+                                    expansion_targets(current).into_iter().last().unwrap_or(0);
+                            }
+                            self.expand_status = None;
+                            self.show_expand_dialog = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
                         if ui.button("Export BPS Patch...").clicked() {
                             self.export_bps_patch();
                             ui.close_menu();
@@ -483,17 +567,10 @@ impl UiMainWindow {
         });
     }
 
-    fn write_rom_to_path(&self, source_path: &std::path::Path, dest_path: &std::path::Path) -> anyhow::Result<()> {
-        let mut rom_bytes =
-            std::fs::read(source_path).with_context(|| format!("Failed to read ROM from {}", source_path.display()))?;
-        let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
-        for (_, tab) in self.dock_state.iter_all_tabs() {
-            tab.save_to_rom(&mut rom_bytes, has_smc_header)?;
-        }
-
-        // Keep a backup of the previous contents of dest_path (if any) before overwriting it,
-        // and write via a temp file + rename so a crash/full-disk mid-write can't corrupt the
-        // user's only copy of the ROM.
+    /// Write `bytes` to `dest_path` atomically: keep a `.bak` backup of the
+    /// previous contents (if any), write via a temp file + rename so a
+    /// crash/full-disk mid-write can't corrupt the user's only copy.
+    fn atomic_write_with_backup(dest_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         if dest_path.exists() {
             let bak_path = dest_path.with_extension(format!(
                 "{}.bak",
@@ -513,7 +590,7 @@ impl UiMainWindow {
                 .with_context(|| format!("Failed to create temp file {}", tmp_path.display()))?;
             use std::io::Write;
             tmp_file
-                .write_all(&rom_bytes)
+                .write_all(bytes)
                 .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
             tmp_file.sync_all().with_context(|| format!("Failed to flush temp file {}", tmp_path.display()))?;
         }
@@ -521,6 +598,57 @@ impl UiMainWindow {
             format!("Failed to move temp file {} into place at {}", tmp_path.display(), dest_path.display())
         })?;
         Ok(())
+    }
+
+    fn write_rom_to_path(&self, source_path: &std::path::Path, dest_path: &std::path::Path) -> anyhow::Result<()> {
+        let mut rom_bytes =
+            std::fs::read(source_path).with_context(|| format!("Failed to read ROM from {}", source_path.display()))?;
+        let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
+        for (_, tab) in self.dock_state.iter_all_tabs() {
+            tab.save_to_rom(&mut rom_bytes, has_smc_header)?;
+        }
+
+        Self::atomic_write_with_backup(dest_path, &rom_bytes)
+    }
+
+    /// File > Expand ROM... action: merge unsaved tab edits (like Save does),
+    /// grow the image to `self.expand_target`, preserve any SMC header, and
+    /// reload the project so the new space is visible everywhere.
+    fn perform_rom_expansion(&mut self, ctx: &Context) {
+        let Some(path) = self.rom_path.clone() else {
+            self.expand_status = Some("No ROM is open.".to_string());
+            return;
+        };
+        let target = self.expand_target;
+        let result = (|| -> anyhow::Result<usize> {
+            let mut rom_bytes = std::fs::read(&path)
+                .with_context(|| format!("Failed to read ROM from {}", path.display()))?;
+            let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
+            for (_, tab) in self.dock_state.iter_all_tabs() {
+                tab.save_to_rom(&mut rom_bytes, has_smc_header)?;
+            }
+            let (smc_header, body) = split_smc_header(&rom_bytes);
+            let expanded = expand_rom(&Rom::new(body.to_vec())?, target)?;
+            let mut out = Vec::with_capacity(target + smc_header.map(|h| h.len()).unwrap_or(0));
+            if let Some(h) = smc_header {
+                out.extend_from_slice(h);
+            }
+            out.extend_from_slice(expanded.bytes());
+            Self::atomic_write_with_backup(&path, &out)?;
+            self.reload_rom_into_context(ctx, &path)?;
+            Ok(target)
+        })();
+        match result {
+            Ok(new_size) => {
+                self.expand_status = Some(format!(
+                    "Expanded to {}. The new $FF space is now available to the free-space scanner.",
+                    format_size(new_size)
+                ));
+            }
+            Err(e) => {
+                self.expand_status = Some(format!("Expansion failed: {e:#}"));
+            }
+        }
     }
 
     fn reload_rom_into_context(&self, ctx: &Context, path: &std::path::Path) -> anyhow::Result<()> {
