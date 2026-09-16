@@ -1,7 +1,6 @@
 use std::{env, path::Path, sync::Arc};
 
 use image::{ImageBuffer, Rgb};
-
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
 
 const VRAM_L1_TILEMAP_BASE: usize = 0x2000 * 2;
@@ -22,7 +21,8 @@ fn main() {
     let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("ow_render.png");
     let full = args.iter().any(|a| a == "--full");
     let activate_events = !args.iter().any(|a| a == "--no-events");
-    let anim_ticks = args.iter().find_map(|a| a.strip_prefix("--anim-ticks=")).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let anim_ticks =
+        args.iter().find_map(|a| a.strip_prefix("--anim-ticks=")).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
     let raw = std::fs::read(rom_path).expect("cannot read smw.smc");
     let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
@@ -358,9 +358,7 @@ fn render_bg_full(vram: &[u8], tilemap_base: usize, width: u32, cgram: &[u8], pi
 /// A header band labels the events and marker count. Every position and kind
 /// comes from the real parsed ROM tables (`OverworldL2Events`), and the map
 /// underneath is the real emulated render.
-fn draw_l2_markers(
-    rom_bytes: &[u8], img: ImageBuffer<Rgb<u8>, Vec<u8>>, spec: &str,
-) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+fn draw_l2_markers(rom_bytes: &[u8], img: ImageBuffer<Rgb<u8>, Vec<u8>>, spec: &str) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     use smwe_rom::overworld::{L2EventKind, OverworldL2Events, OW_EVENT_COUNT};
     let rom = smwe_rom::snes_utils::rom::Rom::new(rom_bytes.to_vec()).expect("rom parse");
     let l2 = OverworldL2Events::parse(&rom).expect("L2 events parse");
@@ -368,21 +366,23 @@ fn draw_l2_markers(
     let events: Vec<usize> = if spec == "all" {
         (0..OW_EVENT_COUNT).collect()
     } else {
-        spec.split(',')
-            .filter_map(|s| s.trim().parse::<usize>().ok())
-            .filter(|&e| e < OW_EVENT_COUNT)
-            .collect()
+        spec.split(',').filter_map(|s| s.trim().parse::<usize>().ok()).filter(|&e| e < OW_EVENT_COUNT).collect()
     };
 
     const HEADER: u32 = 34;
     let (w, h) = (img.width(), img.height());
-    let mut out = ImageBuffer::from_fn(w, h + HEADER, |x, y| {
-        if y < HEADER {
-            Rgb([18, 18, 24])
-        } else {
-            *img.get_pixel(x, y - HEADER)
-        }
-    });
+    let mut out =
+        ImageBuffer::from_fn(
+            w,
+            h + HEADER,
+            |x, y| {
+                if y < HEADER {
+                    Rgb([18, 18, 24])
+                } else {
+                    *img.get_pixel(x, y - HEADER)
+                }
+            },
+        );
 
     let mut markers: Vec<(u32, u32, Rgb<u8>)> = Vec::new();
     for &event in &events {
@@ -415,8 +415,7 @@ fn draw_l2_markers(
     } else {
         format!("events [{}]", events.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(","))
     };
-    let title =
-        format!("L2 event targets — {ev_label} ({} markers; cyan=stream, orange=tilemap copy)", markers.len());
+    let title = format!("L2 event targets — {ev_label} ({} markers; cyan=stream, orange=tilemap copy)", markers.len());
     draw_text_simple(&mut out, &title, 8, 20);
     out
 }
@@ -428,10 +427,12 @@ fn draw_ring(img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, cx: u32, cy: u32, r: u32, 
         for dx in 0..=r as i32 {
             let d2 = dx * dx + dy * dy;
             if d2 <= r2 && d2 >= inner {
-                for (sx, sy) in
-                    [(cx as i32 + dx, cy as i32 + dy), (cx as i32 - dx, cy as i32 + dy),
-                     (cx as i32 + dx, cy as i32 - dy), (cx as i32 - dx, cy as i32 - dy)]
-                {
+                for (sx, sy) in [
+                    (cx as i32 + dx, cy as i32 + dy),
+                    (cx as i32 - dx, cy as i32 + dy),
+                    (cx as i32 + dx, cy as i32 - dy),
+                    (cx as i32 - dx, cy as i32 - dy),
+                ] {
                     if sx >= 0 && sy >= 0 && (sx as u32) < img.width() && (sy as u32) < img.height() {
                         img.put_pixel(sx as u32, sy as u32, color);
                     }

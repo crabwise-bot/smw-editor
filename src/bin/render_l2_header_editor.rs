@@ -18,10 +18,14 @@
 
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
-use smwe_rom::level::{Layer2Data, Level, LAYER2_HEADER_SIZE};
-use smwe_rom::snes_utils::addr::{AddrPc, AddrSnes};
-use smwe_rom::snes_utils::rom::Rom;
-use smwe_rom::SmwRom;
+use smwe_rom::{
+    level::{Layer2Data, Level, LAYER2_HEADER_SIZE},
+    snes_utils::{
+        addr::{AddrPc, AddrSnes},
+        rom::Rom,
+    },
+    SmwRom,
+};
 
 const MONO_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"];
 const SANS_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
@@ -38,21 +42,13 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
 }
 
 struct Fonts {
-    mono: FontRef<'static>,
-    sans: FontRef<'static>,
+    mono:      FontRef<'static>,
+    sans:      FontRef<'static>,
     sans_bold: FontRef<'static>,
 }
 
 /// Draw one line of text; returns the advance width in px.
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) -> i32 {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) -> i32 {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -96,14 +92,7 @@ fn draw_text(
 
 /// Draw one hex byte slider mock; `highlight` marks the edited byte.
 fn draw_byte_row(
-    img: &mut RgbImage,
-    fonts: &Fonts,
-    x: u32,
-    y: u32,
-    index: usize,
-    byte: u8,
-    highlight: bool,
-    ink: Rgb<u8>,
+    img: &mut RgbImage, fonts: &Fonts, x: u32, y: u32, index: usize, byte: u8, highlight: bool, ink: Rgb<u8>,
 ) {
     draw_text(img, &fonts.sans, &format!("Byte {index}:"), x as i32, (y + 7) as i32, 14.0, ink);
     let fx = x + 90;
@@ -120,10 +109,7 @@ fn draw_byte_row(
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/l2-header-editing.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/l2-header-editing.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -131,8 +117,8 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or("smw.smc");
 
     let fonts = Fonts {
-        mono: load_font(MONO_CANDIDATES)?,
-        sans: load_font(SANS_CANDIDATES)?,
+        mono:      load_font(MONO_CANDIDATES)?,
+        sans:      load_font(SANS_CANDIDATES)?,
         sans_bold: load_font(SANS_BOLD_CANDIDATES)?,
     };
 
@@ -217,7 +203,9 @@ fn main() -> anyhow::Result<()> {
     draw_text(
         &mut img,
         &fonts.sans,
-        &format!("Edit round-trip verified on the real ROM: [ {van} ] \u{2192} [ {edt} ], object stream byte-identical."),
+        &format!(
+            "Edit round-trip verified on the real ROM: [ {van} ] \u{2192} [ {edt} ], object stream byte-identical."
+        ),
         24,
         cy as i32,
         14.0,

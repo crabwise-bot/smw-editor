@@ -36,29 +36,29 @@ use crate::{
 };
 
 pub struct UiMainWindow {
-    gl: Arc<glow::Context>,
-    dock_style: DockStyle,
-    dock_state: DockState<Box<dyn DockableEditorTool>>,
+    gl:                 Arc<glow::Context>,
+    dock_style:         DockStyle,
+    dock_state:         DockState<Box<dyn DockableEditorTool>>,
     /// Path of the currently-open ROM (for Save).
-    rom_path: Option<PathBuf>,
+    rom_path:           Option<PathBuf>,
     /// Set when a Save error needs to be shown.
-    save_error: Option<String>,
+    save_error:         Option<String>,
     /// In-egui file dialog for Open ROM.
-    open_dialog: FileDialog,
+    open_dialog:        FileDialog,
     /// In-egui file dialog for Save As.
-    save_as_dialog: FileDialog,
+    save_as_dialog:     FileDialog,
     /// In-egui file dialog for BPS patch export.
-    bps_export_dialog: FileDialog,
+    bps_export_dialog:  FileDialog,
     /// In-egui file dialog for IPS patch export.
-    ips_export_dialog: FileDialog,
+    ips_export_dialog:  FileDialog,
     /// Expand-ROM dialog (File > Expand ROM...).
     show_expand_dialog: bool,
     /// Selected expansion target size in bytes.
-    expand_target: usize,
+    expand_target:      usize,
     /// Status line shown in the Expand-ROM dialog.
-    expand_status: Option<String>,
+    expand_status:      Option<String>,
     /// Set when user tries to close the app with unsaved changes
-    show_exit_dialog: bool,
+    show_exit_dialog:   bool,
 }
 
 impl UiMainWindow {
@@ -137,11 +137,7 @@ impl eframe::App for UiMainWindow {
             let targets = expansion_targets(rom_len);
             Window::new("Expand ROM").open(&mut open).resizable(false).show(ctx, |ui| {
                 if let Some(r) = rom.as_ref() {
-                    ui.label(format!(
-                        "Current size: {} ({})",
-                        format_size(rom_len),
-                        r.internal_header.map_mode
-                    ));
+                    ui.label(format!("Current size: {} ({})", format_size(rom_len), r.internal_header.map_mode));
                 }
                 ui.separator();
                 if targets.is_empty() {
@@ -496,8 +492,7 @@ impl UiMainWindow {
                             // Default to the largest available target, like Lunar Magic.
                             if let Some(r) = rom {
                                 let current = r.rom.bytes().len();
-                                self.expand_target =
-                                    expansion_targets(current).into_iter().last().unwrap_or(0);
+                                self.expand_target = expansion_targets(current).into_iter().last().unwrap_or(0);
                             }
                             self.expand_status = None;
                             self.show_expand_dialog = true;
@@ -572,26 +567,20 @@ impl UiMainWindow {
     /// crash/full-disk mid-write can't corrupt the user's only copy.
     fn atomic_write_with_backup(dest_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         if dest_path.exists() {
-            let bak_path = dest_path.with_extension(format!(
-                "{}.bak",
-                dest_path.extension().and_then(|e| e.to_str()).unwrap_or("smc")
-            ));
+            let bak_path = dest_path
+                .with_extension(format!("{}.bak", dest_path.extension().and_then(|e| e.to_str()).unwrap_or("smc")));
             std::fs::copy(dest_path, &bak_path)
                 .with_context(|| format!("Failed to back up {} to {}", dest_path.display(), bak_path.display()))?;
         }
 
         let dest_dir = dest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let tmp_path = dest_dir.join(format!(
-            ".{}.tmp",
-            dest_path.file_name().and_then(|n| n.to_str()).unwrap_or("rom_save")
-        ));
+        let tmp_path =
+            dest_dir.join(format!(".{}.tmp", dest_path.file_name().and_then(|n| n.to_str()).unwrap_or("rom_save")));
         {
             let mut tmp_file = std::fs::File::create(&tmp_path)
                 .with_context(|| format!("Failed to create temp file {}", tmp_path.display()))?;
             use std::io::Write;
-            tmp_file
-                .write_all(bytes)
-                .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
+            tmp_file.write_all(bytes).with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
             tmp_file.sync_all().with_context(|| format!("Failed to flush temp file {}", tmp_path.display()))?;
         }
         std::fs::rename(&tmp_path, dest_path).with_context(|| {
@@ -621,8 +610,8 @@ impl UiMainWindow {
         };
         let target = self.expand_target;
         let result = (|| -> anyhow::Result<usize> {
-            let mut rom_bytes = std::fs::read(&path)
-                .with_context(|| format!("Failed to read ROM from {}", path.display()))?;
+            let mut rom_bytes =
+                std::fs::read(&path).with_context(|| format!("Failed to read ROM from {}", path.display()))?;
             let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
             for (_, tab) in self.dock_state.iter_all_tabs() {
                 tab.save_to_rom(&mut rom_bytes, has_smc_header)?;

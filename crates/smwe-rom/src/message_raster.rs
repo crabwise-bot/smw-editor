@@ -12,9 +12,11 @@
 
 use image::{Rgb, RgbImage};
 
-use crate::font_map::message_cells;
-use crate::graphics::gfx_file::{tile_format_of, GfxFile, TileFormat};
-use crate::snes_utils::rom::Rom;
+use crate::{
+    font_map::message_cells,
+    graphics::gfx_file::{tile_format_of, GfxFile, TileFormat},
+    snes_utils::rom::Rom,
+};
 
 /// GFX file number for "Message Box Letters" (SMWDisX bank_08-0B.asm).
 pub const MESSAGE_FONT_GFX_FILE: usize = 0x2A;
@@ -51,12 +53,7 @@ pub fn rasterize_message(cells: [[u8; 18]; 8], font: &[Box<[u8]>]) -> RgbImage {
     let mut img = RgbImage::new(W, H);
     // White-on-black (canonical message-box look). Color 0 (transparent)
     // becomes the black background.
-    let palette = [
-        Rgb([0, 0, 0]),
-        Rgb([255, 255, 255]),
-        Rgb([128, 128, 128]),
-        Rgb([192, 192, 192]),
-    ];
+    let palette = [Rgb([0, 0, 0]), Rgb([255, 255, 255]), Rgb([128, 128, 128]), Rgb([192, 192, 192])];
     for (row, cells_row) in cells.iter().enumerate() {
         for (col, &tile_idx) in cells_row.iter().enumerate() {
             let tile = &font[(tile_idx & 0x7F) as usize % font.len()];

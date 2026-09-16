@@ -20,8 +20,10 @@ use std::sync::Arc;
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
-use smwe_rom::graphics::gfx_file::{Tile, TileFormat};
-use smwe_rom::objects::map16::Tile8x8;
+use smwe_rom::{
+    graphics::gfx_file::{Tile, TileFormat},
+    objects::map16::Tile8x8,
+};
 
 const SANS_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
 const SANS_BOLD_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"];
@@ -36,15 +38,7 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
     anyhow::bail!("no font file found; tried {candidates:?}")
 }
 
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -54,11 +48,7 @@ fn draw_text(
         if let Some(p) = prev {
             caret_x += scaled.kern(p, id);
         }
-        let glyph = Glyph {
-            id,
-            scale: PxScale::from(px),
-            position: Point { x: caret_x, y: baseline },
-        };
+        let glyph = Glyph { id, scale: PxScale::from(px), position: Point { x: caret_x, y: baseline } };
         if let Some(o) = scaled.outline_glyph(glyph) {
             let bb = o.px_bounds();
             o.draw(|gx, gy, v| {
@@ -151,10 +141,7 @@ fn rect_outline(img: &mut RgbImage, x0: u32, y0: u32, w: u32, h: u32, t: u32, co
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/8x8-tile-editor.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/8x8-tile-editor.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -216,7 +203,8 @@ fn main() -> anyhow::Result<()> {
     let before = file.to_raw_bytes();
     let after = smwe_rom::graphics::gfx_file::GfxFile { tile_format: file.tile_format, tiles }.to_raw_bytes();
     assert_eq!(before.len(), after.len());
-    let diffs: Vec<usize> = before.iter().zip(after.iter()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+    let diffs: Vec<usize> =
+        before.iter().zip(after.iter()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
     assert!(!diffs.is_empty(), "paint must change bytes");
     let tile_size = match file.tile_format {
         TileFormat::Tile2bpp => 16,
@@ -224,19 +212,20 @@ fn main() -> anyhow::Result<()> {
         TileFormat::Tile4bpp => 32,
         TileFormat::Tile8bpp => 64,
     };
-    assert!(
-        diffs.iter().all(|&i| i / tile_size == sel),
-        "byte diff must be confined to tile {sel:#04X}"
-    );
-    let edited_tile = &smwe_rom::graphics::gfx_file::GfxFile { tile_format: file.tile_format, tiles: {
-        let mut t = file.tiles.clone();
-        let mut px = t[sel].color_indices.to_vec();
-        for &(x, y, c) in paint {
-            px[y * 8 + x] = c;
-        }
-        t[sel].color_indices = px.into_boxed_slice();
-        t
-    } }.tiles[sel];
+    assert!(diffs.iter().all(|&i| i / tile_size == sel), "byte diff must be confined to tile {sel:#04X}");
+    let edited_tile = &smwe_rom::graphics::gfx_file::GfxFile {
+        tile_format: file.tile_format,
+        tiles:       {
+            let mut t = file.tiles.clone();
+            let mut px = t[sel].color_indices.to_vec();
+            for &(x, y, c) in paint {
+                px[y * 8 + x] = c;
+            }
+            t[sel].color_indices = px.into_boxed_slice();
+            t
+        },
+    }
+    .tiles[sel];
 
     // Real handoff values: Map16 block 0x125's upper-left sub-tile.
     let blk125 = &blocks[0x25];
@@ -300,15 +289,7 @@ fn main() -> anyhow::Result<()> {
         blit_rgb(&mut img, &tile_rgb, GX + (i % 16) as u32 * 16, GY + (i / 16) as u32 * 16, GS);
     }
     // Selection highlight on the edited tile.
-    rect_outline(
-        &mut img,
-        GX + (sel % 16) as u32 * 16,
-        GY + (sel / 16) as u32 * 16,
-        16,
-        16,
-        2,
-        Rgb([255, 220, 60]),
-    );
+    rect_outline(&mut img, GX + (sel % 16) as u32 * 16, GY + (sel / 16) as u32 * 16, 16, 16, 2, Rgb([255, 220, 60]));
 
     // Right pane: pixel editor for the edited tile.
     const PX0: u32 = 340;
@@ -348,15 +329,7 @@ fn main() -> anyhow::Result<()> {
     }
     // Highlight the 5 painted pixels.
     for &(x, y, _) in paint {
-        rect_outline(
-            &mut img,
-            PX0 + x as u32 * CELL,
-            ey + y as u32 * CELL,
-            CELL,
-            CELL,
-            2,
-            Rgb([255, 80, 80]),
-        );
+        rect_outline(&mut img, PX0 + x as u32 * CELL, ey + y as u32 * CELL, CELL, CELL, 2, Rgb([255, 80, 80]));
     }
 
     // Palette swatches.

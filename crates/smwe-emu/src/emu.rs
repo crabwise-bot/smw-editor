@@ -8,28 +8,28 @@ use crate::rom::Rom;
 
 #[derive(Debug, Clone)]
 pub struct CheckedMem {
-    pub cart: Arc<Rom>,
-    pub wram: Vec<u8>,
-    pub regs: Vec<u8>,
-    pub vram: Vec<u8>,
-    pub cgram: Vec<u8>,
-    pub extram: Vec<u8>,
-    pub error: Option<u32>,
-    pub err_value: Option<u8>,
+    pub cart:       Arc<Rom>,
+    pub wram:       Vec<u8>,
+    pub regs:       Vec<u8>,
+    pub vram:       Vec<u8>,
+    pub cgram:      Vec<u8>,
+    pub extram:     Vec<u8>,
+    pub error:      Option<u32>,
+    pub err_value:  Option<u8>,
     pub last_store: Option<u32>,
 }
 
 impl CheckedMem {
     pub fn new(rom: Arc<Rom>) -> Self {
         Self {
-            cart: rom,
-            wram: Vec::from([0; 0x20000]),
-            regs: Vec::from([0; 0x6000]),
-            vram: Vec::from([0; 0x10000]),
-            cgram: Vec::from([0; 0x200]),
-            extram: Vec::from([0; 0x10000]),
-            error: None,
-            err_value: None,
+            cart:       rom,
+            wram:       Vec::from([0; 0x20000]),
+            regs:       Vec::from([0; 0x6000]),
+            vram:       Vec::from([0; 0x10000]),
+            cgram:      Vec::from([0; 0x200]),
+            extram:     Vec::from([0; 0x10000]),
+            error:      None,
+            err_value:  None,
             last_store: None,
         }
     }
@@ -37,6 +37,7 @@ impl CheckedMem {
     pub fn load_u8(&mut self, addr: u32) -> u8 {
         self.load(addr)
     }
+
     pub fn store_u8(&mut self, addr: u32, value: u8) {
         self.store(addr, value)
     }
@@ -167,6 +168,7 @@ impl Mem for CheckedMem {
     fn load(&mut self, addr: u32) -> u8 {
         self.map(addr, None)
     }
+
     fn store(&mut self, addr: u32, value: u8) {
         self.map(addr, Some(value));
         self.last_store = Some(addr);
@@ -282,7 +284,7 @@ pub fn lm_ext_map16_data_addr(cpu: &mut Cpu<CheckedMem>, block_id: u16) -> Optio
         0xC2, 0x30, // REP #$30
         0xA9, id2[0], id2[1], // LDA #block_id*2
         0x22, target[0], target[1], target[2], // JSL LM resolver
-        0xEA, // NOP (end marker)
+        0xEA,      // NOP (end marker)
     ];
     if !run_trampoline(cpu, &code) {
         return None;
@@ -334,7 +336,7 @@ pub fn lm_bg_map16_base(cpu: &mut Cpu<CheckedMem>) -> Option<u32> {
         0xC2, 0x30, // REP #$30
         0xA9, 0x00, 0x91, // LDA #$9100
         0x22, target[0], target[1], target[2], // JSL LM BG resolver
-        0xEA, // NOP (end marker)
+        0xEA,      // NOP (end marker)
     ];
     if !run_trampoline(cpu, &code) {
         return None;
@@ -494,10 +496,10 @@ pub fn exec_sprites(cpu: &mut Cpu<CheckedMem>) -> u64 {
 /// spawn anchor (x = 0xD0, y = 0x80 as set by exec_sprite_id).
 #[derive(Debug, Clone)]
 pub struct SpriteOamTile {
-    pub dx: i32,
-    pub dy: i32,
+    pub dx:        i32,
+    pub dy:        i32,
     pub tile_word: u16,
-    pub is_16x16: bool,
+    pub is_16x16:  bool,
 }
 
 /// Run exec_sprite_id for the given ID, then tick extra frames so that sprites
@@ -548,10 +550,10 @@ fn collect_sprite_oam_tiles(cpu: &mut Cpu<CheckedMem>, anchor_x: i32, anchor_y: 
         }
 
         tiles.push(SpriteOamTile {
-            dx: raw_x - anchor_x,
-            dy: raw_y - anchor_y,
+            dx:        raw_x - anchor_x,
+            dy:        raw_y - anchor_y,
             tile_word: tile,
-            is_16x16: (size & 0x02) != 0,
+            is_16x16:  (size & 0x02) != 0,
         });
     }
     tiles
@@ -585,10 +587,10 @@ fn clear_sprite_oam(cpu: &mut Cpu<CheckedMem>) {
 /// (scroll-relative: sprite at screen pos x=0xD0 when camera is at x=0).
 #[derive(Debug, Clone)]
 pub struct RawOamEntry {
-    pub x: u8,
-    pub y: u8,
+    pub x:         u8,
+    pub y:         u8,
     pub tile_word: u16, // [attr_byte][tile_byte] little-endian u16
-    pub is_16x16: bool,
+    pub is_16x16:  bool,
 }
 
 /// Read all non-offscreen OAM entries after sprite execution.
@@ -724,7 +726,7 @@ pub struct StripeCommand {
     pub flags_len: u16,
     /// Tile words, each little-endian `$39TT` (tile index `$100 | TT`,
     /// palette 6, priority 1).
-    pub tiles: Vec<u16>,
+    pub tiles:     Vec<u16>,
 }
 
 /// Parse the raw stripe bytes from [`render_message`] into commands.
@@ -756,10 +758,8 @@ pub fn parse_stripe_commands(stripe: &[u8]) -> Result<Vec<StripeCommand>, String
         if payload_end > stripe.len() {
             return Err(format!("truncated stripe payload at offset {i:#06X}"));
         }
-        let tiles = stripe[payload_start..payload_end]
-            .chunks_exact(2)
-            .map(|w| u16::from_le_bytes([w[0], w[1]]))
-            .collect();
+        let tiles =
+            stripe[payload_start..payload_end].chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
         cmds.push(StripeCommand { vram_dest, flags_len, tiles });
         i = payload_end;
     }
@@ -825,10 +825,7 @@ pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe 
     cpu.mem.store_u16(DYN_STRIPE_IMG_SIZE, 0);
 
     cpu.mem.store(0x2000, 0x22); // JSL
-    cpu.mem.store_u24(
-        0x2001,
-        cpu.mem.cart.resolve("CODE_05B1BC").unwrap_or_else(|| panic!("no symbol: CODE_05B1BC")),
-    );
+    cpu.mem.store_u24(0x2001, cpu.mem.cart.resolve("CODE_05B1BC").unwrap_or_else(|| panic!("no symbol: CODE_05B1BC")));
     let end = 0x2004u16;
 
     let mut cy = 0u64;
@@ -845,8 +842,7 @@ pub fn render_message(cpu: &mut Cpu<CheckedMem>, msg_type: u8) -> MessageStripe 
     }
 
     let len = cpu.mem.load_u16(DYN_STRIPE_IMG_SIZE) as usize;
-    let stripe =
-        (0..len).map(|i| cpu.mem.load_u8(DYNAMIC_STRIPE_IMAGE + i as u32)).collect::<Vec<_>>();
+    let stripe = (0..len).map(|i| cpu.mem.load_u8(DYNAMIC_STRIPE_IMAGE + i as u32)).collect::<Vec<_>>();
     MessageStripe { stripe, cycles: cy }
 }
 
@@ -1004,12 +1000,7 @@ mod lm_map16_tests {
     }
 
     fn words(cpu: &mut Cpu<CheckedMem>, base: u32) -> [u16; 4] {
-        [
-            cpu.mem.load_u16(base),
-            cpu.mem.load_u16(base + 2),
-            cpu.mem.load_u16(base + 4),
-            cpu.mem.load_u16(base + 6),
-        ]
+        [cpu.mem.load_u16(base), cpu.mem.load_u16(base + 2), cpu.mem.load_u16(base + 4), cpu.mem.load_u16(base + 6)]
     }
 
     /// Vanilla SMW has no Lunar Magic resolvers, so both helpers must return None
@@ -1024,11 +1015,7 @@ mod lm_map16_tests {
         decompress_sublevel(&mut cpu, 0x105);
         let mut scratch = cpu.clone();
         assert_eq!(lm_bg_map16_base(&mut scratch), None, "vanilla must have no BG-map16 hijack");
-        assert_eq!(
-            lm_ext_map16_data_addr(&mut scratch, 0x300),
-            None,
-            "vanilla must have no extended-Map16 resolver"
-        );
+        assert_eq!(lm_ext_map16_data_addr(&mut scratch, 0x300), None, "vanilla must have no extended-Map16 resolver");
     }
 
     /// On a Lunar Magic ROM, the relocated BG Map16 table must reproduce the
@@ -1096,11 +1083,7 @@ mod lm_map16_tests {
         assert!(cpu.mem.wram == wram, "WRAM disturbed");
         assert!(cpu.mem.vram == vram, "VRAM disturbed");
         assert!(cpu.mem.cgram == cgram, "CGRAM disturbed");
-        assert_eq!(
-            (cpu.a, cpu.x, cpu.y, cpu.s, cpu.d, cpu.pbr, cpu.dbr, cpu.pc),
-            regs,
-            "registers disturbed"
-        );
+        assert_eq!((cpu.a, cpu.x, cpu.y, cpu.s, cpu.d, cpu.pbr, cpu.dbr, cpu.pc), regs, "registers disturbed");
     }
 
     /// Overworld animated tiles: init fills the buffer from GFX14, tick rotates

@@ -1,10 +1,8 @@
 use std::{env, path::Path, sync::Arc};
 
 use image::{ImageBuffer, Rgb};
-
-use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
-
 use smw_editor::render_util::{read_color, render_layer, render_sp_tile};
+use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
 fn main() {
     let args: Vec<String> = env::args().collect();
     let level = args

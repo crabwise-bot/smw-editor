@@ -19,8 +19,10 @@
 
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
-use smwe_rom::overworld::{event_ownership as eo, level_names, OverworldEvents};
-use smwe_rom::snes_utils::rom::Rom;
+use smwe_rom::{
+    overworld::{event_ownership as eo, level_names, OverworldEvents},
+    snes_utils::rom::Rom,
+};
 
 const MONO_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"];
 const SANS_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
@@ -37,21 +39,13 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
 }
 
 struct Fonts {
-    mono: FontRef<'static>,
-    sans: FontRef<'static>,
+    mono:      FontRef<'static>,
+    sans:      FontRef<'static>,
     sans_bold: FontRef<'static>,
 }
 
 /// Draw one line of text; returns the advance width in px.
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) -> i32 {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) -> i32 {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -122,10 +116,7 @@ fn event_label(events: &OverworldEvents, event: Option<u8>) -> String {
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/event-ownership.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/event-ownership.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -133,8 +124,8 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or("smw.smc");
 
     let fonts = Fonts {
-        mono: load_font(MONO_CANDIDATES)?,
-        sans: load_font(SANS_CANDIDATES)?,
+        mono:      load_font(MONO_CANDIDATES)?,
+        sans:      load_font(SANS_CANDIDATES)?,
         sans_bold: load_font(SANS_BOLD_CANDIDATES)?,
     };
 

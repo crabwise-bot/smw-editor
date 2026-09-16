@@ -138,8 +138,7 @@ impl Level {
             let header_bytes = rom.slice_lorom(header_slice).map_err(LevelParseError::Layer2Read)?;
             let mut header = [0u8; LAYER2_HEADER_SIZE];
             header.copy_from_slice(header_bytes);
-            let bytes =
-                rom.slice_from(l2_ptr + LAYER2_HEADER_SIZE as u32).map_err(LevelParseError::Layer2Read)?;
+            let bytes = rom.slice_from(l2_ptr + LAYER2_HEADER_SIZE as u32).map_err(LevelParseError::Layer2Read)?;
             let (objects, _) = parse_bytes(bytes, ObjectLayer::parse).map_err(LevelParseError::Layer2Read)?;
             Ok(Layer2Data::Objects { header, objects })
         }

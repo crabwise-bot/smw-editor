@@ -60,9 +60,9 @@ pub struct TitleStripeCommand {
     /// VRAM word destination.
     pub vram_dest: u16,
     /// True = vertical (32-word stride), false = horizontal (1-word stride).
-    pub vertical: bool,
+    pub vertical:  bool,
     /// Payload tile words, little-endian in the stripe.
-    pub tiles: Vec<u16>,
+    pub tiles:     Vec<u16>,
 }
 
 /// Parse raw stripe-image bytes into commands.
@@ -93,10 +93,7 @@ pub fn parse_title_stripe(bytes: &[u8]) -> anyhow::Result<Vec<TitleStripeCommand
         if payload_end > bytes.len() {
             anyhow::bail!("truncated title stripe payload at offset {i:#X}");
         }
-        let tiles = bytes[i + 4..payload_end]
-            .chunks_exact(2)
-            .map(|w| u16::from_le_bytes([w[0], w[1]]))
-            .collect();
+        let tiles = bytes[i + 4..payload_end].chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
         commands.push(TitleStripeCommand { vram_dest, vertical: flags & 0x80 != 0, tiles });
         i = payload_end;
     }
@@ -189,8 +186,8 @@ impl TitleTileGrid {
                 }
                 commands.push(TitleStripeCommand {
                     vram_dest: TITLE_TILEMAP_VRAM_BASE + (y * TITLE_TILEMAP_WIDTH + x0) as u16,
-                    vertical: false,
-                    tiles: row[x0..x].to_vec(),
+                    vertical:  false,
+                    tiles:     row[x0..x].to_vec(),
                 });
             }
         }
@@ -316,19 +313,14 @@ mod tests {
 #[cfg(test)]
 mod real_rom_tests {
     use super::*;
-    use crate::title_credits::TITLE_SCREEN_STRIPE_SNES;
-    use crate::{snes_utils::addr::AddrPc, SmwRom};
+    use crate::{snes_utils::addr::AddrPc, title_credits::TITLE_SCREEN_STRIPE_SNES, SmwRom};
 
     fn real_stripe_bytes(rom_path: &str) -> Vec<u8> {
         let raw = std::fs::read(rom_path).expect("read ROM");
         let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
         let start = AddrPc::try_from_lorom(TITLE_SCREEN_STRIPE_SNES).unwrap().as_index();
         let slot = &rom_bytes[start..start + TITLE_SCREEN_STRIPE_MAX_SIZE];
-        let end = slot
-            .iter()
-            .position(|&b| b == 0xFF)
-            .map(|p| p + 1)
-            .unwrap_or(slot.len());
+        let end = slot.iter().position(|&b| b == 0xFF).map(|p| p + 1).unwrap_or(slot.len());
         slot[..end].to_vec()
     }
 
@@ -368,10 +360,7 @@ mod real_rom_tests {
 
         // Normalized re-encode is DMA-equivalent and fits the budget.
         let reencoded = grid.to_stripe_bytes().expect("re-encode fits budget");
-        println!(
-            "normalized re-encode: {} bytes / {TITLE_SCREEN_STRIPE_MAX_SIZE} budget",
-            reencoded.len()
-        );
+        println!("normalized re-encode: {} bytes / {TITLE_SCREEN_STRIPE_MAX_SIZE} budget", reencoded.len());
         let grid2 = TitleTileGrid::from_stripe(&reencoded).unwrap();
         assert_eq!(grid.cells, grid2.cells);
     }
@@ -386,16 +375,10 @@ mod real_rom_tests {
     fn real_rom_title_stripe_via_smwrom() {
         let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH");
         let rom = SmwRom::from_file(&rom_path).expect("parse ROM");
-        let grid = TitleTileGrid::from_stripe(&rom.title_credits.title_screen_stripe)
-            .expect("parse title stripe via SmwRom");
-        let nonzero = grid
-            .cells
-            .iter()
-            .flatten()
-            .filter(|&&w| w != TITLE_TILEMAP_BLANK)
-            .count();
+        let grid =
+            TitleTileGrid::from_stripe(&rom.title_credits.title_screen_stripe).expect("parse title stripe via SmwRom");
+        let nonzero = grid.cells.iter().flatten().filter(|&&w| w != TITLE_TILEMAP_BLANK).count();
         println!("non-blank cells: {nonzero}");
         assert!(nonzero > 300, "expected a densely-drawn logo, found {nonzero} cells");
     }
 }
-

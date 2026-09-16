@@ -29,15 +29,7 @@ fn load_font(candidates: &[&str]) -> anyhow::Result<FontRef<'static>> {
     anyhow::bail!("no font file found; tried {candidates:?}")
 }
 
-fn draw_text(
-    img: &mut RgbImage,
-    font: &FontRef,
-    text: &str,
-    x: i32,
-    y: i32,
-    px: f32,
-    color: Rgb<u8>,
-) {
+fn draw_text(img: &mut RgbImage, font: &FontRef, text: &str, x: i32, y: i32, px: f32, color: Rgb<u8>) {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut caret_x = x as f32;
     let baseline = y as f32 + scaled.ascent();
@@ -47,11 +39,7 @@ fn draw_text(
         if let Some(p) = prev {
             caret_x += scaled.kern(p, id);
         }
-        let glyph = Glyph {
-            id,
-            scale: PxScale::from(px),
-            position: Point { x: caret_x, y: baseline },
-        };
+        let glyph = Glyph { id, scale: PxScale::from(px), position: Point { x: caret_x, y: baseline } };
         if let Some(o) = scaled.outline_glyph(glyph) {
             let bb = o.px_bounds();
             o.draw(|gx, gy, v| {
@@ -85,10 +73,7 @@ fn draw_text(
 use smw_editor::render_util::{fill_rect, rect_border};
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let output = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--out="))
-        .unwrap_or("docs/screenshots/mwl-import-export.png");
+    let output = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("docs/screenshots/mwl-import-export.png");
     let rom_path = args
         .iter()
         .find_map(|a| a.strip_prefix("--rom="))
@@ -103,12 +88,8 @@ fn main() -> anyhow::Result<()> {
     let level_num = 0x105u32;
     let mwl = mwl::export_level(&rom, level_num)?;
     let encoded = mwl.encode()?;
-    let status = format!(
-        "Exported level {:03X} \u{2192} level-{:03X}.mwl ({} bytes)",
-        level_num,
-        level_num,
-        encoded.len()
-    );
+    let status =
+        format!("Exported level {:03X} \u{2192} level-{:03X}.mwl ({} bytes)", level_num, level_num, encoded.len());
 
     let section_names = [
         "Level info",
@@ -155,14 +136,7 @@ fn main() -> anyhow::Result<()> {
     let mut bx = lx;
     for (i, (glyph, tip)) in labels.iter().zip(tips.iter()).enumerate() {
         let highlight = i >= 2;
-        fill_rect(
-            &mut img,
-            bx,
-            y,
-            44,
-            34,
-            if highlight { Rgb([0xD6, 0xE8, 0xFA]) } else { Rgb([0xFF, 0xFF, 0xFF]) },
-        );
+        fill_rect(&mut img, bx, y, 44, 34, if highlight { Rgb([0xD6, 0xE8, 0xFA]) } else { Rgb([0xFF, 0xFF, 0xFF]) });
         rect_border(&mut img, bx, y, 44, 34, Rgb([0x99, 0x99, 0x99]));
         draw_text(&mut img, &sans, glyph, (bx + 14) as i32, (y + 7) as i32, 17.0, ink);
         draw_text(&mut img, &sans, tip, (bx + 4) as i32, (y + 40) as i32, 11.0, gray);

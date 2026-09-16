@@ -140,12 +140,9 @@ pub fn parse_page(data: &[u8]) -> Result<[Block; MAP16_PAGE_TILES], Map16FileErr
 // -------------------------------------------------------------------------------------------------
 
 // Tileset-specific base addresses, mirroring `objects::tilesets::data`.
-const TILES_073_0FF_BASES: [u32; TILESETS_COUNT] =
-    [0x0D8B70, 0x0DBC00, 0x0DC800, 0x0DD400, 0x0DE300];
-const TILES_100_106_BASES: [u32; TILESETS_COUNT] =
-    [0x0D8398, 0x0DC068, 0x0DCC68, 0x0DD868, 0x0DE768];
-const TILES_153_16D_BASES: [u32; TILESETS_COUNT] =
-    [0x0D9028, 0x0DC0B8, 0x0DCCB8, 0x0DD8B8, 0x0DE7B8];
+const TILES_073_0FF_BASES: [u32; TILESETS_COUNT] = [0x0D8B70, 0x0DBC00, 0x0DC800, 0x0DD400, 0x0DE300];
+const TILES_100_106_BASES: [u32; TILESETS_COUNT] = [0x0D8398, 0x0DC068, 0x0DCC68, 0x0DD868, 0x0DE768];
+const TILES_153_16D_BASES: [u32; TILESETS_COUNT] = [0x0D9028, 0x0DC0B8, 0x0DCCB8, 0x0DD8B8, 0x0DE7B8];
 
 /// SNES address of a foreground Map16 tile's 8 definition bytes.
 ///
@@ -182,35 +179,25 @@ pub fn fg_tile_snes(tile_num: u16, tileset: usize) -> Result<u32, Map16FileError
 ///
 /// `map16_tileset` (0-4) selects the tileset variant for foreground pages
 /// and is ignored for background pages.
-pub fn export_page(
-    rom: &SmwRom,
-    page: u8,
-    map16_tileset: usize,
-) -> Result<Vec<u8>, Map16FileError> {
+pub fn export_page(rom: &SmwRom, page: u8, map16_tileset: usize) -> Result<Vec<u8>, Map16FileError> {
     if page_is_foreground(page) {
         if map16_tileset >= TILESETS_COUNT {
             return Err(Map16FileError::BadTileset(map16_tileset));
         }
         let base_tile = if page == PAGE_FG0 { 0x000 } else { 0x100 };
-        let mut blocks = [Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0)));
-            MAP16_PAGE_TILES];
+        let mut blocks = [Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0))); MAP16_PAGE_TILES];
         for (i, b) in blocks.iter_mut().enumerate() {
             let tile_num = base_tile + i;
-            *b = rom
-                .map16_tilesets
-                .get_map16_tile(tile_num, map16_tileset)
-                .unwrap_or_else(|| {
-                    log::warn!("No Map16 tile {tile_num:#05X} for tileset {map16_tileset}; exporting blank");
-                    Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0)))
-                });
+            *b = rom.map16_tilesets.get_map16_tile(tile_num, map16_tileset).unwrap_or_else(|| {
+                log::warn!("No Map16 tile {tile_num:#05X} for tileset {map16_tileset}; exporting blank");
+                Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0)))
+            });
         }
         Ok(serialize_page(&blocks).to_vec())
     } else if matches!(page, PAGE_BG0 | PAGE_BG1) {
         let half = (page - PAGE_BG0) as u32;
         let snes = BG_MAP16_TABLE_SNES + half * MAP16_PAGE_BYTES as u32;
-        let bytes = rom
-            .rom
-            .slice_lorom(SnesSlice::new(AddrSnes(snes), MAP16_PAGE_BYTES))?;
+        let bytes = rom.rom.slice_lorom(SnesSlice::new(AddrSnes(snes), MAP16_PAGE_BYTES))?;
         Ok(bytes.to_vec())
     } else {
         Err(Map16FileError::BadPage(page))
@@ -246,11 +233,7 @@ fn write_snes(rom_bytes: &mut [u8], addr: u32, data: &[u8], header_offset: usize
 /// `rom_bytes` is the raw ROM image; `header_offset` is `0x200` for
 /// SMC-headered ROMs, `0` otherwise.
 pub fn import_page(
-    rom_bytes: &mut [u8],
-    page: u8,
-    map16_tileset: usize,
-    data: &[u8],
-    header_offset: usize,
+    rom_bytes: &mut [u8], page: u8, map16_tileset: usize, data: &[u8], header_offset: usize,
 ) -> Result<(), Map16FileError> {
     if data.len() != MAP16_PAGE_BYTES {
         return Err(Map16FileError::BadPageSize(data.len()));
@@ -285,8 +268,7 @@ mod tests {
 
     #[test]
     fn page_serialize_round_trip() {
-        let mut blocks = [Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0)));
-            MAP16_PAGE_TILES];
+        let mut blocks = [Block::from_tuple((Tile8x8(0), Tile8x8(0), Tile8x8(0), Tile8x8(0))); MAP16_PAGE_TILES];
         for (i, b) in blocks.iter_mut().enumerate() {
             let w = |k: u16| Tile8x8((i as u16).wrapping_mul(0x1234).wrapping_add(k * 0x1111));
             *b = Block::from_tuple((w(0), w(1), w(2), w(3)));

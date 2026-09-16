@@ -21,8 +21,7 @@ fn arg(name: &str, default: &str) -> String {
 use smw_editor::render_util::{fill_rect_raw, hline, render_layer, stroke_rect};
 fn main() -> anyhow::Result<()> {
     let rom_path = arg("--rom", "smw.smc");
-    let level_num: u32 =
-        u32::from_str_radix(arg("--level", "0x105").trim_start_matches("0x"), 16).unwrap_or(0x105);
+    let level_num: u32 = u32::from_str_radix(arg("--level", "0x105").trim_start_matches("0x"), 16).unwrap_or(0x105);
     let out_path = arg("--out", "docs/screenshots/drag-handles.png");
     let frames: usize = arg("--frames", "8").parse().unwrap_or(8);
 
@@ -143,8 +142,10 @@ fn main() -> anyhow::Result<()> {
     if out_path.ends_with(".gif") {
         // Animate an SE-handle resize drag: the object grows from (ow,oh)
         // to (ow+4, oh+3) tile by tile, cursor on the SE handle.
-        use image::codecs::gif::{GifEncoder, Repeat};
-        use image::Delay;
+        use image::{
+            codecs::gif::{GifEncoder, Repeat},
+            Delay,
+        };
         let file = std::fs::File::create(&out_path)?;
         let mut enc = GifEncoder::new(file);
         enc.set_repeat(Repeat::Infinite)?;

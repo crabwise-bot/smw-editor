@@ -105,9 +105,9 @@ impl UiLevelEditor {
         let new_idx = self.sprites.read(|sprites| sprites.sprites.len());
         self.sprites.write(|sprites| {
             sprites.sprites.push(super::sprite_layer::EditableSprite {
-                x: anchor_x,
-                y: anchor_y,
-                sprite_id: self.draw_sprite_id,
+                x:          anchor_x,
+                y:          anchor_y,
+                sprite_id:  self.draw_sprite_id,
                 extra_bits: self.draw_sprite_extra_bits,
             });
         });
@@ -215,10 +215,10 @@ impl UiLevelEditor {
         let h = if self.draw_object_settings >> 4 == 0 { 1_u32 } else { ((self.draw_object_settings >> 4) + 1) as u32 };
 
         let new_obj = EditableObject {
-            x: tx,
-            y: ty,
-            id: self.draw_object_id,
-            settings: self.draw_object_settings,
+            x:           tx,
+            y:           ty,
+            id:          self.draw_object_id,
+            settings:    self.draw_object_settings,
             is_extended: false,
             extended_id: 0,
         };
@@ -365,23 +365,23 @@ pub(super) enum DragHandle {
 /// In-progress object drag. `handle == None` means a body move.
 #[derive(Clone, Debug)]
 pub(super) struct ObjectDrag {
-    pub index: usize,
+    pub index:       usize,
     /// Object id at grab time; the commit is skipped if the object at
     /// `index` no longer matches (deleted/undone mid-drag).
-    pub check_id: u8,
-    pub handle: Option<DragHandle>,
+    pub check_id:    u8,
+    pub handle:      Option<DragHandle>,
     pub is_extended: bool,
-    pub orig_x: u32,
-    pub orig_y: u32,
-    pub orig_w: u32,
-    pub orig_h: u32,
+    pub orig_x:      u32,
+    pub orig_y:      u32,
+    pub orig_w:      u32,
+    pub orig_h:      u32,
     /// Press-tile minus origin, so the object doesn't jump on grab (move only).
-    pub grab_dx: i32,
-    pub grab_dy: i32,
-    pub cur_x: u32,
-    pub cur_y: u32,
-    pub cur_w: u32,
-    pub cur_h: u32,
+    pub grab_dx:     i32,
+    pub grab_dy:     i32,
+    pub cur_x:       u32,
+    pub cur_y:       u32,
+    pub cur_w:       u32,
+    pub cur_h:       u32,
 }
 
 /// Object footprint in tiles from the settings byte (1x1 for extended).
@@ -403,13 +403,7 @@ pub(super) fn settings_for_dims(w: u32, h: u32) -> u8 {
 /// opposite edge stays fixed. Returns the new (x, y, w, h), clamped to
 /// 1..=16 tiles per axis.
 pub(super) fn apply_resize(
-    ox: u32,
-    oy: u32,
-    ow: u32,
-    oh: u32,
-    handle: DragHandle,
-    tile_x: i32,
-    tile_y: i32,
+    ox: u32, oy: u32, ow: u32, oh: u32, handle: DragHandle, tile_x: i32, tile_y: i32,
 ) -> (u32, u32, u32, u32) {
     use DragHandle::*;
     let (mut nx, mut ny, mut nw, mut nh) = (ox, oy, ow, oh);
@@ -466,10 +460,7 @@ pub(super) fn drag_handle_rects(rect: egui::Rect, handle_px: f32) -> [(DragHandl
 
 /// Hit-test the handles with a slightly generous grab area.
 pub(super) fn handle_at(rect: egui::Rect, handle_px: f32, pos: egui::Pos2) -> Option<DragHandle> {
-    drag_handle_rects(rect, handle_px + 4.0)
-        .into_iter()
-        .find(|(_, r)| r.contains(pos))
-        .map(|(h, _)| h)
+    drag_handle_rects(rect, handle_px + 4.0).into_iter().find(|(_, r)| r.contains(pos)).map(|(h, _)| h)
 }
 
 impl UiLevelEditor {
@@ -478,12 +469,7 @@ impl UiLevelEditor {
     /// Sets `suppress_click_select` for one frame when a drag ends with a
     /// change, so the release click doesn't re-trigger selection.
     pub(super) fn update_object_drag(
-        &mut self,
-        resp: &egui::Response,
-        origin: Pos2,
-        tile_sz: f32,
-        level_w: u32,
-        level_h: u32,
+        &mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32, level_w: u32, level_h: u32,
     ) {
         self.suppress_click_select = false;
         let primary = egui::PointerButton::Primary;
@@ -491,8 +477,7 @@ impl UiLevelEditor {
         // ── Finish an in-progress drag ──
         if self.object_drag.is_some() && resp.drag_stopped_by(primary) {
             let d = self.object_drag.take().expect("checked above");
-            let changed =
-                d.cur_x != d.orig_x || d.cur_y != d.orig_y || d.cur_w != d.orig_w || d.cur_h != d.orig_h;
+            let changed = d.cur_x != d.orig_x || d.cur_y != d.orig_y || d.cur_w != d.orig_w || d.cur_h != d.orig_h;
             if changed {
                 self.commit_object_drag(&d);
                 self.suppress_click_select = true;
@@ -513,8 +498,7 @@ impl UiLevelEditor {
                             d.cur_y = (ty - d.grab_dy).max(0).min(level_h.saturating_sub(d.cur_h).max(0) as i32) as u32;
                         }
                         Some(handle) => {
-                            let (nx, ny, nw, nh) =
-                                apply_resize(d.orig_x, d.orig_y, d.orig_w, d.orig_h, handle, tx, ty);
+                            let (nx, ny, nw, nh) = apply_resize(d.orig_x, d.orig_y, d.orig_w, d.orig_h, handle, tx, ty);
                             // Keep a resize inside the level.
                             d.cur_x = nx.min(level_w.saturating_sub(nw));
                             d.cur_y = ny.min(level_h.saturating_sub(nh));
@@ -611,22 +595,19 @@ impl UiLevelEditor {
         }
         // Single undoable write: the object data itself. Skip it if the
         // object at this index changed identity mid-drag (deleted/undone).
-        let committed = self
-            .editing_objects_mut()
-            .expect("editable object layer missing")
-            .write(|layer| {
-                let ok = layer.objects.get(d.index).is_some_and(|obj| obj.id == d.check_id);
-                if ok {
-                    if let Some(obj) = layer.objects.get_mut(d.index) {
-                        obj.x = d.cur_x;
-                        obj.y = d.cur_y;
-                        if !d.is_extended {
-                            obj.settings = settings_for_dims(d.cur_w, d.cur_h);
-                        }
+        let committed = self.editing_objects_mut().expect("editable object layer missing").write(|layer| {
+            let ok = layer.objects.get(d.index).is_some_and(|obj| obj.id == d.check_id);
+            if ok {
+                if let Some(obj) = layer.objects.get_mut(d.index) {
+                    obj.x = d.cur_x;
+                    obj.y = d.cur_y;
+                    if !d.is_extended {
+                        obj.settings = settings_for_dims(d.cur_w, d.cur_h);
                     }
                 }
-                ok
-            });
+            }
+            ok
+        });
         self.mark_edited();
         if !committed {
             // Nothing to move; leave the rendered tiles alone.

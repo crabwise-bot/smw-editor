@@ -159,11 +159,7 @@ pub const GRAPHIC_PLACEHOLDER: char = '�';
 pub fn decode_editable_text(map: &FontMap, bytes: &[u8]) -> String {
     message_cells(bytes)
         .iter()
-        .map(|row| {
-            row.iter()
-                .map(|&b| map.char_for(b).unwrap_or(GRAPHIC_PLACEHOLDER))
-                .collect::<String>()
-        })
+        .map(|row| row.iter().map(|&b| map.char_for(b).unwrap_or(GRAPHIC_PLACEHOLDER)).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -191,21 +187,14 @@ pub fn encode_editable_text(map: &FontMap, original: &[u8], text: &str) -> anyho
     let old_cells = message_cells(original);
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > 8 {
-        anyhow::bail!(
-            "message text has {} lines; the game draws exactly 8 rows",
-            lines.len()
-        );
+        anyhow::bail!("message text has {} lines; the game draws exactly 8 rows", lines.len());
     }
     let mut out = Vec::new();
     for r in 0..8 {
         let line = lines.get(r).copied().unwrap_or("");
         let chars: Vec<char> = line.chars().collect();
         if chars.len() > 18 {
-            anyhow::bail!(
-                "line {} has {} characters; the game draws 18 cells per row",
-                r + 1,
-                chars.len()
-            );
+            anyhow::bail!("line {} has {} characters; the game draws 18 cells per row", r + 1, chars.len());
         }
         match chars.iter().rposition(|&c| c != ' ') {
             None => {
@@ -231,11 +220,9 @@ pub fn encode_editable_text(map: &FontMap, original: &[u8], text: &str) -> anyho
                                 );
                             }
                         }
-                        None => anyhow::bail!(
-                            "line {} col {}: character {c:?} has no message-font glyph",
-                            r + 1,
-                            c_idx + 1
-                        ),
+                        None => {
+                            anyhow::bail!("line {} col {}: character {c:?} has no message-font glyph", r + 1, c_idx + 1)
+                        }
                     };
                     out.push(byte);
                 }
@@ -253,19 +240,10 @@ pub fn encode_editable_text(map: &FontMap, original: &[u8], text: &str) -> anyho
 /// encoded bytes must fit within `budget` (the message's vanilla length —
 /// the combined 22-message blob isn't repointable, so no single message may
 /// grow past what it originally occupied).
-pub fn encode_message_checked(
-    map: &FontMap,
-    original: &[u8],
-    budget: usize,
-    text: &str,
-) -> anyhow::Result<Vec<u8>> {
+pub fn encode_message_checked(map: &FontMap, original: &[u8], budget: usize, text: &str) -> anyhow::Result<Vec<u8>> {
     let bytes = encode_editable_text(map, original, text)?;
     if bytes.len() > budget {
-        anyhow::bail!(
-            "encoded text is {} bytes, over this message's {}-byte budget",
-            bytes.len(),
-            budget
-        );
+        anyhow::bail!("encoded text is {} bytes, over this message's {}-byte budget", bytes.len(), budget);
     }
     Ok(bytes)
 }
@@ -297,23 +275,19 @@ pub fn derive_font_map(pairs: &[(&[u8], [&str; 8])]) -> anyhow::Result<FontMap> 
             for (ci, &c) in row.iter().enumerate() {
                 if fill {
                     if c != ' ' {
-                        anyhow::bail!(
-                            "message {msg_i} row {ri} cell {ci}: bit-7 fill expects a space, found {c:?}"
-                        );
+                        anyhow::bail!("message {msg_i} row {ri} cell {ci}: bit-7 fill expects a space, found {c:?}");
                     }
                     continue;
                 }
-                let &b = bytes.get(y).ok_or_else(|| {
-                    anyhow::anyhow!("message {msg_i}: ran out of source bytes at row {ri} cell {ci}")
-                })?;
+                let &b = bytes
+                    .get(y)
+                    .ok_or_else(|| anyhow::anyhow!("message {msg_i}: ran out of source bytes at row {ri} cell {ci}"))?;
                 y += 1;
                 let b7 = b & 0x7F;
                 match map[b7 as usize] {
                     None => map[b7 as usize] = Some(c),
                     Some(prev) if prev == c => {}
-                    Some(prev) => anyhow::bail!(
-                        "message {msg_i}: byte {b7:#04X} maps to both {prev:?} and {c:?}"
-                    ),
+                    Some(prev) => anyhow::bail!("message {msg_i}: byte {b7:#04X} maps to both {prev:?} and {c:?}"),
                 }
                 if b & 0x80 != 0 {
                     fill = true;

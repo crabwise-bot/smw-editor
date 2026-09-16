@@ -21,11 +21,8 @@ use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let message = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--message="))
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
+    let message =
+        args.iter().find_map(|a| a.strip_prefix("--message=")).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
     anyhow::ensure!(
         message < smwe_rom::message_boxes::MESSAGE_COUNT,
         "message index {message} out of range (0-{})",

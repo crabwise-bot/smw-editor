@@ -1,7 +1,19 @@
 use std::{sync::Arc, time::Duration};
 
 use egui::{
-    vec2, Align2, Color32, CornerRadius, FontId, Key, PaintCallback, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    vec2,
+    Align2,
+    Color32,
+    CornerRadius,
+    FontId,
+    Key,
+    PaintCallback,
+    Rect,
+    Sense,
+    Stroke,
+    StrokeKind,
+    Ui,
+    Vec2,
 };
 use egui_glow::CallbackFn;
 
@@ -104,7 +116,7 @@ impl UiLevelEditor {
             let gl_offset = self.offset;
             let gl_zoom = z * ppp;
             ui.painter().add(PaintCallback {
-                rect: view_rect,
+                rect:     view_rect,
                 callback: Arc::new(CallbackFn::new(move |_info, painter| {
                     let mut r = level_renderer.lock().expect("Cannot lock level_renderer");
                     r.set_offset(gl_offset);
@@ -274,14 +286,11 @@ impl UiLevelEditor {
                         // Live drag feedback: draw the object at its dragged
                         // position/size while a drag is in progress.
                         let (dx, dy, dw, dh) = match &self.object_drag {
-                            Some(drag) if drag.index == i => {
-                                (drag.cur_x, drag.cur_y, drag.cur_w, drag.cur_h)
-                            }
+                            Some(drag) if drag.index == i => (drag.cur_x, drag.cur_y, drag.cur_w, drag.cur_h),
                             _ => (obj.x, obj.y, w, h),
                         };
                         let pos = origin + vec2(dx as f32 * tile_sz, dy as f32 * tile_sz);
-                        let rect =
-                            Rect::from_min_size(pos, vec2(dw as f32 * tile_sz, dh as f32 * tile_sz));
+                        let rect = Rect::from_min_size(pos, vec2(dw as f32 * tile_sz, dh as f32 * tile_sz));
                         if rect.max.x < view_rect.min.x
                             || rect.min.x > view_rect.max.x
                             || rect.max.y < view_rect.min.y
@@ -361,11 +370,8 @@ impl UiLevelEditor {
                                 vec2(w as f32 * tile_sz, h as f32 * tile_sz),
                             );
                             let handle_px = (7.0 * z).clamp(6.0, 14.0);
-                            let on_handle = if obj.is_extended {
-                                None
-                            } else {
-                                super::editing::handle_at(rect, handle_px, cursor)
-                            };
+                            let on_handle =
+                                if obj.is_extended { None } else { super::editing::handle_at(rect, handle_px, cursor) };
                             (on_handle, rect.contains(cursor))
                         })
                     });

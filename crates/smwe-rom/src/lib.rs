@@ -4,17 +4,17 @@ pub mod block_behavior;
 pub mod compression;
 pub mod font_map;
 pub mod freespace;
-pub mod message_raster;
-pub mod music;
-pub mod rom_expansion;
 pub mod graphics;
 pub mod internal_header;
 pub mod level;
 pub mod map16_file;
 pub mod message_boxes;
+pub mod message_raster;
+pub mod music;
 pub mod mwl;
 pub mod objects;
 pub mod overworld;
+pub mod rom_expansion;
 pub mod snes_utils;
 pub mod sprite_tweakers;
 pub mod title_credits;
@@ -113,11 +113,7 @@ impl SmwRom {
         log::info!("Parsing overworld Layer 2 event data");
         let overworld_l2_events = OverworldL2Events::parse(&rom).unwrap_or_else(|e| {
             log::warn!("Could not parse overworld Layer 2 event data: {e}");
-            OverworldL2Events {
-                entries:       Vec::new(),
-                boundaries:    Vec::new(),
-                silent_events: Vec::new(),
-            }
+            OverworldL2Events { entries: Vec::new(), boundaries: Vec::new(), silent_events: Vec::new() }
         });
 
         log::info!("Parsing sprite tweaker bytes");

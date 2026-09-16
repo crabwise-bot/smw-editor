@@ -4,8 +4,10 @@
 //! Run with:
 //! `ROM_PATH=~/workspace/smw-editor/smw.smc cargo test -p smwe-rom --test music_tracks -- --ignored`
 
-use smwe_rom::music::{format_music_track, music_track_name, MUSIC_TRACK_COUNT};
-use smwe_rom::SmwRom;
+use smwe_rom::{
+    music::{format_music_track, music_track_name, MUSIC_TRACK_COUNT},
+    SmwRom,
+};
 
 fn load_rom() -> SmwRom {
     let rom_path = std::env::var("ROM_PATH").expect("set ROM_PATH to a real SMW ROM");
@@ -24,20 +26,11 @@ fn vanilla_track_table_covers_every_level() {
     let mut seen = [false; 8];
     for (i, level) in smw.levels.iter().enumerate() {
         let m = level.primary_header.music();
-        assert!(
-            m < MUSIC_TRACK_COUNT,
-            "level {i:#04X} has music value {m} outside the vanilla 0-7 range"
-        );
+        assert!(m < MUSIC_TRACK_COUNT, "level {i:#04X} has music value {m} outside the vanilla 0-7 range");
         seen[m as usize] = true;
-        assert!(
-            music_track_name(m).is_some(),
-            "level {i:#04X}: track {m} has no name"
-        );
+        assert!(music_track_name(m).is_some(), "level {i:#04X}: track {m} has no name");
         // The UI label must never be empty for a real level.
         assert!(!format_music_track(m).is_empty());
     }
-    assert!(
-        seen.iter().all(|&s| s),
-        "every vanilla track should be used by at least one level: {seen:?}"
-    );
+    assert!(seen.iter().all(|&s| s), "every vanilla track should be used by at least one level: {seen:?}");
 }

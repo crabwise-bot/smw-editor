@@ -59,181 +59,181 @@ use crate::{
 };
 
 pub struct UiLevelEditor {
-    gl: Arc<glow::Context>,
-    rom: Arc<SmwRom>,
-    cpu: Cpu,
+    gl:             Arc<glow::Context>,
+    rom:            Arc<SmwRom>,
+    cpu:            Cpu,
     level_renderer: Arc<Mutex<LevelRenderer>>,
 
-    level_num: u16,
-    offset: Vec2,
-    zoom: f32,
-    always_show_grid: bool,
+    level_num:           u16,
+    offset:              Vec2,
+    zoom:                f32,
+    always_show_grid:    bool,
     show_object_overlay: bool,
     show_sprite_overlay: bool,
-    show_object_labels: bool,
-    selected_tile: Option<(u32, u32)>,
+    show_object_labels:  bool,
+    selected_tile:       Option<(u32, u32)>,
 
-    level_properties: LevelProperties,
-    layer1: UndoableData<EditableObjectLayer>,
-    layer2_objects: Option<UndoableData<EditableObjectLayer>>,
-    layer2_background: Option<UndoableData<EditableBackgroundLayer>>,
-    sprites: UndoableData<EditableSpriteLayer>,
-    tile_picker: TilePicker,
-    bg_tile_picker: BgTilePicker,
-    sprite_search: String,
+    level_properties:        LevelProperties,
+    layer1:                  UndoableData<EditableObjectLayer>,
+    layer2_objects:          Option<UndoableData<EditableObjectLayer>>,
+    layer2_background:       Option<UndoableData<EditableBackgroundLayer>>,
+    sprites:                 UndoableData<EditableSpriteLayer>,
+    tile_picker:             TilePicker,
+    bg_tile_picker:          BgTilePicker,
+    sprite_search:           String,
     sprite_preview_textures: HashMap<u8, egui::TextureHandle>,
-    sprite_oam_cache: HashMap<u8, Vec<SpriteOamTile>>,
-    preview_texture: Option<egui::TextureHandle>,
-    preview_for: Option<(u32, u32)>,
+    sprite_oam_cache:        HashMap<u8, Vec<SpriteOamTile>>,
+    preview_texture:         Option<egui::TextureHandle>,
+    preview_for:             Option<(u32, u32)>,
 
     // Animation
     last_anim_tick: Instant,
 
     // Editing state
-    editing_mode: EditingMode,
+    editing_mode:            EditingMode,
     selected_object_indices: HashSet<usize>,
     selected_sprite_indices: HashSet<usize>,
     /// In-progress Lunar Magic-style object drag (body move or handle resize).
     /// Transient: not part of the undoable layer; committed once on release.
-    object_drag: Option<editing::ObjectDrag>,
+    object_drag:             Option<editing::ObjectDrag>,
     /// Set for one frame when an object drag ends with a change, so the
     /// release click doesn't also trigger click-select/tile-inspect.
-    suppress_click_select: bool,
-    draw_object_id: u8,
-    draw_object_settings: u8,
-    draw_block_id: u16,
-    draw_sprite_id: u8,
-    draw_sprite_extra_bits: u8,
-    edit_layer: u8, // 1 or 2
-    edit_sprites: bool,
+    suppress_click_select:   bool,
+    draw_object_id:          u8,
+    draw_object_settings:    u8,
+    draw_block_id:           u16,
+    draw_sprite_id:          u8,
+    draw_sprite_extra_bits:  u8,
+    edit_layer:              u8, // 1 or 2
+    edit_sprites:            bool,
 
     // Spawn point marker
-    mario_spawn_x: u32,
-    mario_spawn_y: u32,
+    mario_spawn_x:   u32,
+    mario_spawn_y:   u32,
     initial_spawn_x: u32,
     initial_spawn_y: u32,
-    dragging_spawn: bool,
+    dragging_spawn:  bool,
 
     // Unsaved changes tracking
     show_unsaved_dialog: bool,
-    pending_level_num: Option<u16>,
-    has_edits: bool,
-    request_rom_save: bool,
-    pending_close: bool,
+    pending_level_num:   Option<u16>,
+    has_edits:           bool,
+    request_rom_save:    bool,
+    pending_close:       bool,
 
     // Editor windows
-    show_level_header: bool,
+    show_level_header:        bool,
     show_secondary_entrances: bool,
-    show_palette_editor: bool,
-    show_map16_editor: bool,
+    show_palette_editor:      bool,
+    show_map16_editor:        bool,
 
     // Secondary entrance data (local mutable copy, 512 entries × 4 bytes)
-    secondary_entrance_data: Vec<[u8; 4]>,
+    secondary_entrance_data:   Vec<[u8; 4]>,
     secondary_entrance_search: String,
 
     // Palette editor (12 ABGR1555 colors per group, stored as raw u16)
-    palette_bg_colors: [u16; 12],
-    palette_fg_colors: [u16; 12],
-    palette_sprite_colors: [u16; 12],
-    palette_dirty: bool,
+    palette_bg_colors:      [u16; 12],
+    palette_fg_colors:      [u16; 12],
+    palette_sprite_colors:  [u16; 12],
+    palette_dirty:          bool,
     selected_palette_group: u8,
-    selected_palette_idx: usize,
+    selected_palette_idx:   usize,
 
     // Map16 editor
-    map16_edits: HashMap<u16, [u16; 4]>,
+    map16_edits:                   HashMap<u16, [u16; 4]>,
     // SNES address of each block's data. Vanilla entries are populated at
     // level load; Lunar Magic extended entries are resolved on demand.
-    map16_block_ptrs: Vec<u32>,
+    map16_block_ptrs:              Vec<u32>,
     selected_map16_block_for_edit: Option<u16>,
 
     // Sprite tweaker byte editor (global, per-sprite-ID behavior; shared across
     // every placement of that sprite, matching Lunar Magic's Sprite Header Editor)
-    sprite_tweakers: smwe_rom::sprite_tweakers::SpriteTweakers,
-    sprite_tweakers_dirty: bool,
+    sprite_tweakers:            smwe_rom::sprite_tweakers::SpriteTweakers,
+    sprite_tweakers_dirty:      bool,
     show_sprite_tweaker_editor: bool,
-    tweaker_editor_sprite_id: u8,
+    tweaker_editor_sprite_id:   u8,
 
     // GFX (ExGFX) editor: pending raw (uncompressed) tile bytes per file
     // number, applied to the ROM on save.
-    gfx_edits: HashMap<usize, Vec<u8>>,
-    show_gfx_editor: bool,
+    gfx_edits:           HashMap<usize, Vec<u8>>,
+    show_gfx_editor:     bool,
     gfx_editor_file_num: usize,
 
     // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
     // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
     // editor's working state.
-    show_tile_editor: bool,
-    tile_editor_file_num: usize,
-    tile_editor_palette: usize,
-    tile_editor_selected: usize,
-    tile_editor_pixels: [u8; 64],
-    tile_editor_paint_color: u8,
-    tile_editor_dirty: bool,
-    tile_editor_staged: HashMap<usize, Vec<smwe_rom::graphics::gfx_file::Tile>>,
-    tile_editor_grid_tex: Option<egui::TextureHandle>,
-    tile_editor_grid_key: (usize, usize, u64),
-    tile_editor_revision: u64,
+    show_tile_editor:         bool,
+    tile_editor_file_num:     usize,
+    tile_editor_palette:      usize,
+    tile_editor_selected:     usize,
+    tile_editor_pixels:       [u8; 64],
+    tile_editor_paint_color:  u8,
+    tile_editor_dirty:        bool,
+    tile_editor_staged:       HashMap<usize, Vec<smwe_rom::graphics::gfx_file::Tile>>,
+    tile_editor_grid_tex:     Option<egui::TextureHandle>,
+    tile_editor_grid_key:     (usize, usize, u64),
+    tile_editor_revision:     u64,
     tile_editor_handoff_note: Option<String>,
 
     // Message box (dialog text) editor: global, raw tile-index bytes.
-    message_boxes: smwe_rom::message_boxes::MessageBoxes,
-    message_boxes_dirty: bool,
-    show_message_editor: bool,
+    message_boxes:           smwe_rom::message_boxes::MessageBoxes,
+    message_boxes_dirty:     bool,
+    show_message_editor:     bool,
     message_editor_selected: usize,
     /// Cached `CODE_05B1BC` stripe capture for the selected message, run on a
     /// scratch CPU clone. Preview; the text uses `FontMap::real()`.
-    message_preview: Option<smwe_emu::emu::MessageStripe>,
+    message_preview:         Option<smwe_emu::emu::MessageStripe>,
     /// (message index, byte-hash) the stripe capture was built for.
-    message_preview_for: Option<(usize, u64)>,
+    message_preview_for:     Option<(usize, u64)>,
     /// Cached decompressed GFX2A message font (128 2bpp tiles) for raster preview.
-    message_font: Option<Vec<Box<[u8]>>>,
+    message_font:            Option<Vec<Box<[u8]>>>,
     /// Cached raster texture for the selected message's 8×18 grid.
-    message_raster_texture: Option<egui::TextureHandle>,
+    message_raster_texture:  Option<egui::TextureHandle>,
     /// (message index, byte-hash) the raster texture was built for.
-    message_raster_for: Option<(usize, u64)>,
+    message_raster_for:      Option<(usize, u64)>,
     /// Per-message byte budgets for the editable text field: each message's
     /// vanilla length, captured at load. The 22-message blob isn't
     /// repointable, so no message may grow past its original span.
-    message_budgets: Vec<usize>,
+    message_budgets:         Vec<usize>,
     /// Editable-text buffer for the selected message (decoded via
     /// `font_map::decode_editable_text`; `\n` = line break).
-    message_text_edit: String,
+    message_text_edit:       String,
     /// Which message `message_text_edit` is synced to.
-    message_text_for: Option<usize>,
+    message_text_for:        Option<usize>,
     /// Hash of the message bytes the text buffer was last synced from (or
     /// successfully applied to); a mismatch means the raw byte grid changed
     /// the bytes and the text must be re-decoded.
     message_text_bytes_hash: u64,
     /// Last text→bytes encode failure, shown under the text field.
-    message_text_error: Option<String>,
+    message_text_error:      Option<String>,
     /// ROM-wide cross-reference search ("find all references") window.
-    show_xref_search: bool,
-    xref_search: XrefSearchState,
+    show_xref_search:        bool,
+    xref_search:             XrefSearchState,
 
     // Title screen / ending credits fixed-location data.
-    title_credits: smwe_rom::title_credits::TitleCreditsData,
-    title_credits_dirty: bool,
+    title_credits:             smwe_rom::title_credits::TitleCreditsData,
+    title_credits_dirty:       bool,
     show_title_credits_editor: bool,
-    credits_editor_selected: usize,
+    credits_editor_selected:   usize,
     // Title screen WYSIWYG stripe editor: parsed 64x64 tile grid, its
     // rendered preview, and the VRAM/CGRAM snapshots the preview is drawn
     // from (captured from a scratch CPU running the real title init).
-    title_grid: Option<smwe_rom::title_stripe::TitleTileGrid>,
-    title_grid_tex: Option<egui::TextureHandle>,
-    title_grid_vram: Option<Vec<u8>>,
-    title_grid_cgram: Option<Vec<u8>>,
+    title_grid:                Option<smwe_rom::title_stripe::TitleTileGrid>,
+    title_grid_tex:            Option<egui::TextureHandle>,
+    title_grid_vram:           Option<Vec<u8>>,
+    title_grid_cgram:          Option<Vec<u8>>,
     title_grid_for_stripe_len: Option<usize>,
-    title_selected_cell: Option<(usize, usize)>,
-    title_paint_word: u16,
-    title_grid_error: Option<String>,
+    title_selected_cell:       Option<(usize, usize)>,
+    title_paint_word:          u16,
+    title_grid_error:          Option<String>,
 
     // Lunar Magic `.mwl` level import/export.
-    rom_path: PathBuf,
+    rom_path:   PathBuf,
     mwl_status: Option<String>,
 
     // Map16 page import/export.
     map16_file_status: Option<String>,
-    map16_page_idx: usize,
+    map16_page_idx:    usize,
     map16_tileset_idx: usize,
 }
 
