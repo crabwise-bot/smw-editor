@@ -82,20 +82,30 @@ pub struct RomInternalHeader {
     pub interrupt_vectors: Vec<AddrSnes>,
 }
 
-#[derive(Copy, Clone, Debug, IntoPrimitive, TryFromPrimitive)]
+/// SNES cartridge memory map, from the internal header's map-mode byte.
+///
+/// The low nibble is Nintendo's "Mode 2x" number (Mode 20 = LoROM,
+/// Mode 21 = HiROM, Mode 23/25 = SA-1 pack) with the community-standard
+/// extensions Mode 22 = ExLoROM and Mode 24 = ExHiROM; bit 4 selects
+/// FastROM. (Source: SNES Development Manual, "Map Mode (FFD5H)".)
+#[derive(Copy, Clone, Debug, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum MapMode {
-    SlowLoRom   = 0b100000,
-    SlowHiRom   = 0b100001,
-    SlowExLoRom = 0b100010,
-    SlowExHiRom = 0b100100,
-    FastLoRom   = 0b110000,
-    FastHiRom   = 0b110001,
-    FastExLoRom = 0b110010,
-    FastExHiRom = 0b110100,
+    SlowLoRom    = 0b100000,
+    SlowHiRom    = 0b100001,
+    SlowExLoRom  = 0b100010,
+    SlowSa1LoRom = 0b100011,
+    SlowExHiRom  = 0b100100,
+    SlowSa1HiRom = 0b100101,
+    FastLoRom    = 0b110000,
+    FastHiRom    = 0b110001,
+    FastExLoRom  = 0b110010,
+    FastSa1LoRom = 0b110011,
+    FastExHiRom  = 0b110100,
+    FastSa1HiRom = 0b110101,
 }
 
-#[derive(Copy, Clone, Debug, IntoPrimitive, TryFromPrimitive)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum RomType {
     Rom               = 0x00,
@@ -257,11 +267,15 @@ impl fmt::Display for MapMode {
             SlowLoRom => "LoROM",
             SlowHiRom => "HiROM",
             SlowExLoRom => "ExLoROM",
+            SlowSa1LoRom => "SA-1 LoROM",
             SlowExHiRom => "ExHiROM",
+            SlowSa1HiRom => "SA-1 HiROM",
             FastLoRom => "Fast LoROM",
             FastHiRom => "Fast HiROM",
             FastExLoRom => "Fast ExLoROM",
+            FastSa1LoRom => "Fast SA-1 LoROM",
             FastExHiRom => "Fast ExHiROM",
+            FastSa1HiRom => "Fast SA-1 HiROM",
         })
     }
 }
@@ -269,12 +283,18 @@ impl fmt::Display for MapMode {
 #[rustfmt::skip]
 impl MapMode {
     pub fn as_u8(&self) -> u8 { (*self).into() }
+    /// Nintendo's "Mode 2x" number: the low nibble of the map-mode byte.
+    pub fn mode_num(&self) -> u8 { self.as_u8() & 0x0F }
     pub fn is_slow(&self)    -> bool { (self.as_u8() & 0b010000) == 0 }
     pub fn is_fast(&self)    -> bool { !self.is_slow() }
-    pub fn is_lorom(&self)   -> bool { (self.as_u8() & 0b000001) == 0 }
-    pub fn is_hirom(&self)   -> bool { (self.as_u8() & 0b000001) != 0 }
-    pub fn is_exlorom(&self) -> bool { (self.as_u8() & 0b000010) != 0 }
-    pub fn is_exhirom(&self) -> bool { (self.as_u8() & 0b000100) != 0 }
+    /// SA-1 packs (Mode 23/25) expose their ROM to the S-CPU with plain
+    /// LoROM/HiROM bus addressing, so an SA-1 mode still counts as
+    /// LoROM/HiROM for address conversion.
+    pub fn is_sa1(&self)     -> bool { matches!(self.mode_num(), 0x03 | 0x05) }
+    pub fn is_lorom(&self)   -> bool { matches!(self.mode_num(), 0x00 | 0x03) }
+    pub fn is_hirom(&self)   -> bool { matches!(self.mode_num(), 0x01 | 0x05) }
+    pub fn is_exlorom(&self) -> bool { self.mode_num() == 0x02 }
+    pub fn is_exhirom(&self) -> bool { self.mode_num() == 0x04 }
 }
 
 impl fmt::Display for RomType {
@@ -336,5 +356,118 @@ impl fmt::Display for RegionCode {
             Other2 => "Other (2)",
             Other3 => "Other (3)",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snes_utils::rom::Rom;
+
+    /// Build a synthetic in-memory ROM with a valid internal header at
+    /// `header_base` (0x7FC0 = LoROM/ExLoROM/SA-1-LoROM spot,
+    /// 0xFFC0 = HiROM/ExHiROM/SA-1-HiROM spot). The checksum/complement pair
+    /// is consistent so `find()` accepts it. No real ROM data is involved.
+    fn synthetic_rom(header_base: usize, name: &str, map_mode: u8, rom_type: u8) -> Rom {
+        let mut buf = vec![0u8; 0x10000];
+        let mut name_field = [b' '; sizes::INTERNAL_ROM_NAME];
+        let name_bytes = name.as_bytes();
+        let name_len = name_bytes.len().min(name_field.len());
+        name_field[..name_len].copy_from_slice(&name_bytes[..name_len]);
+        buf[header_base..header_base + sizes::INTERNAL_ROM_NAME].copy_from_slice(&name_field);
+        buf[header_base + 0x15] = map_mode;
+        buf[header_base + 0x16] = rom_type;
+        buf[header_base + 0x17] = 0x0B; // ROM size byte: 2^11 KB = 2 MB
+        buf[header_base + 0x19] = 0x01; // region: North America
+                                        // Consistent pair is all `find()` checks (cpl ^ csm == 0xFFFF).
+        let checksum: u16 = 0x1234;
+        let complement = !checksum;
+        buf[header_base + 0x1C..header_base + 0x1E].copy_from_slice(&complement.to_le_bytes());
+        buf[header_base + 0x1E..header_base + 0x20].copy_from_slice(&checksum.to_le_bytes());
+        Rom::new(buf).unwrap()
+    }
+
+    #[test]
+    fn parses_sa1_lorom_header() {
+        let rom = synthetic_rom(0x7FC0, "SA-1 TEST ROM", 0x23, 0x34);
+        let header = RomInternalHeader::parse(&rom).unwrap();
+        assert_eq!(header.internal_rom_name, "SA-1 TEST ROM        ");
+        assert_eq!(header.map_mode, MapMode::SlowSa1LoRom);
+        assert_eq!(header.map_mode.to_string(), "SA-1 LoROM");
+        assert_eq!(header.rom_type, RomType::RomSa1Ram);
+        assert!(header.map_mode.is_sa1());
+        assert!(header.map_mode.is_lorom());
+        assert!(!header.map_mode.is_hirom());
+        assert!(header.map_mode.is_slow());
+    }
+
+    #[test]
+    fn parses_sa1_hirom_header() {
+        let rom = synthetic_rom(0xFFC0, "SA-1 HIROM TEST", 0x25, 0x35);
+        let header = RomInternalHeader::parse(&rom).unwrap();
+        assert_eq!(header.map_mode, MapMode::SlowSa1HiRom);
+        assert_eq!(header.map_mode.to_string(), "SA-1 HiROM");
+        assert_eq!(header.rom_type, RomType::RomSa1RamSram);
+        assert!(header.map_mode.is_sa1());
+        assert!(header.map_mode.is_hirom());
+        assert!(!header.map_mode.is_lorom());
+    }
+
+    #[test]
+    fn parses_fast_sa1_modes() {
+        let lo = RomInternalHeader::parse(&synthetic_rom(0x7FC0, "FAST SA-1 LO", 0x33, 0x33)).unwrap();
+        assert_eq!(lo.map_mode, MapMode::FastSa1LoRom);
+        assert!(lo.map_mode.is_sa1() && lo.map_mode.is_lorom() && lo.map_mode.is_fast());
+        assert_eq!(lo.map_mode.to_string(), "Fast SA-1 LoROM");
+
+        let hi = RomInternalHeader::parse(&synthetic_rom(0xFFC0, "FAST SA-1 HI", 0x35, 0x36)).unwrap();
+        assert_eq!(hi.map_mode, MapMode::FastSa1HiRom);
+        assert!(hi.map_mode.is_sa1() && hi.map_mode.is_hirom() && hi.map_mode.is_fast());
+        assert_eq!(hi.map_mode.to_string(), "Fast SA-1 HiROM");
+    }
+
+    #[test]
+    fn parses_exlorom_and_exhirom_headers() {
+        let exlo = RomInternalHeader::parse(&synthetic_rom(0x7FC0, "EXLOROM TEST", 0x22, 0x02)).unwrap();
+        assert_eq!(exlo.map_mode, MapMode::SlowExLoRom);
+        assert!(exlo.map_mode.is_exlorom());
+        assert!(!exlo.map_mode.is_lorom() && !exlo.map_mode.is_hirom() && !exlo.map_mode.is_sa1());
+
+        let exhi = RomInternalHeader::parse(&synthetic_rom(0xFFC0, "EXHIROM TEST", 0x24, 0x02)).unwrap();
+        assert_eq!(exhi.map_mode, MapMode::SlowExHiRom);
+        assert!(exhi.map_mode.is_exhirom());
+
+        let fast_exlo = RomInternalHeader::parse(&synthetic_rom(0x7FC0, "FEXLOROM", 0x32, 0x02)).unwrap();
+        assert_eq!(fast_exlo.map_mode, MapMode::FastExLoRom);
+        assert!(fast_exlo.map_mode.is_exlorom() && fast_exlo.map_mode.is_fast());
+
+        let fast_exhi = RomInternalHeader::parse(&synthetic_rom(0xFFC0, "FEXHIROM", 0x34, 0x02)).unwrap();
+        assert_eq!(fast_exhi.map_mode, MapMode::FastExHiRom);
+        assert!(fast_exhi.map_mode.is_exhirom() && fast_exhi.map_mode.is_fast());
+    }
+
+    #[test]
+    fn plain_modes_still_parse() {
+        let lo = RomInternalHeader::parse(&synthetic_rom(0x7FC0, "PLAIN LOROM", 0x20, 0x02)).unwrap();
+        assert_eq!(lo.map_mode, MapMode::SlowLoRom);
+        assert!(lo.map_mode.is_lorom() && !lo.map_mode.is_sa1());
+        assert_eq!(lo.map_mode.to_string(), "LoROM");
+
+        let hi = RomInternalHeader::parse(&synthetic_rom(0xFFC0, "PLAIN HIROM", 0x31, 0x02)).unwrap();
+        assert_eq!(hi.map_mode, MapMode::FastHiRom);
+        assert!(hi.map_mode.is_hirom() && hi.map_mode.is_fast());
+    }
+
+    #[test]
+    fn rejects_undefined_map_mode() {
+        // 0x2A is not a defined Mode 2x number; the header must not parse.
+        let rom = synthetic_rom(0x7FC0, "BOGUS MODE", 0x2A, 0x02);
+        assert!(matches!(RomInternalHeader::parse(&rom), Err(InternalHeaderParseError::ReadMapMode(_))));
+    }
+
+    #[test]
+    fn no_valid_header_is_not_found() {
+        let rom = Rom::new(vec![0u8; 0x10000]).unwrap();
+        assert!(matches!(RomInternalHeader::parse(&rom), Err(InternalHeaderParseError::NotFound)));
     }
 }

@@ -49,7 +49,11 @@ impl UiAddressConverter {
     fn mode_selection(&mut self, ui: &mut Ui) {
         let lorom_changed = ui.radio_value(&mut self.conversion_mode, ConversionMode::LoRom, "PC and LoROM").clicked();
         let hirom_changed = ui.radio_value(&mut self.conversion_mode, ConversionMode::HiRom, "PC and HiROM").clicked();
-        if lorom_changed || hirom_changed {
+        let exlorom_changed =
+            ui.radio_value(&mut self.conversion_mode, ConversionMode::ExLoRom, "PC and ExLoROM").clicked();
+        let exhirom_changed =
+            ui.radio_value(&mut self.conversion_mode, ConversionMode::ExHiRom, "PC and ExHiROM").clicked();
+        if lorom_changed || hirom_changed || exlorom_changed || exhirom_changed {
             log::info!("Conversion mode changed to {}", self.conversion_mode);
             self.update_addresses(ConvDir::PcToSnes);
         }
@@ -110,11 +114,15 @@ impl UiAddressConverter {
             ConvDir::PcToSnes => match self.conversion_mode {
                 ConversionMode::LoRom => AddrSnes::try_from_lorom(AddrPc(addr_src)),
                 ConversionMode::HiRom => AddrSnes::try_from_hirom(AddrPc(addr_src)),
+                ConversionMode::ExLoRom => AddrSnes::try_from_exlorom(AddrPc(addr_src)),
+                ConversionMode::ExHiRom => AddrSnes::try_from_exhirom(AddrPc(addr_src)),
             }
             .map(|addr| addr.0),
             ConvDir::SnesToPc => match self.conversion_mode {
                 ConversionMode::LoRom => AddrPc::try_from_lorom(AddrSnes(addr_src)),
                 ConversionMode::HiRom => AddrPc::try_from_hirom(AddrSnes(addr_src)),
+                ConversionMode::ExLoRom => AddrPc::try_from_exlorom(AddrSnes(addr_src)),
+                ConversionMode::ExHiRom => AddrPc::try_from_exhirom(AddrSnes(addr_src)),
             }
             .map(|addr| addr.0),
         };
@@ -137,6 +145,8 @@ mod modes {
     pub enum ConversionMode {
         LoRom,
         HiRom,
+        ExLoRom,
+        ExHiRom,
     }
 
     pub enum ConvDir {
@@ -149,6 +159,8 @@ mod modes {
             f.write_str(match self {
                 ConversionMode::LoRom => "PC ↔ LoRom",
                 ConversionMode::HiRom => "PC ↔ HiRom",
+                ConversionMode::ExLoRom => "PC ↔ ExLoROM",
+                ConversionMode::ExHiRom => "PC ↔ ExHiROM",
             })
         }
     }

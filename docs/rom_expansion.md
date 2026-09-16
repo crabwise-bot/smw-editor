@@ -42,8 +42,9 @@ heuristic only needs the pair to be complementary.)
 
 ## Limits
 
-- LoROM only, capped at 4 MB. Larger needs ExLoROM, which is a separate
-  mapper feature (see the SA-1/ExLoROM backlog item).
+- LoROM only, capped at 4 MB. Larger needs ExLoROM, which now has full mapper
+  support (see the SA-1/ExLoROM/ExHiROM mapper work); the expander itself
+  still only writes plain LoROM layouts.
 - Only 512 KB / 1 MB / 2 MB sources are accepted; anything else is refused
   with an error rather than guessed at.
 

@@ -9,6 +9,10 @@ pub enum Mapper {
     NoRom,
     LoRom,
     HiRom,
+    /// LoROM for banks $00-$7D plus a second 4 MiB window at $80-$FF:$8000-$FFFF.
+    ExLoRom,
+    /// HiROM for banks $40-$7D/$C0-$FF plus a second 4 MiB window at $80-$BF:$0000-$FFFF.
+    ExHiRom,
 }
 
 impl Mapper {
@@ -36,6 +40,31 @@ impl Mapper {
                     Some(addr & 0x3FFFFF)
                 }
             }
+            Mapper::ExLoRom => {
+                let bank = (addr >> 16) & 0xFF;
+                if bank >= 0x80 && (addr & 0x8000) != 0 {
+                    // Upper 4 MiB window (replaces the LoROM mirror).
+                    Some(0x400000 | ((addr & 0x7F0000) >> 1 | (addr & 0x7FFF)))
+                } else if (addr & 0xFE0000) == 0x7E0000
+                    || (addr & 0x408000) == 0x000000
+                    || (addr & 0x708000) == 0x700000
+                {
+                    None
+                } else {
+                    Some((addr & 0x7F0000) >> 1 | (addr & 0x7FFF))
+                }
+            }
+            Mapper::ExHiRom => {
+                let bank = (addr >> 16) & 0xFF;
+                if (0x80..=0xBF).contains(&bank) {
+                    // Upper 4 MiB window (replaces the HiROM mirror).
+                    Some(0x400000 | (addr & 0x3FFFFF))
+                } else if (addr & 0xFE0000) == 0x7E0000 || (addr & 0x408000) == 0x000000 {
+                    None
+                } else {
+                    Some(addr & 0x3FFFFF)
+                }
+            }
         }
     }
 
@@ -48,6 +77,23 @@ impl Mapper {
                 (bank << 16) + in_bank + 0x8000
             }
             Mapper::HiRom => offset | 0xC00000,
+            Mapper::ExLoRom => {
+                if offset < 0x400000 {
+                    let in_bank = offset & 0x7FFF;
+                    let bank = offset >> 15;
+                    (bank << 16) + in_bank + 0x8000
+                } else {
+                    let bank = 0x80 + ((offset >> 15) & 0x7F);
+                    (bank << 16) | 0x8000 | (offset & 0x7FFF)
+                }
+            }
+            Mapper::ExHiRom => {
+                if offset < 0x400000 {
+                    offset | 0xC00000
+                } else {
+                    0x800000 | (offset & 0x3FFFFF)
+                }
+            }
         }
     }
 }
@@ -61,9 +107,12 @@ pub struct Rom {
 
 /// Detect the cartridge mapper from an *unheadered* ROM buffer by validating the
 /// SNES internal header's checksum/complement pair at the LoROM and HiROM
-/// locations. This mirrors the heuristic used by real emulators and by
-/// `smwe-rom`'s header parser, so an expanded LoROM hack (e.g. TOP2020) and a
-/// HiROM hack both map correctly instead of everything being forced to LoROM.
+/// locations, then refining with the header's map-mode byte. This mirrors the
+/// heuristic used by real emulators and by `smwe-rom`'s header parser, so an
+/// expanded LoROM hack (e.g. TOP2020), a HiROM hack, an ExLoROM/ExHiROM image,
+/// and SA-1 packs (Mode 23/25) all map correctly instead of everything being
+/// forced to LoROM. SA-1 ROMs expose their cartridge ROM to the S-CPU with
+/// plain LoROM/HiROM bus addressing, so they map with the base layout.
 pub fn detect_mapper(buf: &[u8]) -> Mapper {
     // Complement at header+0x1C, checksum at header+0x1E (little-endian u16s).
     let valid_at = |base: usize| -> bool {
@@ -76,18 +125,24 @@ pub fn detect_mapper(buf: &[u8]) -> Mapper {
             _ => false,
         }
     };
-    // Map-mode byte sits at header+0x15; bit 0 distinguishes HiROM from LoROM.
+    // Map-mode byte sits at header+0x15; its low nibble is Nintendo's
+    // "Mode 2x" number: 0=LoROM, 1=HiROM, 2=ExLoROM, 3=SA-1 LoROM,
+    // 4=ExHiROM, 5=SA-1 HiROM.
     let lo_ok = valid_at(0x7FC0);
     let hi_ok = valid_at(0xFFC0);
+    let lo_mode = buf.get(0x7FD5).copied();
+    let hi_mode = buf.get(0xFFD5).copied();
     let mapper = match (lo_ok, hi_ok) {
-        (true, false) => Mapper::LoRom,
-        (false, true) => Mapper::HiRom,
+        (true, false) => lo_mode.map_or(Mapper::LoRom, mapper_for_mode),
+        (false, true) => hi_mode.map_or(Mapper::HiRom, mapper_for_mode),
         (true, true) => {
-            // Both checksums validate (rare); fall back to the declared map mode.
-            if buf.get(0x7FD5).map_or(false, |m| m & 0x01 != 0) {
-                Mapper::HiRom
-            } else {
-                Mapper::LoRom
+            // Both checksums validate (rare); prefer an explicit Ex map mode,
+            // then fall back to the LoROM header's declared mode.
+            match (lo_mode, hi_mode) {
+                (Some(m), _) if m & 0x0F == 0x02 => Mapper::ExLoRom,
+                (_, Some(m)) if m & 0x0F == 0x04 => Mapper::ExHiRom,
+                (Some(m), _) => mapper_for_mode(m),
+                _ => Mapper::LoRom,
             }
         }
         (false, false) => {
@@ -95,19 +150,29 @@ pub fn detect_mapper(buf: &[u8]) -> Mapper {
             Mapper::LoRom
         }
     };
-    // SA-1 ($33-$36) and SuperFX ($13-$16) carts use mappings this emulator does
-    // not model; warn so garbled output is at least explained.
+    // SA-1 ($33-$36) and SuperFX ($13-$16) chip declarations. SA-1 now maps
+    // with its base LoROM/HiROM layout (the S-CPU bus view); SuperFX mapping
+    // is still unsupported, so warn to explain garbled output.
     if let Some(&rom_type) = buf.get(0x7FD6).filter(|_| lo_ok).or_else(|| buf.get(0xFFD6).filter(|_| hi_ok)) {
         match rom_type & 0xF0 {
-            0x30 => {
-                log::warn!("ROM declares SA-1 ($33-$36); SA-1 mapping is not yet supported and rendering may be wrong")
-            }
+            0x30 => log::info!("ROM declares SA-1 chip ($33-$36); mapping with base {mapper:?} layout"),
             0x10 => log::warn!("ROM declares SuperFX; this mapper is not supported"),
             _ => {}
         }
     }
     log::info!("Detected cartridge mapper: {mapper:?}");
     mapper
+}
+
+/// Map a map-mode byte to the emulator `Mapper`. SA-1 packs (Mode 23/25)
+/// expose their ROM to the S-CPU with plain LoROM/HiROM bus addressing.
+fn mapper_for_mode(mode: u8) -> Mapper {
+    match mode & 0x0F {
+        0x02 => Mapper::ExLoRom,
+        0x04 => Mapper::ExHiRom,
+        0x01 | 0x05 => Mapper::HiRom,
+        _ => Mapper::LoRom,
+    }
 }
 
 impl Rom {
@@ -224,5 +289,71 @@ mod tests {
     fn defaults_to_lorom_without_valid_checksum() {
         let buf = vec![0u8; 0x10000];
         assert!(matches!(detect_mapper(&buf), Mapper::LoRom));
+    }
+
+    #[test]
+    fn detects_exlorom_and_exhirom() {
+        let buf = rom_with_header(0x7FC0, 0x22, 0x02);
+        assert!(matches!(detect_mapper(&buf), Mapper::ExLoRom));
+        let buf = rom_with_header(0x7FC0, 0x32, 0x02);
+        assert!(matches!(detect_mapper(&buf), Mapper::ExLoRom));
+        let buf = rom_with_header(0xFFC0, 0x24, 0x02);
+        assert!(matches!(detect_mapper(&buf), Mapper::ExHiRom));
+        let buf = rom_with_header(0xFFC0, 0x34, 0x02);
+        assert!(matches!(detect_mapper(&buf), Mapper::ExHiRom));
+    }
+
+    #[test]
+    fn detects_sa1_with_base_layout() {
+        // SA-1 LoROM (Mode 23): the S-CPU sees plain LoROM bus addressing.
+        let buf = rom_with_header(0x7FC0, 0x23, 0x34);
+        assert!(matches!(detect_mapper(&buf), Mapper::LoRom));
+        let buf = rom_with_header(0x7FC0, 0x33, 0x33);
+        assert!(matches!(detect_mapper(&buf), Mapper::LoRom));
+        // SA-1 HiROM (Mode 25): plain HiROM bus addressing.
+        let buf = rom_with_header(0xFFC0, 0x25, 0x35);
+        assert!(matches!(detect_mapper(&buf), Mapper::HiRom));
+        let buf = rom_with_header(0xFFC0, 0x35, 0x36);
+        assert!(matches!(detect_mapper(&buf), Mapper::HiRom));
+    }
+
+    #[test]
+    fn exlorom_maps_both_windows() {
+        let m = Mapper::ExLoRom;
+        // Lower 4 MiB like LoROM.
+        assert_eq!(m.map_to_file(0x008000), Some(0x000000));
+        assert_eq!(m.map_to_file(0x7DFFFF), Some(0x3EFFFF));
+        // Upper 4 MiB window replaces the LoROM mirror at $80-$FF.
+        assert_eq!(m.map_to_file(0x808000), Some(0x400000));
+        assert_eq!(m.map_to_file(0xFFFFFF), Some(0x7FFFFF));
+        // Junk/WRAM/SRAM still excluded.
+        assert_eq!(m.map_to_file(0x7E8000), None);
+        assert_eq!(m.map_to_file(0x001234), None);
+        // Inverse mapping round-trips.
+        for off in [0x000000usize, 0x123456, 0x3EFFFF, 0x400000, 0x5ABCDE, 0x7FFFFF] {
+            assert_eq!(m.map_to_file(m.map_to_addr(off)), Some(off), "off={off:#x}");
+        }
+        assert_eq!(m.map_to_addr(0x400000), 0x808000);
+        assert_eq!(m.map_to_addr(0x7FFFFF), 0xFFFFFF);
+    }
+
+    #[test]
+    fn exhirom_maps_both_windows() {
+        let m = Mapper::ExHiRom;
+        // Lower 4 MiB like HiROM.
+        assert_eq!(m.map_to_file(0xC00000), Some(0x000000));
+        assert_eq!(m.map_to_file(0xFFFFFF), Some(0x3FFFFF));
+        // Upper 4 MiB window replaces the HiROM mirror at $80-$BF.
+        assert_eq!(m.map_to_file(0x800000), Some(0x400000));
+        assert_eq!(m.map_to_file(0xBFFFFF), Some(0x7FFFFF));
+        assert_eq!(m.map_to_file(0x9ABCDE), Some(0x5ABCDE));
+        // Junk/WRAM still excluded.
+        assert_eq!(m.map_to_file(0x7E0000), None);
+        assert_eq!(m.map_to_file(0x001234), None);
+        for off in [0x000000usize, 0x123456, 0x3FFFFF, 0x400000, 0x5ABCDE, 0x7FFFFF] {
+            assert_eq!(m.map_to_file(m.map_to_addr(off)), Some(off), "off={off:#x}");
+        }
+        assert_eq!(m.map_to_addr(0x400000), 0x800000);
+        assert_eq!(m.map_to_addr(0x7FFFFF), 0xBFFFFF);
     }
 }
