@@ -10,6 +10,7 @@ use crate::{
         animated_tile_data::AnimatedTileData,
         map16::Block,
         object_gfx_list::ObjectGfxList,
+        sprite_gfx_list::SpriteGfxList,
         tilesets::TILESETS_COUNT,
     },
     snes_utils::{addr::AddrSnes, rom::Rom},
@@ -39,6 +40,7 @@ pub struct Gfx {
     pub files:              Vec<GfxFile>,
     pub color_palettes:     ColorPalettes,
     pub object_gfx_list:    ObjectGfxList,
+    pub sprite_gfx_list:    SpriteGfxList,
     pub animated_tile_data: AnimatedTileData,
 }
 
@@ -59,6 +61,7 @@ impl Gfx {
             files,
             color_palettes: ColorPalettes::parse(rom, levels)?,
             object_gfx_list: ObjectGfxList::parse(rom)?,
+            sprite_gfx_list: SpriteGfxList::parse(rom)?,
             animated_tile_data: AnimatedTileData::parse(rom)?,
         })
     }

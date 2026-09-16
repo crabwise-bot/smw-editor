@@ -442,6 +442,7 @@ impl UiLevelEditor {
         egui::Window::new("Level Header").open(&mut open).resizable(false).show(ctx, |ui| {
             let mut rebuild_tiles = false;
             let mut refresh_sprites = false;
+            let mut open_gfx_slots = false;
             let mut changed = false;
 
             ui.strong("Primary Header");
@@ -485,23 +486,45 @@ impl UiLevelEditor {
 
                 ui.label("FG/BG GFX:");
                 {
-                    let mut v = p.fg_bg_gfx as i32;
-                    if ui.add(Slider::new(&mut v, 0..=15_i32).hexadecimal(1, false, false)).changed() {
-                        p.fg_bg_gfx = v as u8;
-                        changed = true;
-                        rebuild_tiles = true;
-                    }
+                    ui.horizontal(|ui| {
+                        let mut v = p.fg_bg_gfx as i32;
+                        if ui.add(Slider::new(&mut v, 0..=15_i32).hexadecimal(1, false, false)).changed() {
+                            p.fg_bg_gfx = v as u8;
+                            changed = true;
+                            rebuild_tiles = true;
+                        }
+                        if ui
+                            .small_button("Slots…")
+                            .on_hover_text(
+                                "Browse this level's FG1/FG2/FG3/BG1 + SP1–SP4 GFX files and jump into the 8x8 tile editor",
+                            )
+                            .clicked()
+                        {
+                            open_gfx_slots = true;
+                        }
+                    });
                 }
                 ui.end_row();
 
                 ui.label("Sprite GFX:");
                 {
-                    let mut v = p.sprite_gfx as i32;
-                    if ui.add(Slider::new(&mut v, 0..=15_i32).hexadecimal(1, false, false)).changed() {
-                        p.sprite_gfx = v as u8;
-                        changed = true;
-                        refresh_sprites = true;
-                    }
+                    ui.horizontal(|ui| {
+                        let mut v = p.sprite_gfx as i32;
+                        if ui.add(Slider::new(&mut v, 0..=15_i32).hexadecimal(1, false, false)).changed() {
+                            p.sprite_gfx = v as u8;
+                            changed = true;
+                            refresh_sprites = true;
+                        }
+                        if ui
+                            .small_button("Slots…")
+                            .on_hover_text(
+                                "Browse this level's FG1/FG2/FG3/BG1 + SP1–SP4 GFX files and jump into the 8x8 tile editor",
+                            )
+                            .clicked()
+                        {
+                            open_gfx_slots = true;
+                        }
+                    });
                 }
                 ui.end_row();
 
@@ -600,6 +623,9 @@ impl UiLevelEditor {
             }
             if refresh_sprites {
                 self.refresh_sprite_gfx();
+            }
+            if open_gfx_slots {
+                self.show_gfx_slots = true;
             }
         });
         self.show_level_header = open;
