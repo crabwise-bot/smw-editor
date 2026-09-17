@@ -236,8 +236,12 @@ fn main() -> anyhow::Result<()> {
         &mut img,
         &sans,
         &format!(
-            "Secondary header bytes: {:02X} {:02X} {:02X} {:02X}",
-            info.secondary.0[0], info.secondary.0[1], info.secondary.0[2], info.secondary.0[3]
+            "Secondary header bytes: {:02X} {:02X} {:02X} {:02X} (scroll ext ${:02X})",
+            info.secondary.bytes[0],
+            info.secondary.bytes[1],
+            info.secondary.bytes[2],
+            info.secondary.bytes[3],
+            info.secondary.scroll_ext
         ),
         rx as i32,
         ry as i32,

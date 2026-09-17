@@ -15,7 +15,13 @@ pub const SPRITE_HEADER_SIZE: usize = 1;
 pub struct PrimaryHeader(pub [u8; PRIMARY_HEADER_SIZE]);
 
 #[derive(Debug, Clone)]
-pub struct SecondaryHeader(pub [u8; SECONDARY_HEADER_SIZE]);
+pub struct SecondaryHeader {
+    pub bytes:      [u8; SECONDARY_HEADER_SIZE],
+    /// LM 3.40+ Layer 2 scroll extension byte (SNES `$06FA00`, `SHCvvvvv`).
+    /// `$FF` when LM never installed the table (vanilla ROM); see
+    /// [`crate::level::scroll::Layer2ScrollExt`].
+    pub scroll_ext: u8,
+}
 
 #[derive(Debug, Clone)]
 pub struct SpriteHeader(pub u8);
@@ -113,75 +119,82 @@ impl SecondaryHeader {
             let byte_table = rom.slice_lorom(slice)?;
             *byte = byte_table[level_num as usize];
         }
-        Ok(Self(bytes))
+        // LM 3.40+ per-level Layer 2 scroll extension table ($06FA00, SHCvvvvv).
+        // Vanilla ROMs have $FF here (table not installed).
+        let scroll_ext = {
+            let slice = SnesSlice::new(AddrSnes(0x06FA00), 0x200);
+            let table = rom.slice_lorom(slice)?;
+            table[level_num as usize]
+        };
+        Ok(Self { bytes, scroll_ext })
     }
 
     pub fn layer2_scroll(&self) -> u8 {
         // SSSS---- -------- -------- --------
         // layer2_scroll = SSSS
-        (self.0[0] >> 4) & 0b1111
+        (self.bytes[0] >> 4) & 0b1111
     }
 
     pub fn main_entrance_xy_pos(&self) -> (u8, u8) {
         // ----YYYY -----XXX -------- --------
         // main_entrance_xy_pos = (XXX, YYYY)
-        let x = self.0[1] & 0b111;
-        let y = self.0[0] & 0b1111;
+        let x = self.bytes[1] & 0b111;
+        let y = self.bytes[0] & 0b1111;
         (x, y)
     }
 
     pub fn layer3(&self) -> u8 {
         // -------- LL------ -------- --------
         // layer3 = LL
-        (self.0[1] >> 6) & 0b11
+        (self.bytes[1] >> 6) & 0b11
     }
 
     pub fn main_entrance_mario_action(&self) -> u8 {
         // -------- --AAA--- -------- --------
         // main_entrance_mario_action = AAA
-        (self.0[1] >> 3) & 0b111
+        (self.bytes[1] >> 3) & 0b111
     }
 
     pub fn midway_entrance_screen(&self) -> u8 {
         // -------- -------- SSSS---- --------
         // midway_entrance_screen = SSSS
-        (self.0[2] >> 4) & 0b1111
+        (self.bytes[2] >> 4) & 0b1111
     }
 
     pub fn fg_initial_pos(&self) -> u8 {
         // -------- -------- ----FF-- --------
         // fg_initial_pos = FF
-        (self.0[2] >> 2) & 0b11
+        (self.bytes[2] >> 2) & 0b11
     }
 
     pub fn bg_initial_pos(&self) -> u8 {
         // -------- -------- ------BB --------
         // bg_initial_pos = BB
-        self.0[2] & 0b11
+        self.bytes[2] & 0b11
     }
 
     pub fn no_yoshi_level(&self) -> bool {
         // -------- -------- -------- Y-------
         // no_yoshi_level = Y
-        (self.0[3] >> 7) != 0
+        (self.bytes[3] >> 7) != 0
     }
 
     pub fn unknown_vertical_pos_level(&self) -> bool {
         // -------- -------- -------- -U------
         // unknown_vertical_pos_level = U
-        (self.0[3] & 0b01000000) != 0
+        (self.bytes[3] & 0b01000000) != 0
     }
 
     pub fn vertical_level(&self) -> bool {
         // -------- -------- -------- --V-----
         // vertical_level = V
-        (self.0[3] & 0b00100000) != 0
+        (self.bytes[3] & 0b00100000) != 0
     }
 
     pub fn main_entrance_screen(&self) -> u8 {
         // -------- -------- -------- ---EEEEE
         // main_entrance_screen = EEEEE
-        self.0[3] & 0b11111
+        self.bytes[3] & 0b11111
     }
 }
 

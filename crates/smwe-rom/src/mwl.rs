@@ -324,11 +324,15 @@ pub fn bg_descriptor(high_byte: u8) -> u32 {
 
 /// The 64-byte level-info section: level number `u16`, 4-byte secondary
 /// header, 1-byte flags, 4-byte midway fields, main-entrance X/Y,
-/// Layer 2 scroll-extension byte, the rest reserved (zero).
+/// LM 3.40+ extension bytes at offsets 14-17 (`$06FC00`, `$06FE00`,
+/// expanded-level-format byte, `$06FA00` Layer 2 scroll extension),
+/// the rest reserved (zero).
 pub fn encode_level_info(level_num: u16, secondary: &SecondaryHeader) -> [u8; LEVEL_INFO_SIZE] {
     let mut out = [0u8; LEVEL_INFO_SIZE];
     out[0..2].copy_from_slice(&level_num.to_le_bytes());
-    out[2..6].copy_from_slice(&secondary.0);
+    out[2..6].copy_from_slice(&secondary.bytes);
+    // Byte 17: LM 3.40+ Layer 2 scroll extension ($06FA00, SHCvvvvv).
+    out[17] = secondary.scroll_ext;
     out
 }
 
@@ -349,7 +353,8 @@ pub fn decode_level_info(section: &[u8]) -> Result<LevelInfo, MwlError> {
     sec.copy_from_slice(&section[2..6]);
     let mut raw = [0u8; LEVEL_INFO_SIZE];
     raw.copy_from_slice(section);
-    Ok(LevelInfo { level_num, secondary: SecondaryHeader(sec), raw })
+    let secondary = SecondaryHeader { bytes: sec, scroll_ext: section[17] };
+    Ok(LevelInfo { level_num, secondary, raw })
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -523,8 +528,10 @@ pub fn import_level(
     // --- Section 0: secondary header ---
     let info = decode_level_info(&mwl.sections[SECTION_LEVEL_INFO])?;
     for (i, table) in SECONDARY_HEADER_TABLES.iter().enumerate() {
-        write_snes(rom_bytes, table + target_level, &[info.secondary.0[i]], header_offset)?;
+        write_snes(rom_bytes, table + target_level, &[info.secondary.bytes[i]], header_offset)?;
     }
+    // LM 3.40+ Layer 2 scroll extension byte ($06FA00, SHCvvvvv).
+    write_snes(rom_bytes, 0x06FA00 + target_level, &[info.secondary.scroll_ext], header_offset)?;
 
     // --- Section 1: Layer 1 (5-byte primary header + object stream) ---
     {
@@ -685,12 +692,15 @@ mod tests {
 
     #[test]
     fn level_info_round_trip() {
-        let sec = SecondaryHeader([0x1A, 0x2B, 0x3C, 0x4D]);
+        let sec = SecondaryHeader { bytes: [0x1A, 0x2B, 0x3C, 0x4D], scroll_ext: 0xA5 };
         let raw = encode_level_info(0x105, &sec);
         assert_eq!(raw.len(), LEVEL_INFO_SIZE);
+        // Byte 17 carries the LM 3.40+ Layer 2 scroll extension ($06FA00).
+        assert_eq!(raw[17], 0xA5);
         let info = decode_level_info(&raw).unwrap();
         assert_eq!(info.level_num, 0x105);
-        assert_eq!(info.secondary.0, sec.0);
+        assert_eq!(info.secondary.bytes, sec.bytes);
+        assert_eq!(info.secondary.scroll_ext, 0xA5);
     }
 
     #[test]
@@ -795,7 +805,10 @@ mod tests {
         // Level info: level number + secondary header round-trip.
         let info = decode_level_info(&back.sections[SECTION_LEVEL_INFO]).unwrap();
         assert_eq!(info.level_num, 0x105);
-        assert_eq!(info.secondary.0, rom.levels[0x105].secondary_header.0);
+        assert_eq!(info.secondary.bytes, rom.levels[0x105].secondary_header.bytes);
+        // Byte 17: scroll extension ($06FA00) round-trips; vanilla ROM has $FF (uninstalled).
+        assert_eq!(info.secondary.scroll_ext, rom.levels[0x105].secondary_header.scroll_ext);
+        assert_eq!(info.secondary.scroll_ext, 0xFF);
 
         // Layer 1: 5-byte primary header + terminated object stream.
         let (d1, _, p1) = decode_section(SECTION_LAYER1, &back.sections[SECTION_LAYER1]).unwrap();
