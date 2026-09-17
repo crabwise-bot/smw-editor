@@ -19,6 +19,7 @@ mod palette_editor;
 mod properties;
 mod secondary_entrance_editor;
 mod sprite_catalog;
+mod sprite_header_editor;
 mod sprite_layer;
 mod sprite_tweaker_editor;
 mod tile_editor;
@@ -360,10 +361,28 @@ pub struct UiLevelEditor {
     exanimation:             smwe_rom::exanimation::ExAnimationData,
     exanimation_dirty:       bool,
     show_exanimation_editor: bool,
+
+    // Sprite header editor ("Change Properties in Sprite Header", LM v3.00).
+    show_sprite_header_editor: bool,
+    /// Working copy of the 1-byte sprite header (sprite memory / buoyancy /
+    /// Layer 2 interaction).
+    sprite_header_edit:        smwe_rom::level::headers::SpriteHeader,
+    /// Session-authoritative header bytes for levels edited in the dialog.
+    /// `self.rom` is never refreshed after a save, so `load_level` prefers
+    /// this map over the stale parse — otherwise a second edit after a save
+    /// would silently revert the first.
+    sprite_header_edits:       HashMap<u16, smwe_rom::level::headers::SpriteHeader>,
+    /// Working copy of the LM 3.00 per-level options (editor-native
+    /// `sprite_header_ext` RATS block). Session-authoritative like the
+    /// ExAnimation working copy: synced once from the ROM at construction,
+    /// never re-read from the (post-save stale) `self.rom`.
+    sprite_header_ext:         smwe_rom::level::sprite_header_ext::SpriteHeaderExtData,
+    sprite_header_dirty:       bool,
+
     /// Dialog state for the shared "ExAnimated Frames" window.
-    exanim_dialog:           crate::ui::exanimation_dialog::ExAnimDialog,
+    exanim_dialog:         crate::ui::exanimation_dialog::ExAnimDialog,
     /// Clean post-load VRAM snapshot the tile browser decodes from.
-    exanimation_base_vram:   Vec<u8>,
+    exanimation_base_vram: Vec<u8>,
 
     // Title screen / ending credits fixed-location data.
     title_credits:             smwe_rom::title_credits::TitleCreditsData,
@@ -413,6 +432,7 @@ impl UiLevelEditor {
         let title_credits = rom.title_credits.clone();
         let boss_text = rom.boss_text.clone();
         let exanimation = rom.exanimation.clone();
+        let sprite_header_ext = rom.sprite_header_ext.clone();
 
         let mut editor = Self {
             gl,
@@ -562,6 +582,11 @@ impl UiLevelEditor {
             exanimation,
             exanimation_dirty: false,
             show_exanimation_editor: false,
+            show_sprite_header_editor: false,
+            sprite_header_edit: smwe_rom::level::headers::SpriteHeader::new(0),
+            sprite_header_edits: HashMap::new(),
+            sprite_header_ext,
+            sprite_header_dirty: false,
             exanim_dialog: crate::ui::exanimation_dialog::ExAnimDialog::new(
                 crate::ui::exanimation_dialog::ExAnimList::Level,
             ),
@@ -599,6 +624,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.palette_editor_window(&ctx);
         self.map16_editor_window(&ctx);
         self.sprite_tweaker_editor_window(&ctx);
+        self.sprite_header_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
         self.gfx_slot_browser_window(&ctx);
         self.layer3_settings_window(&ctx);
@@ -722,6 +748,10 @@ impl DockableEditorTool for UiLevelEditor {
             // Read sprite-header byte before any possible erasure.
             let sprite_hdr =
                 *rom_bytes.get(old_file).ok_or_else(|| anyhow::anyhow!("Sprite header byte out of range"))?;
+            // "Change Properties in Sprite Header" (LM v3.00): when the
+            // dialog edited the header, write the edited byte instead of the
+            // original.
+            let sprite_hdr = if self.sprite_header_dirty { self.sprite_header_edit.as_byte() } else { sprite_hdr };
             let old_block = 1 + level.sprite_layer.as_bytes().len();
             let new_block = 1 + new_sprites.len();
 
@@ -751,6 +781,32 @@ impl DockableEditorTool for UiLevelEditor {
             rom_bytes[data_dest..data_dest + new_sprites.len()].copy_from_slice(&new_sprites);
             if dest == old_file && new_block < old_block {
                 rom_bytes[dest + new_block..dest + old_block].fill(0xFF);
+            }
+
+            // ── LM 3.00 sprite-header options ("Change Properties in Sprite
+            // Header") ── Merge the session-authoritative working copy into
+            // the editor-native RATS block. Entries removed from the working
+            // copy (both options back to default) are cleared from the ROM
+            // block too, so the block disappears again when empty.
+            if self.sprite_header_dirty {
+                use smwe_rom::level::sprite_header_ext::{SpriteHeaderExtData, SpriteHeaderExtError};
+                let mut merged = match SpriteHeaderExtData::parse(rom_bytes) {
+                    Ok(data) => data,
+                    Err(SpriteHeaderExtError::NotFound) => SpriteHeaderExtData::default(),
+                    Err(e) => return Err(anyhow::anyhow!("Sprite header options: {e}")),
+                };
+                let map_err = |e: SpriteHeaderExtError| anyhow::anyhow!("Sprite header options: {e}");
+                for (level, _) in merged.iter().collect::<Vec<_>>() {
+                    if !self.sprite_header_ext.is_custom(level) {
+                        merged.clear(level);
+                    }
+                }
+                for (level, ext) in self.sprite_header_ext.iter() {
+                    merged.set(level, ext).map_err(map_err)?;
+                }
+                merged
+                    .write_to_rom(rom_bytes, header_offset)
+                    .map_err(|e| anyhow::anyhow!("Sprite header options: {e}"))?;
             }
         }
 
@@ -1165,6 +1221,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.title_credits_dirty = false;
         self.exanimation_dirty = false;
         self.secondary_exit_ext_dirty = false;
+        self.sprite_header_dirty = false;
         let (spawn_x, spawn_y) = self.spawn_pos();
         self.initial_spawn_x = spawn_x;
         self.initial_spawn_y = spawn_y;
@@ -1255,6 +1312,16 @@ impl UiLevelEditor {
             let layer1 = EditableObjectLayer::from_level(level);
             self.layer1 = UndoableData::new(layer1);
             self.sprites = UndoableData::new(EditableSpriteLayer::from_level(level));
+            // Sprite header dialog working copy: the 1-byte vanilla header.
+            // Prefer the session-authoritative edit map: `self.rom` is not
+            // refreshed after a save, so re-reading the stale parse would
+            // revert an already-saved edit on the next level switch.
+            // The LM 3.00 options live in the session-authoritative
+            // `sprite_header_ext` working copy (synced at construction) and
+            // are intentionally not re-read here.
+            self.sprite_header_edit =
+                self.sprite_header_edits.get(&self.level_num).cloned().unwrap_or_else(|| level.sprite_header.clone());
+            self.sprite_header_dirty = false;
             let bg_bank = match &level.layer2 {
                 Layer2Data::Objects { objects, .. } => {
                     self.layer2_objects = Some(UndoableData::new(EditableObjectLayer::from_object_layer(

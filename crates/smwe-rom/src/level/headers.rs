@@ -204,10 +204,38 @@ impl SpriteHeader {
         Ok((input, Self(bytes[0])))
     }
 
+    /// Build from a raw header byte.
+    pub fn new(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    /// The raw header byte.
+    pub fn as_byte(&self) -> u8 {
+        self.0
+    }
+
+    /// Bit layout, verified against the vanilla game (`bank_05.asm`,
+    /// level-load sprite setup):
+    /// - `LDA [SpriteDataPtr] / AND #$3F -> $1692 (SpriteMemorySetting)`.
+    ///   Bits 0-5 are the sprite memory setting; vanilla levels use
+    ///   0x00-0x12 (the 19-entry `SpriteSlotMax/Start` tables, `bank_02.asm`).
+    /// - `LDA [SpriteDataPtr] / AND #$C0 -> $190E (SpriteBuoyancy)`.
+    ///   Bit 7 is buoyancy (`BEQ` test in `CODE_019211`); bit 6 disables
+    ///   Layer 2 interaction (`BIT` + `BVS` test in the sprite/L2 routine).
+    ///   Bit 5 is never set by any vanilla level (checked 2026-09-17:
+    ///   bits ever set across all 512 levels are 0,1,2,3,4,6,7).
     pub fn sprite_buoyancy(&self) -> bool {
         // B-------
         // sprite_buoyancy = B
         (self.0 & 0b10000000) != 0
+    }
+
+    pub fn set_sprite_buoyancy(&mut self, on: bool) {
+        if on {
+            self.0 |= 0b10000000;
+        } else {
+            self.0 &= !0b10000000;
+        }
     }
 
     pub fn disable_layer2_interaction(&self) -> bool {
@@ -216,9 +244,23 @@ impl SpriteHeader {
         (self.0 & 0b01000000) != 0
     }
 
+    pub fn set_disable_layer2_interaction(&mut self, on: bool) {
+        if on {
+            self.0 |= 0b01000000;
+        } else {
+            self.0 &= !0b01000000;
+        }
+    }
+
     pub fn sprite_memory(&self) -> u8 {
         // --MMMMMM
         // sprite_memory = MMMMMM
         self.0 & 0b00111111
+    }
+
+    /// Set the sprite memory setting (bits 0-5, masked to `0x3F`);
+    /// buoyancy / Layer 2 bits are preserved.
+    pub fn set_sprite_memory(&mut self, value: u8) {
+        self.0 = (self.0 & 0b11000000) | (value & 0b00111111);
     }
 }

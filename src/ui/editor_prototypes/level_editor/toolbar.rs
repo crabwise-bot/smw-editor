@@ -188,6 +188,14 @@ impl UiLevelEditor {
             if tbtn(ui, icon::WRENCH, "Sprite behavior (Sprite Header Editor)", self.show_sprite_tweaker_editor) {
                 self.show_sprite_tweaker_editor = !self.show_sprite_tweaker_editor;
             }
+            if tbtn(
+                ui,
+                icon::GHOST,
+                "Change Properties in Sprite Header (per-level sprite header: memory, buoyancy, Layer 2, LM 3.00 spawn options)",
+                self.show_sprite_header_editor,
+            ) {
+                self.show_sprite_header_editor = !self.show_sprite_header_editor;
+            }
             if tbtn(ui, icon::CHAT, "Edit message box text", self.show_message_editor) {
                 self.show_message_editor = !self.show_message_editor;
             }
