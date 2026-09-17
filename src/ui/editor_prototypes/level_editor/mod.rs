@@ -95,22 +95,31 @@ pub struct UiLevelEditor {
     anim_tick:      u64,
 
     // Editing state
-    editing_mode:            EditingMode,
-    selected_object_indices: HashSet<usize>,
-    selected_sprite_indices: HashSet<usize>,
+    editing_mode:               EditingMode,
+    selected_object_indices:    HashSet<usize>,
+    selected_sprite_indices:    HashSet<usize>,
+    /// Pointer-over-window flags (one frame stale is fine) so the level
+    /// canvas's global Ctrl+C / Ctrl+V stand down when a floating editor
+    /// window has copy intent.
+    map16_window_hovered:       bool,
+    tile_editor_window_hovered: bool,
+    /// Absolute tile coords of the last copy's selection top-left; used as
+    /// the paste anchor when the pointer isn't over the canvas (with a +1,+1
+    /// cascade so repeated pastes don't stack exactly).
+    clipboard_copy_origin:      Option<(u32, u32)>,
     /// In-progress Lunar Magic-style object drag (body move or handle resize).
     /// Transient: not part of the undoable layer; committed once on release.
-    object_drag:             Option<editing::ObjectDrag>,
+    object_drag:                Option<editing::ObjectDrag>,
     /// Set for one frame when an object drag ends with a change, so the
     /// release click doesn't also trigger click-select/tile-inspect.
-    suppress_click_select:   bool,
-    draw_object_id:          u8,
-    draw_object_settings:    u8,
-    draw_block_id:           u16,
-    draw_sprite_id:          u8,
-    draw_sprite_extra_bits:  u8,
-    edit_layer:              u8, // 1 or 2
-    edit_sprites:            bool,
+    suppress_click_select:      bool,
+    draw_object_id:             u8,
+    draw_object_settings:       u8,
+    draw_block_id:              u16,
+    draw_sprite_id:             u8,
+    draw_sprite_extra_bits:     u8,
+    edit_layer:                 u8, // 1 or 2
+    edit_sprites:               bool,
 
     // Spawn point marker
     mario_spawn_x:   u32,
@@ -329,6 +338,9 @@ impl UiLevelEditor {
             editing_mode: EditingMode::Select,
             selected_object_indices: HashSet::new(),
             selected_sprite_indices: HashSet::new(),
+            map16_window_hovered: false,
+            tile_editor_window_hovered: false,
+            clipboard_copy_origin: None,
             object_drag: None,
             suppress_click_select: false,
             draw_object_id: 0x00,

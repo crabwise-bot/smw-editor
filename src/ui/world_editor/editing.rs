@@ -11,15 +11,87 @@ use super::{
 use crate::ui::editing_mode::EditingMode;
 
 impl UiWorldEditor {
-    pub(super) fn handle_editing_interaction(&mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32) {
+    /// Copy the layer-1 tiles in the Shift+drag region (or the selected
+    /// tile) to the system clipboard as `smwclip:1:overworld-tiles:` text —
+    /// Lunar Magic v2.30's overworld clipboard flow. Does nothing (returns
+    /// false) when layer 1 isn't the active edit target or nothing is
+    /// selected.
+    pub fn ow_clipboard_copy(&mut self, ctx: &egui::Context) -> bool {
+        if self.edit_layer != 1 {
+            return false;
+        }
+        let (x0, y0, x1, y1) = match self.ow_sel_rect {
+            Some(r) => r,
+            None => match self.selected_tile {
+                Some((x, y)) => (x, y, x, y),
+                None => return false,
+            },
+        };
+        let cols = x1 - x0 + 1;
+        let rows = y1 - y0 + 1;
+        let mut ids = Vec::with_capacity((cols * rows) as usize);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                ids.push(self.source_l1_tile_at_view(x, y).unwrap_or(0));
+            }
+        }
+        crate::ui::clipboard::copy_payload(ctx, &crate::ui::clipboard::ClipboardPayload::OverworldTiles {
+            cols,
+            rows,
+            ids,
+        });
+        self.ow_copy_origin = Some((x0, y0));
+        true
+    }
+
+    /// Paste overworld layer-1 tiles from the clipboard at `anchor` (top-left
+    /// tile; falls back to the copy origin). Out-of-submap tiles are skipped.
+    /// One undo step; updates the emulated VRAM like interactive draws do.
+    pub fn ow_clipboard_paste(&mut self, text: &str, anchor: Option<(u32, u32)>) {
+        let Some(crate::ui::clipboard::ClipboardPayload::OverworldTiles { cols, rows: _, ids }) =
+            crate::ui::clipboard::ClipboardPayload::decode(text)
+        else {
+            return;
+        };
+        let (ax, ay) = anchor.or(self.ow_copy_origin).unwrap_or((0, 0));
+        let mut writes: Vec<(u32, u32, usize, u8)> = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let dx = i as u32 % cols;
+            let dy = i as u32 / cols;
+            if let Some(idx) = self.source_l1_index_for_view(ax + dx, ay + dy) {
+                writes.push((ax + dx, ay + dy, idx, *id));
+            }
+        }
+        if writes.is_empty() {
+            return;
+        }
+        self.edit_state.write(|s| {
+            for &(_, _, idx, id) in &writes {
+                if let Some(slot) = s.layer1_tiles.get_mut(idx) {
+                    *slot = id;
+                }
+            }
+        });
+        for &(x, y, _, id) in &writes {
+            self.apply_source_l1_tile_to_vram(x, y, id);
+        }
+        self.upload_tiles_from_vram();
+        self.has_edits = true;
+    }
+
+    pub(super) fn handle_editing_interaction(
+        &mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32, shift_down: bool,
+    ) {
         match self.editing_mode {
             EditingMode::Select | EditingMode::Probe => {
-                if resp.clicked_by(egui::PointerButton::Primary) {
+                if resp.clicked_by(egui::PointerButton::Primary) && !shift_down {
                     if let Some(pos) = resp.hover_pos() {
                         let rel = (pos - origin) / tile_sz;
                         let tx = rel.x.floor() as u32;
                         let ty = rel.y.floor() as u32;
                         self.selected_tile = Some((tx, ty));
+                        // A plain click replaces the clipboard region selection.
+                        self.ow_sel_rect = None;
                     }
                 }
             }

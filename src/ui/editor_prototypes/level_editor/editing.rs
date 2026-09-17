@@ -1,7 +1,194 @@
 use egui::Pos2;
 
 use super::{object_layer::EditableObject, UiLevelEditor};
-use crate::ui::editing_mode::EditingMode;
+use crate::ui::{
+    clipboard::{copy_payload, place_footprint, ClipObject, ClipSprite, ClipboardPayload},
+    editing_mode::EditingMode,
+};
+
+// ── Lunar Magic-style clipboard (v2.30: copy through the system clipboard) ──
+// The payload is `smwclip:1:` text (see `crate::ui::clipboard`), so a copy
+// can be inspected — or a tile number lifted out of it — in any text field,
+// the way LM copies "tile hex values as text".
+
+impl UiLevelEditor {
+    /// Copy the current object/sprite selection to the system clipboard.
+    /// Positions are stored relative to the selection's top-left so a paste
+    /// can anchor at the cursor; each object also carries its rendered
+    /// footprint blocks so the paste stamps identical tiles.
+    pub(super) fn clipboard_copy_selection(&mut self, ctx: &egui::Context) -> bool {
+        if self.edit_sprites {
+            let selected: Vec<super::sprite_layer::EditableSprite> = self.sprites.read(|sprites| {
+                self.selected_sprite_indices.iter().filter_map(|&i| sprites.sprites.get(i).copied()).collect()
+            });
+            if selected.is_empty() {
+                return false;
+            }
+            let min_x = selected.iter().map(|s| s.x).min().unwrap_or(0);
+            let min_y = selected.iter().map(|s| s.y).min().unwrap_or(0);
+            let sprites = selected
+                .iter()
+                .map(|s| ClipSprite {
+                    dx:         s.x as i32 - min_x as i32,
+                    dy:         s.y as i32 - min_y as i32,
+                    sprite_id:  s.sprite_id,
+                    extra_bits: s.extra_bits,
+                })
+                .collect();
+            self.clipboard_copy_origin = Some((min_x, min_y));
+            copy_payload(ctx, &ClipboardPayload::LevelObjects { objects: vec![], sprites });
+            self.mwl_status = Some(format!("Copied {} sprite(s) to clipboard", selected.len()));
+            return true;
+        }
+        if self.selected_object_indices.is_empty() {
+            return false;
+        }
+        if self.edit_layer == 2 && self.layer2_objects.is_none() {
+            // Layer-2 background mode has no object list; nothing to copy.
+            return false;
+        }
+        let Some(layer_data) = self.editing_objects() else { return false };
+        let selected: Vec<EditableObject> = layer_data
+            .read(|layer| self.selected_object_indices.iter().filter_map(|&i| layer.objects.get(i).copied()).collect());
+        if selected.is_empty() {
+            return false;
+        }
+        let min_x = selected.iter().map(|o| o.x).min().unwrap_or(0);
+        let min_y = selected.iter().map(|o| o.y).min().unwrap_or(0);
+        let mut objects = Vec::with_capacity(selected.len());
+        for o in &selected {
+            let (w, h) = object_dims(o.settings, o.is_extended);
+            let mut blocks = Vec::with_capacity((w * h) as usize);
+            for dy in 0..h {
+                for dx in 0..w {
+                    blocks.push(self.block_id_at(o.x + dx, o.y + dy).unwrap_or(0x25));
+                }
+            }
+            objects.push(ClipObject {
+                dx: o.x as i32 - min_x as i32,
+                dy: o.y as i32 - min_y as i32,
+                id: o.id,
+                settings: o.settings,
+                is_extended: o.is_extended,
+                extended_id: o.extended_id,
+                w,
+                h,
+                blocks,
+            });
+        }
+        self.clipboard_copy_origin = Some((min_x, min_y));
+        copy_payload(ctx, &ClipboardPayload::LevelObjects { objects, sprites: vec![] });
+        self.mwl_status = Some(format!("Copied {} object(s) to clipboard", selected.len()));
+        true
+    }
+
+    /// Cut = copy + delete. The object/sprite list deletion is one undoable
+    /// write; the footprint tile blanking is a direct WRAM render update (as
+    /// in the existing delete path) and isn't covered by undo.
+    pub(super) fn clipboard_cut_selection(&mut self, ctx: &egui::Context) -> bool {
+        if !self.clipboard_copy_selection(ctx) {
+            return false;
+        }
+        self.delete_selected_objects();
+        true
+    }
+
+    /// Paste a decoded payload with its selection-min anchored at `anchor`
+    /// (tile coords). The object list and sprite list each paste in one undo
+    /// step; pasted footprint blocks stamp straight into WRAM (render state,
+    /// not undoable) so the paste renders exactly like the source selection
+    /// did. Pasted entries become the new selection. Returns true when the
+    /// payload applied to this editor.
+    pub(super) fn clipboard_paste_at(
+        &mut self, payload: &ClipboardPayload, anchor: (u32, u32), level_w: u32, level_h: u32,
+    ) -> bool {
+        let ClipboardPayload::LevelObjects { objects, sprites } = payload else {
+            // Map16 tiles paste into the level through Direct Map16 access
+            // objects (LM v2.30 flow) — smw-editor has no DM16 support yet
+            // (parity audit §14), so this cross-editor direction stays
+            // unimplemented until that lands.
+            self.mwl_status =
+                Some("Clipboard holds Map16/8x8/overworld data — Direct Map16 paste isn't supported yet".to_string());
+            return false;
+        };
+        if self.edit_layer == 2 && self.layer2_objects.is_none() {
+            self.mwl_status = Some("Paste needs the Layer 1 object list (not Layer 2 background mode)".to_string());
+            return false;
+        }
+        let mut pasted_objects = 0;
+        let mut pasted_sprites = 0;
+        if !objects.is_empty() {
+            if let Some(layer_data) = self.editing_objects_mut() {
+                let mut new_objs = Vec::with_capacity(objects.len());
+                let mut stamps = Vec::with_capacity(objects.len());
+                for o in objects {
+                    let (nx, ny) = place_footprint(anchor, o.dx, o.dy, o.w, o.h, level_w, level_h);
+                    new_objs.push(EditableObject {
+                        x:           nx,
+                        y:           ny,
+                        id:          o.id,
+                        settings:    o.settings,
+                        is_extended: o.is_extended,
+                        extended_id: o.extended_id,
+                    });
+                    stamps.push((nx, ny, o.w, o.h, o.blocks.clone()));
+                }
+                let base = layer_data.write(|layer| {
+                    let base = layer.objects.len();
+                    layer.objects.extend(new_objs);
+                    base
+                });
+                self.selected_object_indices.clear();
+                self.selected_object_indices.extend(base..base + objects.len());
+                // Stamp the copied footprint blocks so the paste renders
+                // exactly like the source selection did.
+                for (nx, ny, w, h, blocks) in stamps {
+                    for dy in 0..h {
+                        for dx in 0..w {
+                            let b = blocks.get((dy * w + dx) as usize).copied().unwrap_or(0x25);
+                            self.set_block_id_at(nx + dx, ny + dy, b);
+                        }
+                    }
+                }
+                pasted_objects = objects.len();
+                self.mark_edited();
+                self.rebuild_tiles();
+            }
+        }
+        if !sprites.is_empty() {
+            let mut new_sprs = Vec::with_capacity(sprites.len());
+            for s in sprites {
+                let (nx, ny) = place_footprint(anchor, s.dx, s.dy, 1, 1, level_w, level_h);
+                new_sprs.push(super::sprite_layer::EditableSprite {
+                    x:          nx,
+                    y:          ny,
+                    sprite_id:  s.sprite_id,
+                    extra_bits: s.extra_bits,
+                });
+            }
+            let base = self.sprites.write(|layer| {
+                let base = layer.sprites.len();
+                layer.sprites.extend(new_sprs);
+                base
+            });
+            self.selected_sprite_indices.clear();
+            self.selected_sprite_indices.extend(base..base + sprites.len());
+            pasted_sprites = sprites.len();
+            self.mark_edited();
+            self.rebuild_sprite_tiles();
+        }
+        // Cascade no-cursor pastes so repeated Ctrl+V doesn't stack copies
+        // exactly on top of each other.
+        self.clipboard_copy_origin = Some((anchor.0 + 1, anchor.1 + 1));
+        self.mwl_status = Some(match (pasted_objects, pasted_sprites) {
+            (o, s) if o > 0 && s > 0 => format!("Pasted {o} object(s) and {s} sprite(s)"),
+            (o, _) if o > 0 => format!("Pasted {o} object(s)"),
+            (_, s) if s > 0 => format!("Pasted {s} sprite(s)"),
+            _ => "Nothing to paste".to_string(),
+        });
+        pasted_objects > 0 || pasted_sprites > 0
+    }
+}
 
 impl UiLevelEditor {
     pub(super) fn handle_editing_interaction(&mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32) {

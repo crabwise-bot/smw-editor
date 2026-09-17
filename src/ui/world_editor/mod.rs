@@ -26,6 +26,7 @@ use egui::{
     Frame,
     Key,
     PaintCallback,
+    Pos2,
     Rect,
     Sense,
     SidePanel,
@@ -218,13 +219,21 @@ pub struct UiWorldEditor {
 
     submap: u8,
 
-    offset:        Vec2,
-    zoom:          f32,
-    show_grid:     bool,
-    show_layer1:   bool,
-    show_layer2:   bool,
-    selected_tile: Option<(u32, u32)>,
-    needs_center:  bool,
+    offset:         Vec2,
+    zoom:           f32,
+    show_grid:      bool,
+    show_layer1:    bool,
+    show_layer2:    bool,
+    selected_tile:  Option<(u32, u32)>,
+    /// Clipboard region selection (x0, y0, x1, y1 inclusive, map16-tile
+    /// coords) for layer-1 copy/paste — LM v2.30 overworld clipboard flow.
+    /// Set by Shift+drag in Select mode on layer 1.
+    ow_sel_rect:    Option<(u32, u32, u32, u32)>,
+    /// Shift+drag anchor while a region selection is being drawn.
+    ow_drag_anchor: Option<(u32, u32)>,
+    /// Copy origin for pastes when the pointer isn't over the canvas.
+    ow_copy_origin: Option<(u32, u32)>,
+    needs_center:   bool,
 
     // Editing state
     editing_mode:          EditingMode,
@@ -333,6 +342,9 @@ impl UiWorldEditor {
             show_layer1: true,
             show_layer2: true,
             selected_tile: None,
+            ow_sel_rect: None,
+            ow_drag_anchor: None,
+            ow_copy_origin: None,
             needs_center: false,
             editing_mode: EditingMode::Select,
             draw_tile_num: 0x00,
@@ -795,6 +807,7 @@ impl UiWorldEditor {
             ui.checkbox(&mut self.show_layer1, "Show Layer 1");
             ui.checkbox(&mut self.show_layer2, "Show Layer 2");
             ui.checkbox(&mut self.show_grid, "Show Grid");
+            ui.small("Clipboard: Shift+drag on layer 1 selects a region • Ctrl+C copies • Ctrl+V pastes.");
 
             ui.separator();
             self.events_panel(ui);
@@ -1172,11 +1185,7 @@ impl UiWorldEditor {
                 vec2((view_rect.width() / z - map_px_w as f32) * 0.5, (view_rect.height() / z - map_px_h as f32) * 0.5);
         }
 
-        // ── Input ────────────────────────────────────────────────────────────
-        let is_pan = resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Primary);
-        if is_pan {
-            self.offset += resp.drag_delta() / self.zoom;
-        }
+        // ── Input handling moved below (needs the canvas origin) ──
 
         let zoom_delta = ui.input(|i| i.zoom_delta());
         let wheel_delta = ui.input(|i| i.raw_scroll_delta.y);
@@ -1205,6 +1214,42 @@ impl UiWorldEditor {
         let canvas_h = map_px_h as f32 * z;
         let origin = view_rect.min + self.offset * z;
         let ow_rect = Rect::from_min_size(origin, vec2(canvas_w, canvas_h));
+
+        // ── Input ────────────────────────────────────────────────────────────
+        // Shift+drag on layer 1 in Select mode draws a clipboard region
+        // (LM v2.30 overworld copy) instead of panning.
+        let shift = ui.input(|i| i.modifiers.shift);
+        let region_dragging = shift
+            && self.edit_layer == 1
+            && matches!(self.editing_mode, EditingMode::Select | EditingMode::Probe)
+            && resp.dragged_by(egui::PointerButton::Primary);
+        let is_pan = resp.dragged_by(egui::PointerButton::Middle)
+            || (resp.dragged_by(egui::PointerButton::Primary) && !region_dragging);
+        if is_pan {
+            self.offset += resp.drag_delta() / self.zoom;
+        }
+        if region_dragging {
+            let tile_at = |pos: Pos2| -> (u32, u32) {
+                let rel = (pos - origin) / map16_sz;
+                (
+                    rel.x.floor().clamp(0.0, map16_cols as f32 - 1.0) as u32,
+                    rel.y.floor().clamp(0.0, map16_rows as f32 - 1.0) as u32,
+                )
+            };
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pos) = resp.interact_pointer_pos().or_else(|| resp.hover_pos()) {
+                    let (ax, ay) = tile_at(pos);
+                    self.ow_drag_anchor = Some((ax, ay));
+                    self.ow_sel_rect = Some((ax, ay, ax, ay));
+                    self.selected_tile = None;
+                }
+            } else if let (Some((ax, ay)), Some(pos)) = (self.ow_drag_anchor, resp.hover_pos()) {
+                let (cx, cy) = tile_at(pos);
+                self.ow_sel_rect = Some((ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy)));
+            }
+        } else if resp.drag_stopped_by(egui::PointerButton::Primary) {
+            self.ow_drag_anchor = None;
+        }
 
         // ── GL render ────────────────────────────────────────────────────────
         {
@@ -1338,8 +1383,11 @@ impl UiWorldEditor {
 
                 if resp.clicked_by(egui::PointerButton::Primary)
                     && (self.editing_mode == EditingMode::Select || ui.input(|i| i.modifiers.alt))
+                    && !ui.input(|i| i.modifiers.shift)
                 {
                     self.selected_tile = Some((x, y));
+                    // A plain click replaces the clipboard region selection.
+                    self.ow_sel_rect = None;
                 }
 
                 painter.text(
@@ -1353,7 +1401,9 @@ impl UiWorldEditor {
         }
 
         // ── Editing interaction ─────────────────────────────────────
-        self.handle_editing_interaction(&resp, origin, map16_sz);
+        // Shift suppresses plain-click selection while a clipboard region
+        // is being drawn (see the region-select block above).
+        self.handle_editing_interaction(&resp, origin, map16_sz, shift);
 
         // ── Keyboard shortcuts ──────────────────────────────────────
         ui.input_mut(|input| {
@@ -1383,6 +1433,43 @@ impl UiWorldEditor {
                 Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 0)),
                 StrokeKind::Outside,
             );
+        }
+
+        // ── Clipboard region selection highlight ────────────────────────────
+        if let Some((x0, y0, x1, y1)) = self.ow_sel_rect {
+            let r = Rect::from_min_max(
+                origin + vec2(x0 as f32 * map16_sz, y0 as f32 * map16_sz),
+                origin + vec2((x1 + 1) as f32 * map16_sz, (y1 + 1) as f32 * map16_sz),
+            );
+            painter.rect_stroke(
+                r,
+                CornerRadius::ZERO,
+                Stroke::new(2.0_f32, Color32::from_rgb(80, 200, 255)),
+                StrokeKind::Outside,
+            );
+        }
+
+        // ── Clipboard: copy/paste overworld layer-1 tiles ───────────────
+        // Lunar Magic v2.30 lets you copy/paste between the background
+        // editor and the overworld. Ctrl+C copies the Shift+drag region (or
+        // the selected tile); paste arrives as Event::Paste directly on
+        // Ctrl+V — drain it here (a focused text widget keeps its own paste).
+        let ow_widget_focused = ui.ctx().memory(|m| m.focused().is_some());
+        if !ow_widget_focused {
+            if ui.input(|i| i.events.contains(&egui::Event::Copy)) {
+                self.ow_clipboard_copy(ui.ctx());
+            }
+            if let Some(text) = crate::ui::clipboard::take_paste_text(ui.ctx()) {
+                // Paste at the hovered tile, falling back to the copy origin.
+                let anchor = resp
+                    .hover_pos()
+                    .map(|pos| {
+                        let rel = (pos - origin) / map16_sz;
+                        (rel.x.floor().max(0.0) as u32, rel.y.floor().max(0.0) as u32)
+                    })
+                    .or(self.ow_copy_origin);
+                self.ow_clipboard_paste(&text, anchor);
+            }
         }
     }
 }

@@ -103,6 +103,27 @@ impl UiLevelEditor {
             }
             ui.separator();
 
+            // Clipboard — Lunar Magic-style cut/copy/paste through the system
+            // clipboard (Ctrl+X / Ctrl+C / Ctrl+V).
+            let can_copy = if self.edit_sprites {
+                !self.selected_sprite_indices.is_empty()
+            } else {
+                !self.selected_object_indices.is_empty()
+            };
+            let cbtn = |glyph: &str| Button::new(RichText::new(glyph).size(16.0)).min_size(vec2(30.0, 26.0));
+            if ui.add_enabled(can_copy, cbtn(icon::SCISSORS)).on_hover_text("Cut selection (Ctrl+X)").clicked() {
+                self.clipboard_cut_selection(ui.ctx());
+            }
+            if ui.add_enabled(can_copy, cbtn(icon::COPY)).on_hover_text("Copy selection (Ctrl+C)").clicked() {
+                self.clipboard_copy_selection(ui.ctx());
+            }
+            if ui.add(cbtn(icon::CLIPBOARD)).on_hover_text("Paste (Ctrl+V)").clicked() {
+                // The integration answers with Event::Paste on the next
+                // frame; central_panel picks it up (Ctrl+V arrives directly).
+                crate::ui::clipboard::request_paste(ui.ctx());
+            }
+            ui.separator();
+
             // Layer / overlay visibility toggles.
             if tbtn(ui, icon::GRID_FOUR, "Always show grid (F8)", self.always_show_grid) {
                 self.always_show_grid = !self.always_show_grid;
