@@ -1,5 +1,6 @@
 mod background_layer;
 mod bg_tilemap_editor;
+mod boss_text_editor;
 mod central_panel;
 mod editing;
 mod gfx_editor;
@@ -243,15 +244,30 @@ pub struct UiLevelEditor {
     message_text_edit:       String,
     /// Which message `message_text_edit` is synced to.
     message_text_for:        Option<usize>,
+
+    // Boss sequence text editor (global, fixed-size stripe blobs in bank $0C).
+    boss_text:                smwe_rom::boss_text::BossText,
+    boss_text_dirty:          bool,
+    show_boss_text_editor:    bool,
+    boss_text_boss:           usize,
+    boss_text_msg:            usize,
+    boss_text_edit:           String,
+    /// (boss, msg, tile-hash) the text buffer is synced to.
+    boss_text_edit_for:       Option<(usize, usize, u64)>,
+    boss_text_error:          Option<String>,
+    /// Cached raster texture for the selected message's tile strip.
+    boss_text_raster_texture: Option<egui::TextureHandle>,
+    /// (boss, msg, tile-hash) the raster texture was built for.
+    boss_text_raster_for:     Option<(usize, usize, u64)>,
     /// Hash of the message bytes the text buffer was last synced from (or
     /// successfully applied to); a mismatch means the raw byte grid changed
     /// the bytes and the text must be re-decoded.
-    message_text_bytes_hash: u64,
+    message_text_bytes_hash:  u64,
     /// Last text→bytes encode failure, shown under the text field.
-    message_text_error:      Option<String>,
+    message_text_error:       Option<String>,
     /// ROM-wide cross-reference search ("find all references") window.
-    show_xref_search:        bool,
-    xref_search:             XrefSearchState,
+    show_xref_search:         bool,
+    xref_search:              XrefSearchState,
 
     // ExAnimation (custom per-level tile/palette animation) editor.
     exanimation:             smwe_rom::exanimation::ExAnimationData,
@@ -306,6 +322,7 @@ impl UiLevelEditor {
         // text edits may not grow a message past its original span.
         let message_budgets: Vec<usize> = message_boxes.messages.iter().map(Vec::len).collect();
         let title_credits = rom.title_credits.clone();
+        let boss_text = rom.boss_text.clone();
         let exanimation = rom.exanimation.clone();
 
         let mut editor = Self {
@@ -427,6 +444,16 @@ impl UiLevelEditor {
             message_text_for: None,
             message_text_bytes_hash: 0,
             message_text_error: None,
+            boss_text,
+            boss_text_dirty: false,
+            show_boss_text_editor: false,
+            boss_text_boss: 0,
+            boss_text_msg: 0,
+            boss_text_edit: String::new(),
+            boss_text_edit_for: None,
+            boss_text_error: None,
+            boss_text_raster_texture: None,
+            boss_text_raster_for: None,
             show_xref_search: false,
             xref_search: XrefSearchState::default(),
             exanimation,
@@ -473,6 +500,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.gfx_slot_browser_window(&ctx);
         self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
+        self.boss_text_editor_window(&ctx);
         if self.show_exanimation_editor {
             let mut open = self.show_exanimation_editor;
             let changed = self.exanim_dialog.show(
@@ -863,6 +891,20 @@ impl DockableEditorTool for UiLevelEditor {
                 let [lo, hi] = offset.to_le_bytes();
                 rom_bytes[ptr_pc + i * 2] = lo;
                 rom_bytes[ptr_pc + i * 2 + 1] = hi;
+            }
+        }
+
+        // ── Boss sequence text (global, 53 fixed-location stripe blobs in bank $0C) ──
+        if self.boss_text_dirty {
+            for boss_msgs in &self.boss_text.messages {
+                for msg in boss_msgs {
+                    let pc = AddrPc::try_from_lorom(msg.snes)?.as_index() + header_offset;
+                    let bytes = msg.to_bytes();
+                    rom_bytes
+                        .get_mut(pc..pc + bytes.len())
+                        .ok_or_else(|| anyhow::anyhow!("Boss text blob ${:06X} out of range", msg.snes.0))?
+                        .copy_from_slice(&bytes);
+                }
             }
         }
 

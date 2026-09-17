@@ -1,6 +1,7 @@
 #![allow(clippy::identity_op)]
 
 pub mod block_behavior;
+pub mod boss_text;
 pub mod compression;
 pub mod exanimation;
 pub mod font_map;
@@ -25,6 +26,7 @@ pub mod xref;
 use std::{fs, path::Path};
 
 use crate::{
+    boss_text::BossText,
     exanimation::ExAnimationData,
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
@@ -60,6 +62,7 @@ pub struct SmwRom {
     pub overworld_l2_events: OverworldL2Events,
     pub sprite_tweakers:     SpriteTweakers,
     pub message_boxes:       MessageBoxes,
+    pub boss_text:           BossText,
     pub title_credits:       TitleCreditsData,
     pub exanimation:         ExAnimationData,
 }
@@ -144,6 +147,12 @@ impl SmwRom {
             TitleCreditsData::empty()
         });
 
+        log::info!("Parsing boss sequence text");
+        let boss_text = BossText::parse(&rom).unwrap_or_else(|e| {
+            log::warn!("Could not parse boss sequence text: {e}");
+            BossText { messages: vec![Vec::new(); 7] }
+        });
+
         log::info!("Parsing ExAnimation data");
         let exanimation = ExAnimationData::parse(rom.bytes()).unwrap_or_else(|e| {
             // NotFound is the normal case: a ROM nobody has authored
@@ -166,6 +175,7 @@ impl SmwRom {
             overworld_l2_events,
             sprite_tweakers,
             message_boxes,
+            boss_text,
             title_credits,
             exanimation,
         })
