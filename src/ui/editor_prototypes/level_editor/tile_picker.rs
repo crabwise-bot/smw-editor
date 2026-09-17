@@ -175,58 +175,9 @@ impl BgTilePicker {
 }
 
 /// Decode a single 8×8 SNES 4bpp tile from VRAM and write RGBA pixels.
+/// Canonical implementation lives in [`crate::render_util::render_map16_sub_tile`].
 pub(super) fn render_sub_tile(vram: &[u8], cgram: &[u8], t: u16, x0: u32, y0: u32, pixels: &mut [u8], stride: usize) {
-    let tile_num = (t & 0x3FF) as usize;
-    let pal = ((t >> 10) & 0x7) as usize;
-    let flip_x = (t & 0x4000) != 0;
-    let flip_y = (t & 0x8000) != 0;
-
-    let tile_base = tile_num * 32;
-    for ty in 0..8u32 {
-        for tx in 0..8u32 {
-            let px = if flip_x { 7 - tx } else { tx };
-            let py = if flip_y { 7 - ty } else { ty };
-            let row_off = tile_base + (py as usize) * 2;
-            if row_off + 17 >= vram.len() {
-                continue;
-            }
-            let b0 = vram[row_off];
-            let b1 = vram[row_off + 1];
-            let b2 = vram[row_off + 16];
-            let b3 = vram[row_off + 17];
-            let bit = 7 - px as usize;
-            let color_idx =
-                (((b0 >> bit) & 1) | (((b1 >> bit) & 1) << 1) | (((b2 >> bit) & 1) << 2) | (((b3 >> bit) & 1) << 3))
-                    as usize;
-
-            if color_idx == 0 {
-                continue;
-            }
-
-            let pal_idx = pal * 16 + color_idx;
-            let off_color = pal_idx * 2;
-            if off_color + 1 >= cgram.len() {
-                continue;
-            }
-            let lo = cgram[off_color] as u16;
-            let hi = cgram[off_color + 1] as u16;
-            let rgb = lo | (hi << 8);
-
-            let r = ((rgb & 0x1F) << 3) as u8;
-            let g = (((rgb >> 5) & 0x1F) << 3) as u8;
-            let b = (((rgb >> 10) & 0x1F) << 3) as u8;
-
-            let px_abs = x0 + tx;
-            let py_abs = y0 + ty;
-            let off = ((py_abs as usize) * stride + px_abs as usize) * 4;
-            if off + 3 < pixels.len() {
-                pixels[off] = r;
-                pixels[off + 1] = g;
-                pixels[off + 2] = b;
-                pixels[off + 3] = 255;
-            }
-        }
-    }
+    crate::render_util::render_map16_sub_tile(vram, cgram, t, x0, y0, pixels, stride);
 }
 
 /// Render a single Map16 block (16×16) into a 16×16 RGBA pixel buffer.

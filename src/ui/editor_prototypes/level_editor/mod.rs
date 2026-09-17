@@ -1,4 +1,5 @@
 mod background_layer;
+mod bg_tilemap_editor;
 mod central_panel;
 mod editing;
 mod gfx_editor;
@@ -37,7 +38,7 @@ use smwe_emu::{
     Cpu,
 };
 use smwe_rom::{
-    compression::{lc_lz2, lc_rle1},
+    compression::lc_lz2,
     graphics::gfx_file,
     level::{Layer2Data, Level, LAYER2_HEADER_SIZE, PRIMARY_HEADER_SIZE},
     snes_utils::addr::{AddrPc, AddrSnes},
@@ -130,6 +131,31 @@ pub struct UiLevelEditor {
     show_secondary_entrances: bool,
     show_palette_editor:      bool,
     show_map16_editor:        bool,
+    // Background tile map editor (Lunar Magic-style dedicated window)
+    show_bg_tilemap_editor:   bool,
+    bg_tool:                  bg_tilemap_editor::BgTileTool,
+    /// Brush: Map16 block number within the current background page.
+    bg_selected_tile:         u8,
+    /// Background Map16 bank ("page") 0 or 1.
+    bg_page:                  u8,
+    bg_zoom:                  f32,
+    bg_show_grid:             bool,
+    /// Selected rectangle in tilemap cells: (x, y, w, h).
+    bg_selection:             Option<(u32, u32, u32, u32)>,
+    bg_canvas_tex:            Option<egui::TextureHandle>,
+    bg_canvas_dirty:          bool,
+    bg_selector_tex:          Option<egui::TextureHandle>,
+    /// Cached BG Map16 blocks: 512 entries x 4 tile words (pages 0+1).
+    bg_block_words:           Vec<[u16; 4]>,
+    bg_status:                Option<String>,
+    bg_offset_open:           bool,
+    bg_offset_val:            i32,
+    bg_bank_open:             bool,
+    bg_bank_choice:           u8,
+    /// Page the tiles were last rematched from; set by "Change Background
+    /// Map16 Bank" so "Remap Background Tiles" can restore the graphics.
+    bg_prev_page:             Option<u8>,
+    bg_drag:                  Option<bg_tilemap_editor::BgDrag>,
 
     // Secondary entrance data (local mutable copy, 512 entries × 4 bytes)
     secondary_entrance_data:   Vec<[u8; 4]>,
@@ -326,6 +352,24 @@ impl UiLevelEditor {
             show_secondary_entrances: false,
             show_palette_editor: false,
             show_map16_editor: false,
+            show_bg_tilemap_editor: false,
+            bg_tool: bg_tilemap_editor::BgTileTool::Paint,
+            bg_selected_tile: 0,
+            bg_page: 0,
+            bg_zoom: 2.0,
+            bg_show_grid: true,
+            bg_selection: None,
+            bg_canvas_tex: None,
+            bg_canvas_dirty: true,
+            bg_selector_tex: None,
+            bg_block_words: Vec::new(),
+            bg_status: None,
+            bg_offset_open: false,
+            bg_offset_val: 16,
+            bg_bank_open: false,
+            bg_bank_choice: 0,
+            bg_prev_page: None,
+            bg_drag: None,
             secondary_entrance_data: Vec::new(),
             secondary_entrance_search: String::new(),
             palette_bg_colors: [0u16; 12],
@@ -436,6 +480,7 @@ impl DockableEditorTool for UiLevelEditor {
         }
         self.xref_search_window(&ctx);
         self.title_credits_editor_window(&ctx);
+        self.bg_tilemap_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.
         TopBottomPanel::top("level_editor.toolbar").show_inside(ui, |ui| self.toolbar(ui));
         TopBottomPanel::bottom("level_editor.status").show_inside(ui, |ui| self.status_bar(ui));
@@ -604,42 +649,20 @@ impl DockableEditorTool for UiLevelEditor {
                         rom_bytes[dest + new_block..dest + old_block].fill(0xFF);
                     }
                 }
-                (Layer2Data::Background(background), _, Some(layer2)) => {
+                (Layer2Data::Background(_background), _, Some(layer2)) => {
                     let new_bg = layer2.read(|bg| bg.tile_ids.clone());
-                    let compressed = lc_rle1::compress(&new_bg);
-                    // Background lives at bank $0C with the same 16-bit offset.
-                    let old_snes_0c = AddrSnes((l2_raw & 0x00FFFF) | 0x0C0000);
-                    let old_file = AddrPc::try_from_lorom(old_snes_0c)?.as_index() + header_offset;
-                    let old_size = background.compressed_size();
-
-                    let dest = if compressed.len() <= old_size {
-                        old_file
-                    } else {
-                        // Background data lives in bank $0C: SNES $0C8000-$0CFFFF = PC $060000-$067FFF.
-                        let bank0c_start = AddrPc::try_from_lorom(AddrSnes(0x0C8000))?.as_index();
-                        let bank0c_end = bank0c_start + 0x8000;
-                        let pc =
-                            find_free_space_in(rom_bytes, compressed.len(), bank0c_start, bank0c_end, header_offset)
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "No free space in bank $0C for level {:03X} layer 2 bg ({} bytes)",
-                                        self.level_num,
-                                        compressed.len()
-                                    )
-                                })?;
-                        rom_bytes[old_file..old_file + old_size].fill(0xFF);
-                        // Pointer stores bank $FF with the same 16-bit offset used in bank $0C.
-                        let new_snes_0c = AddrSnes::try_from_lorom(AddrPc(pc as u32))?;
-                        let new_ptr = (0xFF0000u32) | (new_snes_0c.0 & 0x00FFFF);
-                        let b = new_ptr.to_le_bytes();
-                        rom_bytes[ptr_off..ptr_off + 3].copy_from_slice(&b[..3]);
-                        pc + header_offset
-                    };
-
-                    rom_bytes[dest..dest + compressed.len()].copy_from_slice(&compressed);
-                    if dest == old_file && compressed.len() < old_size {
-                        rom_bytes[dest + compressed.len()..dest + old_size].fill(0xFF);
-                    }
+                    // Bank-aware write: reuses the old location when the data
+                    // fits and the bank is unchanged; otherwise repoints into
+                    // free space on the correct side of the $E8FE boundary so
+                    // the game fills the matching tilemap high byte.
+                    smwe_rom::level::background::write_background_to_rom(
+                        rom_bytes,
+                        level_idx as u32,
+                        &new_bg,
+                        self.bg_page,
+                        header_offset,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Layer 2 background: {e}"))?;
                 }
                 _ => {}
             }
@@ -970,19 +993,39 @@ impl UiLevelEditor {
             let layer1 = EditableObjectLayer::from_level(level);
             self.layer1 = UndoableData::new(layer1);
             self.sprites = UndoableData::new(EditableSpriteLayer::from_level(level));
-            match &level.layer2 {
+            let bg_bank = match &level.layer2 {
                 Layer2Data::Objects { objects, .. } => {
                     self.layer2_objects = Some(UndoableData::new(EditableObjectLayer::from_object_layer(
                         objects,
                         level.secondary_header.vertical_level(),
                     )));
                     self.layer2_background = None;
+                    None
                 }
                 Layer2Data::Background(bg) => {
                     self.layer2_objects = None;
+                    let bank = bg.high_byte();
                     self.layer2_background =
                         Some(UndoableData::new(EditableBackgroundLayer::new(bg.tile_ids().to_vec())));
+                    Some(bank)
                 }
+            };
+            // The background tile map editor follows the parsed Map16 bank and
+            // starts with a clean selection/status each level.
+            if let Some(bank) = bg_bank {
+                self.bg_page = bank;
+                self.bg_selection = None;
+                self.bg_drag = None;
+                self.bg_status = None;
+                self.bg_offset_open = false;
+                self.bg_bank_open = false;
+                self.bg_prev_page = None;
+                self.bg_canvas_dirty = true;
+                self.bg_selector_tex = None;
+                self.bg_block_words = Self::bg_map16_block_words(&mut self.cpu);
+            } else {
+                self.show_bg_tilemap_editor = false;
+                self.bg_block_words.clear();
             }
             (level.sprite_layer.clone(), level.secondary_header.vertical_level())
         };
