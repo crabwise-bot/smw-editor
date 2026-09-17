@@ -8,6 +8,7 @@
 
 pub mod event_ownership;
 pub mod level_names;
+pub mod sprites;
 
 use crate::snes_utils::{
     addr::{AddrPc, AddrSnes},
