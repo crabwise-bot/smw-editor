@@ -215,3 +215,105 @@ pub fn read_color(cgram: &[u8], idx: usize) -> [u8; 3] {
     let rgb = lo | (hi << 8);
     [((rgb & 0x1F) << 3) as u8, (((rgb >> 5) & 0x1F) << 3) as u8, (((rgb >> 10) & 0x1F) << 3) as u8]
 }
+
+// ── Background tile map editor ───────────────────────────────────────────────
+
+/// Canvas size of the background tile map editor (32x27 cells of 16x16 px).
+pub const BG_TILEMAP_CANVAS_W: u32 = 512;
+pub const BG_TILEMAP_CANVAS_H: u32 = 432;
+
+/// Decode a single 8×8 SNES 4bpp tile from VRAM and write RGBA pixels.
+/// The palette and flip bits come from the tile word `t`, as Map16 stores
+/// them. Canonical version of the helper that lived in the tile picker.
+pub fn render_map16_sub_tile(vram: &[u8], cgram: &[u8], t: u16, x0: u32, y0: u32, pixels: &mut [u8], stride: usize) {
+    let tile_num = (t & 0x3FF) as usize;
+    let pal = ((t >> 10) & 0x7) as usize;
+    let flip_x = (t & 0x4000) != 0;
+    let flip_y = (t & 0x8000) != 0;
+
+    let tile_base = tile_num * 32;
+    for ty in 0..8u32 {
+        for tx in 0..8u32 {
+            let px = if flip_x { 7 - tx } else { tx };
+            let py = if flip_y { 7 - ty } else { ty };
+            let row_off = tile_base + (py as usize) * 2;
+            if row_off + 17 >= vram.len() {
+                continue;
+            }
+            let b0 = vram[row_off];
+            let b1 = vram[row_off + 1];
+            let b2 = vram[row_off + 16];
+            let b3 = vram[row_off + 17];
+            let bit = 7 - px as usize;
+            let color_idx =
+                (((b0 >> bit) & 1) | (((b1 >> bit) & 1) << 1) | (((b2 >> bit) & 1) << 2) | (((b3 >> bit) & 1) << 3))
+                    as usize;
+
+            if color_idx == 0 {
+                continue;
+            }
+
+            let rgb = read_color(cgram, pal * 16 + color_idx);
+            let px_abs = x0 + tx;
+            let py_abs = y0 + ty;
+            let off = ((py_abs as usize) * stride + px_abs as usize) * 4;
+            if off + 3 < pixels.len() {
+                pixels[off] = rgb[0];
+                pixels[off + 1] = rgb[1];
+                pixels[off + 2] = rgb[2];
+                pixels[off + 3] = 255;
+            }
+        }
+    }
+}
+
+/// Render a legacy 32×27 background tilemap (`tiles`: Map16 block IDs within
+/// `page`) to a 512×432 RGBA image using the level's real BG Map16 table,
+/// VRAM and CGRAM. Tile 0 is the editor's erase tile and shows the backdrop
+/// color (CGRAM index 0), matching the main level view.
+pub fn render_bg_tilemap(tiles: &[u8], page: u8, block_words: &[[u16; 4]], vram: &[u8], cgram: &[u8]) -> Vec<u8> {
+    use smwe_rom::level::background::{bg_cell_pos, BG_TILEMAP_LEN};
+    let (w, h) = (BG_TILEMAP_CANVAS_W as usize, BG_TILEMAP_CANVAS_H as usize);
+    let mut pixels = vec![0u8; w * h * 4];
+    let bd = read_color(cgram, 0);
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = bd[0];
+        px[1] = bd[1];
+        px[2] = bd[2];
+        px[3] = 255;
+    }
+    let page = (page.min(1) as usize) * 256;
+    // Same quadrant order as the BG tile picker.
+    let sub = [(0u32, 0u32), (0, 8), (8, 0), (8, 8)];
+    for (idx, &tile) in tiles.iter().enumerate().take(BG_TILEMAP_LEN) {
+        if tile == 0 {
+            continue;
+        }
+        let Some((col, row)) = bg_cell_pos(idx) else { continue };
+        let words = block_words.get(page + tile as usize).copied().unwrap_or([0; 4]);
+        let (x0, y0) = (col * 16, row * 16);
+        for (k, (dx, dy)) in sub.iter().enumerate() {
+            render_map16_sub_tile(vram, cgram, words[k], x0 + dx, y0 + dy, &mut pixels, w);
+        }
+    }
+    pixels
+}
+
+/// Read all 512 BG Map16 blocks (pages 0+1) as 4 tile words each, straight
+/// from the ROM. `lm_bg_map16_base` is side-effecting, so it runs on a
+/// scratch CPU clone; the words themselves are pure ROM data.
+pub fn bg_map16_block_words(cpu: &mut Cpu) -> Vec<[u16; 4]> {
+    let mut scratch = cpu.clone();
+    let map16_bg = smwe_emu::emu::lm_bg_map16_base(&mut scratch)
+        .unwrap_or_else(|| scratch.mem.cart.resolve("Map16BGTiles").unwrap_or(0));
+    let mut words = vec![[0u16; 4]; 512];
+    for block in 0..512u32 {
+        let block_ptr = map16_bg + block * 8;
+        for k in 0..4u32 {
+            let lo = scratch.mem.cart.read(block_ptr + k * 2).unwrap_or(0);
+            let hi = scratch.mem.cart.read(block_ptr + k * 2 + 1).unwrap_or(0);
+            words[block as usize][k as usize] = lo as u16 | ((hi as u16) << 8);
+        }
+    }
+    words
+}

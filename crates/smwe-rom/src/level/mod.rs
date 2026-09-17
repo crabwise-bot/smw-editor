@@ -13,6 +13,7 @@ pub use self::{
 };
 use crate::{
     compression::DecompressionError,
+    level::background::bg_high_byte_for_pointer,
     snes_utils::{
         addr::AddrSnes,
         rom::{parse_bytes, Rom},
@@ -131,7 +132,12 @@ impl Level {
 
         if l2_ptr.bank() == 0xFF {
             let bytes = rom.slice_from(l2_ptr.with_bank(0x0C)).map_err(LevelParseError::Layer2Isolate)?;
-            let (background, _) = BackgroundData::read_from(bytes).map_err(LevelParseError::Layer2BackgroundRead)?;
+            let (mut background, _) =
+                BackgroundData::read_from(bytes).map_err(LevelParseError::Layer2BackgroundRead)?;
+            // The game's Map16 bank for this background comes from the
+            // pointer itself (bank_05.asm CODE_058126): below $0CE8FE is
+            // page 0, at/above is page 1.
+            background.set_high_byte(bg_high_byte_for_pointer(l2_ptr.0));
             Ok(Layer2Data::Background(background))
         } else {
             let header_slice = SnesSlice::new(l2_ptr, LAYER2_HEADER_SIZE);

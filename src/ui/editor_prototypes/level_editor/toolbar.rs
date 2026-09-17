@@ -125,6 +125,20 @@ impl UiLevelEditor {
             if tbtn(ui, icon::GRID_NINE, "Edit 16×16 tile map (Map16)", self.show_map16_editor) {
                 self.show_map16_editor = !self.show_map16_editor;
             }
+            {
+                // Dedicated WYSIWYG background editor; only for levels with a
+                // legacy Layer 2 background.
+                let has_bg = self.layer2_background.is_some();
+                let btn = Button::new(RichText::new(icon::PANORAMA).size(16.0)).min_size(vec2(30.0, 26.0));
+                let btn = if self.show_bg_tilemap_editor { btn.fill(ACTIVE_FILL) } else { btn };
+                if ui
+                    .add_enabled(has_bg, btn)
+                    .on_hover_text("Background Tile Map Editor (dedicated Layer 2 background window, like Lunar Magic)")
+                    .clicked()
+                {
+                    self.show_bg_tilemap_editor = !self.show_bg_tilemap_editor;
+                }
+            }
             if tbtn(ui, icon::IMAGE, "Edit 8×8 tiles (GFX / ExGFX)", self.show_gfx_editor) {
                 self.show_gfx_editor = !self.show_gfx_editor;
             }

@@ -31,6 +31,7 @@ smwe-ips = { path = "crates/smwe-ips" }
 
 anyhow = "1.0"
 ab_glyph = "0.2"
+arboard = "3.3"
 duplicate = "1.0"
 eframe = "0.31.1"
 egui = { version = "0.31.1", features = ["serde"] }

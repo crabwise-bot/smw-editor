@@ -89,9 +89,9 @@ pub const SECTION_PREFIX_SIZE: usize = 8;
 
 /// Bank byte marking a Layer 2 source address as a background tilemap.
 pub const LAYER2_BG_BANK: u8 = 0xFF;
-/// Pointer value (low 16 bits) at/above which the game fills the background
-/// high-byte plane with page 1 instead of page 0.
-pub const LAYER2_BG_HIGH_BOUNDARY: u16 = 0xE8FE;
+// The background Map16 bank boundary and pointer→bank helper live with the
+// background tilemap model; re-exported here for existing users.
+pub use crate::level::background::{bg_high_byte_for_pointer, LAYER2_BG_HIGH_BOUNDARY};
 
 /// Decompressed size of a legacy Layer 2 background's low-byte plane.
 pub const BG_LEGACY_LEN: usize = 0x360;
@@ -304,17 +304,6 @@ pub fn bg_words_to_legacy(words: &[u16; BG_WORD_COUNT]) -> Result<([u8; BG_LEGAC
         entries[0x1B0 + i] = (words[0x200 + i] & 0xFF) as u8;
     }
     Ok((entries, high_byte))
-}
-
-/// The shared high byte the game selects for a legacy Layer 2 background
-/// pointer: page 1 when the pointer is at/above `$E8FE` in bank `$0C`
-/// (i.e. `$FF:E8FE` before redirection), page 0 below it.
-pub fn bg_high_byte_for_pointer(ptr: u32) -> u8 {
-    if (ptr & 0xFFFF) as u16 >= LAYER2_BG_HIGH_BOUNDARY {
-        1
-    } else {
-        0
-    }
 }
 
 /// The Layer 2 section descriptor for a legacy background: `$08` with the
