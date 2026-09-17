@@ -29,7 +29,7 @@ use crate::{
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
     level::{
-        secondary_entrance::{SecondaryEntrance, SECONDARY_ENTRANCE_TABLE},
+        secondary_entrance::{SecondaryEntrance, SecondaryExitExtData, SECONDARY_ENTRANCE_TABLE},
         Level,
         LEVEL_COUNT,
     },
@@ -62,6 +62,7 @@ pub struct SmwRom {
     pub message_boxes:       MessageBoxes,
     pub title_credits:       TitleCreditsData,
     pub exanimation:         ExAnimationData,
+    pub secondary_exit_ext:  SecondaryExitExtData,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -154,6 +155,16 @@ impl SmwRom {
             ExAnimationData::default()
         });
 
+        log::info!("Parsing secondary-exit extended data");
+        let secondary_exit_ext = SecondaryExitExtData::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has authored
+            // extended secondary-exit options for yet simply has no block.
+            if !matches!(e, level::secondary_entrance::SecExitExtError::NotFound) {
+                log::warn!("Could not parse secondary-exit extended data: {e}");
+            }
+            SecondaryExitExtData::default()
+        });
+
         Ok(Self {
             rom,
             internal_header,
@@ -168,6 +179,7 @@ impl SmwRom {
             message_boxes,
             title_credits,
             exanimation,
+            secondary_exit_ext,
         })
     }
 

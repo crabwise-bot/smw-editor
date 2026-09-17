@@ -11,6 +11,7 @@
 
 mod editing;
 mod ow_tile_picker;
+mod se_teleport_editor;
 
 use std::{
     collections::HashMap,
@@ -297,6 +298,15 @@ pub struct UiWorldEditor {
     /// Editor animation tick counter (one per ~133ms animated-tile tick);
     /// drives the overworld ExAnimation preview stepping.
     exanim_tick:             u64,
+    // Secondary-exit Star/Pipe teleport table (LM v3.00 parity): 0x100
+    // overworld destinations for secondary exits that exit to the overworld.
+    // Stored in the editor's RATS block (`SMWESEX2`); the level editor owns
+    // the per-entrance options half of that block.
+    se_teleports: [smwe_rom::level::secondary_entrance::OwTeleportEntry;
+        smwe_rom::level::secondary_entrance::OW_TELEPORT_TABLE_LEN],
+    se_teleports_dirty:      bool,
+    show_se_teleport_editor: bool,
+    se_teleport_search:      String,
     /// Clean post-load VRAM snapshot the ExAnimation tile browser decodes from.
     exanimation_base_vram:   Vec<u8>,
     /// Bumped on every submap load so the tile-browser atlas rebuilds.
@@ -330,6 +340,9 @@ impl UiWorldEditor {
             });
         // Overworld ExAnimation data rides along on the ROM (RATS block).
         let exanimation = rom.exanimation.clone();
+        // Secondary-exit Star/Pipe teleport table rides along on the ROM
+        // (same editor RATS block the level editor's exit options use).
+        let se_teleports = rom.secondary_exit_ext.teleport_table;
         let mut editor = Self {
             gl,
             rom,
@@ -378,6 +391,10 @@ impl UiWorldEditor {
             exanim_tick: 0,
             exanimation_base_vram: Vec::new(),
             exanim_vram_gen: 0,
+            se_teleports,
+            se_teleports_dirty: false,
+            show_se_teleport_editor: false,
+            se_teleport_search: String::new(),
         };
         editor.load_submap();
         editor
@@ -450,6 +467,7 @@ impl DockableEditorTool for UiWorldEditor {
                 self.has_edits = true;
             }
         }
+        self.se_teleport_editor_window(ui.ctx());
     }
 
     fn on_closed(&mut self) {
@@ -464,6 +482,7 @@ impl DockableEditorTool for UiWorldEditor {
         self.has_edits = false;
         self.event_ownership_dirty = false;
         self.exanimation_dirty = false;
+        self.se_teleports_dirty = false;
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -589,6 +608,24 @@ impl DockableEditorTool for UiWorldEditor {
             merged
                 .write_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Overworld ExAnimation write failed: {e}"))?;
+        }
+
+        // ── Secondary-exit Star/Pipe teleport table (LM v3.00) ───────────────
+        // Same editor RATS block the level editor's per-entrance options use.
+        // Merge on save: re-read the block and replace only the teleport
+        // table so this tab's (possibly stale) copy of the exit options is
+        // never clobbered.
+        if self.se_teleports_dirty {
+            use smwe_rom::level::secondary_entrance::{SecExitExtError, SecondaryExitExtData};
+            let mut merged = match SecondaryExitExtData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(SecExitExtError::NotFound) => SecondaryExitExtData::default(),
+                Err(e) => anyhow::bail!("Secondary-exit teleport-table read failed: {e}"),
+            };
+            merged.teleport_table = self.se_teleports;
+            merged
+                .write_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Secondary-exit teleport-table write failed: {e}"))?;
         }
 
         Ok(())
@@ -821,6 +858,13 @@ impl UiWorldEditor {
                 self.show_exanimation_editor = true;
             }
             ui.small("Custom overworld tile/palette animation, live in the view.");
+
+            // ── Secondary-exit teleport locations (LM v3.00 parity) ──────
+            ui.separator();
+            if ui.button("Secondary Exit Teleports…").clicked() {
+                self.show_se_teleport_editor = true;
+            }
+            ui.small("Star/Pipe table: where exit-to-overworld secondary exits place the player.");
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();

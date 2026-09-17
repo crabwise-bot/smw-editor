@@ -167,8 +167,18 @@ pub struct UiLevelEditor {
     bg_drag:                  Option<bg_tilemap_editor::BgDrag>,
 
     // Secondary entrance data (local mutable copy, 512 entries × 4 bytes)
-    secondary_entrance_data:   Vec<[u8; 4]>,
-    secondary_entrance_search: String,
+    secondary_entrance_data:     Vec<[u8; 4]>,
+    secondary_entrance_search:   String,
+    // LM v3.00 extended secondary-exit options (local mutable copy of the
+    // editor-owned RATS block; indices 0..0x2000 options, 0x200..0x2000
+    // extended entries, 0x100 OW teleport table).
+    secondary_exit_ext:          smwe_rom::level::secondary_entrance::SecondaryExitExtData,
+    secondary_exit_ext_dirty:    bool,
+    // Entrance selected for the extended-options panel (0x000..0x1FFF;
+    // LM v2.50 type-full-values index combo).
+    selected_secondary_entrance: u16,
+    // Hex text of the "go to entrance" field.
+    se_goto_text:                String,
 
     // Palette editor (12 ABGR1555 colors per group, stored as raw u16)
     palette_bg_colors:      [u16; 12],
@@ -384,6 +394,10 @@ impl UiLevelEditor {
             bg_drag: None,
             secondary_entrance_data: Vec::new(),
             secondary_entrance_search: String::new(),
+            secondary_exit_ext: smwe_rom::level::secondary_entrance::SecondaryExitExtData::default(),
+            secondary_exit_ext_dirty: false,
+            selected_secondary_entrance: 0,
+            se_goto_text: String::new(),
             palette_bg_colors: [0u16; 12],
             palette_fg_colors: [0u16; 12],
             palette_sprite_colors: [0u16; 12],
@@ -741,6 +755,25 @@ impl DockableEditorTool for UiLevelEditor {
             }
         }
 
+        // ── Secondary-exit extended options (LM v3.00, editor RATS block) ──
+        // Single RATS-tagged free-space block, shared with the world-map
+        // editor's teleport-table edits. Merge on save: re-read the block and
+        // replace only this tab's pieces (per-entrance options + extended
+        // entries) so a stale teleport-table copy is never clobbered.
+        if self.secondary_exit_ext_dirty {
+            use smwe_rom::level::secondary_entrance::{SecExitExtError, SecondaryExitExtData};
+            let mut merged = match SecondaryExitExtData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(SecExitExtError::NotFound) => SecondaryExitExtData::default(),
+                Err(e) => anyhow::bail!("Secondary-exit extended-data read failed: {e}"),
+            };
+            merged.options = self.secondary_exit_ext.options.clone();
+            merged.extended_entries = self.secondary_exit_ext.extended_entries.clone();
+            merged
+                .write_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Secondary-exit extended-data write failed: {e}"))?;
+        }
+
         // ── Sprite tweaker bytes (global, $07F26C/$07F335/$07F3FE/$07F4C7/$07F590/$07F659) ──
         if self.sprite_tweakers_dirty {
             let tables = [
@@ -959,6 +992,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.palette_dirty = false;
         self.title_credits_dirty = false;
         self.exanimation_dirty = false;
+        self.secondary_exit_ext_dirty = false;
         self.initial_spawn_x = self.mario_spawn_x;
         self.initial_spawn_y = self.mario_spawn_y;
     }
@@ -1109,6 +1143,9 @@ impl UiLevelEditor {
 
         // ── Secondary entrance data ──────────────────────────────────────────
         self.secondary_entrance_data = self.rom.secondary_entrances.iter().map(|se| se.bytes()).collect();
+        // ── Secondary-exit extended options (LM v3.00, editor RATS block) ──
+        self.secondary_exit_ext = self.rom.secondary_exit_ext.clone();
+        self.secondary_exit_ext_dirty = false;
 
         // ── Palette data ─────────────────────────────────────────────────────
         {
