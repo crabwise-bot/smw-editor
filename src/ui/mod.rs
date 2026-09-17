@@ -1,6 +1,7 @@
 mod dev_utils;
 mod editing_mode;
 mod editor_prototypes;
+mod exanimation_dialog;
 mod style;
 mod tab_viewer;
 mod tool;

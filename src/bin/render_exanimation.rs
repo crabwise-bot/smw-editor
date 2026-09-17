@@ -1,14 +1,19 @@
 //! Headless ExAnimation preview renderer.
 //!
-//! Loads a level through the real emulator path, applies a demo (or
-//! CLI-specified) [`smwe_rom::exanimation::ExAnimation`] one tick per output
-//! frame, and writes PNGs. Assemble them into a GIF with PIL
+//! Loads a level (or an overworld map) through the real emulator path, applies
+//! a demo (or CLI-specified) [`smwe_rom::exanimation::ExAnimation`] one tick
+//! per output frame, and writes PNGs. Assemble them into a GIF with PIL
 //! (`duration=133, loop=0`) for PR screenshots.
 //!
-//! Usage:
+//! Usage (level):
 //!   render_exanimation --level=0x105 --rom=smw.smc --out=/tmp/exanim --frames=8 \
 //!     --line=0x1000:0x2000,0x2010,0x2020 --palrot=0x00:0x7C1F,0x03E0
 //!   render_exanimation --dump-atlas=/tmp/vram_atlas.png --level=0x105 --rom=smw.smc
+//!
+//! Usage (overworld — the overworld ExAnimation list, LM v2.40 parity):
+//!   render_exanimation --overworld --submap=0 --rom=smw.smc --out=/tmp/owexanim --frames=8 \
+//!     --line=0x1000:0x2000,0x2010 --palrot=0x40:0x7C1F,0x03E0,0x001F
+//!   render_exanimation --overworld --submap=0 --rom=smw.smc --dump-atlas=/tmp/ow_atlas.png
 //!
 //! `--line=DEST:S0,S1,...` adds a Line8x8 frame: each step copies one 8x8
 //! tile's graphics from the listed VRAM word addresses to DEST.
@@ -17,12 +22,18 @@
 use std::{env, path::Path, sync::Arc};
 
 use image::{ImageBuffer, Rgb};
-use smw_editor::render_util::{read_color, render_layer};
+use smw_editor::render_util::{read_color, render_layer, render_tile};
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
 use smwe_rom::{
     exanimation::{apply_tick, ExAnimFrame, ExAnimFrameKind, ExAnimTrigger, ExAnimation},
     graphics::gfx_file::Tile,
 };
+
+/// Overworld BG tilemap geometry (mirrors render_ow_submap).
+const VRAM_L1_TILEMAP_BASE: usize = 0x2000 * 2;
+const VRAM_L2_TILEMAP_BASE: usize = 0x3000 * 2;
+const OW_COLS: u32 = 64;
+const OW_ROWS: u32 = 64;
 
 fn hex(s: &str) -> u16 {
     u16::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches('$'), 16).unwrap_or(0)
@@ -30,7 +41,9 @@ fn hex(s: &str) -> u16 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let overworld = args.iter().any(|a| a == "--overworld");
     let level = args.iter().find_map(|a| a.strip_prefix("--level=")).map(|s| hex(s)).unwrap_or(0x105);
+    let submap = args.iter().find_map(|a| a.strip_prefix("--submap=")).and_then(|s| s.parse().ok()).unwrap_or(0);
     let rom_path =
         args.iter().find_map(|a| a.strip_prefix("--rom=")).map(Path::new).unwrap_or_else(|| Path::new("smw.smc"));
     let out_dir = args.iter().find_map(|a| a.strip_prefix("--out=")).unwrap_or("/tmp/exanim");
@@ -43,11 +56,20 @@ fn main() {
     emu_rom.load_symbols(include_str!("../../symbols/SMW_U.sym"));
     let mut cpu = Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
 
-    smwe_emu::emu::decompress_sublevel(&mut cpu, level);
-    smwe_emu::emu::fetch_anim_frame(&mut cpu);
+    if overworld {
+        smwe_emu::emu::load_overworld(&mut cpu, submap);
+    } else {
+        smwe_emu::emu::decompress_sublevel(&mut cpu, level);
+        smwe_emu::emu::fetch_anim_frame(&mut cpu);
+    }
 
     if let Some(atlas_path) = args.iter().find_map(|a| a.strip_prefix("--dump-atlas=")) {
         dump_vram_atlas(&cpu, atlas_path);
+        return;
+    }
+
+    if let Some(cgram_path) = args.iter().find_map(|a| a.strip_prefix("--dump-cgram=")) {
+        dump_cgram(&cpu, cgram_path);
         return;
     }
 
@@ -87,14 +109,23 @@ fn main() {
     }
     let anim = ExAnimation { frames, disable_original: false };
 
+    std::fs::create_dir_all(out_dir).expect("create out dir");
+    if overworld {
+        render_overworld_frames(&mut cpu, &anim, nframes, out_dir);
+    } else {
+        render_level_frames(&mut cpu, &anim, nframes, out_dir);
+    }
+}
+
+/// Render the level path (original behavior): full level render per tick.
+fn render_level_frames(cpu: &mut Cpu, anim: &ExAnimation, nframes: usize, out_dir: &str) {
     let vertical = cpu.mem.load_u8(0x5B) & 1 != 0;
     let (width, height) = if vertical { (32 * 16, 28 * 16 * 16) } else { (32 * 16 * 16, 27 * 16) };
     // Render at full width (render_layer maps tilemap pixels 1:1 into the
     // buffer); crop down to GIF size afterwards with PIL.
 
-    std::fs::create_dir_all(out_dir).expect("create out dir");
     for i in 0..nframes {
-        apply_tick(&anim, i as u64, &mut cpu.mem.vram, &mut cpu.mem.cgram);
+        apply_tick(anim, i as u64, &mut cpu.mem.vram, &mut cpu.mem.cgram);
         let mut pixels = vec![0u8; (width * height * 3) as usize];
         {
             let backdrop = read_color(&cpu.mem.cgram, 0);
@@ -102,12 +133,87 @@ fn main() {
                 px.copy_from_slice(&backdrop);
             }
         }
-        render_layer(&mut cpu, true, width, &mut pixels);
-        render_layer(&mut cpu, false, width, &mut pixels);
+        render_layer(cpu, true, width, &mut pixels);
+        render_layer(cpu, false, width, &mut pixels);
         let path = format!("{out_dir}/frame_{i:02}.png");
         ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, pixels).expect("image buffer").save(&path).unwrap();
         println!("wrote {path}");
     }
+}
+
+/// Render the overworld path: advance the vanilla OW animation, then the
+/// custom overworld ExAnimation list, and render the composed BG tilemaps.
+fn render_overworld_frames(cpu: &mut Cpu, anim: &ExAnimation, nframes: usize, out_dir: &str) {
+    let l2_scroll_x = i16::from_le_bytes(cpu.mem.load_u16(0x001E).to_le_bytes()) as i32;
+    let l2_scroll_y = i16::from_le_bytes(cpu.mem.load_u16(0x0020).to_le_bytes()) as i32;
+    const W: u32 = 512;
+    for i in 0..nframes {
+        smwe_emu::emu::advance_ow_anim_frame(cpu);
+        apply_tick(anim, i as u64, &mut cpu.mem.vram, &mut cpu.mem.cgram);
+        let mut pixels = vec![0u8; (W * W * 3) as usize];
+        render_bg(&cpu.mem.vram, VRAM_L2_TILEMAP_BASE, l2_scroll_x, l2_scroll_y, &cpu.mem.cgram, &mut pixels);
+        render_bg(&cpu.mem.vram, VRAM_L1_TILEMAP_BASE, l2_scroll_x, l2_scroll_y, &cpu.mem.cgram, &mut pixels);
+        let path = format!("{out_dir}/frame_{i:02}.png");
+        ImageBuffer::<Rgb<u8>, _>::from_raw(W, W, pixels).expect("image buffer").save(&path).unwrap();
+        println!("wrote {path}");
+    }
+}
+
+/// Overworld BG render (same tilemap walk as render_ow_submap's `render_bg`).
+fn render_bg(vram: &[u8], tilemap_base: usize, scroll_x: i32, scroll_y: i32, cgram: &[u8], pixels: &mut [u8]) {
+    for row in 0..OW_ROWS {
+        for col in 0..OW_COLS {
+            let addr = tilemap_vram_addr(tilemap_base, col, row);
+            let t0 = vram[addr] as u16;
+            let t1 = vram[addr + 1] as u16;
+            let x = (col * 8) as i32 - scroll_x;
+            let y = (row * 8) as i32 - scroll_y;
+            if x <= -8 || y <= -8 || x >= 512 || y >= 512 {
+                continue;
+            }
+            render_tile(
+                vram,
+                cgram,
+                (t0 | ((t1 & 3) << 8)) as usize,
+                ((t1 >> 2) & 7) as usize,
+                (t1 & 0x40) != 0,
+                (t1 & 0x80) != 0,
+                x.max(0) as u32,
+                y.max(0) as u32,
+                512,
+                pixels,
+            );
+        }
+    }
+}
+
+fn tilemap_vram_addr(base: usize, col: u32, row: u32) -> usize {
+    let quadrant = ((row / 32) * 2) + (col / 32);
+    let sub_row = row % 32;
+    let sub_col = col % 32;
+    base + (quadrant as usize * 1024 + sub_row as usize * 32 + sub_col as usize) * 2
+}
+
+/// Dump the 256 CGRAM colors as a labeled strip (16 colors per row = 16
+/// palette rows), for picking palette-frame destinations.
+fn dump_cgram(cpu: &Cpu, path: &str) {
+    const CELL: u32 = 16;
+    let w = 16 * CELL;
+    let h = 16 * (CELL + 8);
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w, h);
+    for row in 0..16u32 {
+        for col in 0..16u32 {
+            let idx = (row * 16 + col) as usize;
+            let c = read_color(&cpu.mem.cgram, idx);
+            for y in 0..CELL {
+                for x in 0..CELL {
+                    img.put_pixel(col * CELL + x, row * (CELL + 8) + y, Rgb(c));
+                }
+            }
+        }
+    }
+    img.save(path).expect("save cgram");
+    println!("wrote {path}");
 }
 
 /// Dump the 2048 4bpp VRAM tiles as a labeled atlas (64 cols), colored with
