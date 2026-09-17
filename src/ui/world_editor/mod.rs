@@ -50,7 +50,12 @@ use smwe_rom::{
 
 use crate::{
     rom_freespace::find_free_space,
-    ui::{editing_mode::EditingMode, style::toggle_button, tool::DockableEditorTool},
+    ui::{
+        editing_mode::EditingMode,
+        exanimation_dialog::{ExAnimDialog, ExAnimList},
+        style::toggle_button,
+        tool::DockableEditorTool,
+    },
     undo::{Undo, UndoableData},
 };
 
@@ -273,6 +278,20 @@ pub struct UiWorldEditor {
     event_ownership_dirty: bool,
     /// Last time the overworld animated tiles were ticked.
     last_anim_tick:        std::time::Instant,
+
+    // ExAnimation (custom overworld tile/palette animation, LM v2.40 parity).
+    exanimation:             smwe_rom::exanimation::ExAnimationData,
+    exanimation_dirty:       bool,
+    show_exanimation_editor: bool,
+    /// Dialog state for the shared "ExAnimated Frames" window.
+    exanim_dialog:           ExAnimDialog,
+    /// Editor animation tick counter (one per ~133ms animated-tile tick);
+    /// drives the overworld ExAnimation preview stepping.
+    exanim_tick:             u64,
+    /// Clean post-load VRAM snapshot the ExAnimation tile browser decodes from.
+    exanimation_base_vram:   Vec<u8>,
+    /// Bumped on every submap load so the tile-browser atlas rebuilds.
+    exanim_vram_gen:         u64,
 }
 
 impl UiWorldEditor {
@@ -300,6 +319,8 @@ impl UiWorldEditor {
                     smwe_rom::overworld::event_ownership::EVENT_OWNERSHIP_COUNT
                 ]
             });
+        // Overworld ExAnimation data rides along on the ROM (RATS block).
+        let exanimation = rom.exanimation.clone();
         let mut editor = Self {
             gl,
             rom,
@@ -338,6 +359,13 @@ impl UiWorldEditor {
             event_ownership,
             event_ownership_dirty: false,
             last_anim_tick: std::time::Instant::now(),
+            exanimation,
+            exanimation_dirty: false,
+            show_exanimation_editor: false,
+            exanim_dialog: ExAnimDialog::new(ExAnimList::Overworld),
+            exanim_tick: 0,
+            exanimation_base_vram: Vec::new(),
+            exanim_vram_gen: 0,
         };
         editor.load_submap();
         editor
@@ -374,6 +402,14 @@ impl UiWorldEditor {
             s.layer2_words = layer2_words;
         });
         self.edit_state.clear_stack();
+
+        // Snapshot clean VRAM for the ExAnimation tile browser (it decodes
+        // source tiles from the pre-animation graphics), and restart the
+        // overworld ExAnimation tick counter.
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
+        self.exanim_vram_gen += 1;
+        self.exanim_tick = 0;
+        self.exanim_dialog.reset_atlas();
     }
 }
 
@@ -385,6 +421,23 @@ impl DockableEditorTool for UiWorldEditor {
     fn update(&mut self, ui: &mut Ui) {
         SidePanel::left("world_editor.left_panel").resizable(false).show_inside(ui, |ui| self.left_panel(ui));
         CentralPanel::default().frame(Frame::NONE.inner_margin(0.)).show_inside(ui, |ui| self.central_panel(ui));
+        if self.show_exanimation_editor {
+            let mut open = self.show_exanimation_editor;
+            let changed = self.exanim_dialog.show(
+                ui.ctx(),
+                &mut open,
+                &mut self.exanimation,
+                &self.exanimation_base_vram,
+                &self.cpu.mem.cgram,
+                self.exanim_vram_gen,
+                None, // single overworld list: no Level/Global tabs
+            );
+            self.show_exanimation_editor = open;
+            if changed {
+                self.exanimation_dirty = true;
+                self.has_edits = true;
+            }
+        }
     }
 
     fn on_closed(&mut self) {
@@ -398,6 +451,7 @@ impl DockableEditorTool for UiWorldEditor {
     fn on_save_succeeded(&mut self) {
         self.has_edits = false;
         self.event_ownership_dirty = false;
+        self.exanimation_dirty = false;
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -503,6 +557,26 @@ impl DockableEditorTool for UiWorldEditor {
             ownership
                 .apply_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Cannot apply event ownership edits: {e}"))?;
+        }
+
+        // ── Overworld ExAnimation (custom tile/palette animation) ────────────
+        // Single RATS-tagged free-space block, shared with the level/global
+        // lists; erased and reallocated on every save that touched it.
+        // Merge on save: the level editor owns the per-level/global lists and
+        // may have saved newer ones since this tab loaded, so re-read the
+        // block and replace only the overworld list instead of writing this
+        // tab's (possibly stale) copies of the other lists.
+        if self.exanimation_dirty {
+            use smwe_rom::exanimation::{ExAnimError, ExAnimationData};
+            let mut merged = match ExAnimationData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(ExAnimError::NotFound) => ExAnimationData::default(),
+                Err(e) => anyhow::bail!("Overworld ExAnimation read failed: {e}"),
+            };
+            merged.overworld = self.exanimation.overworld.clone();
+            merged
+                .write_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Overworld ExAnimation write failed: {e}"))?;
         }
 
         Ok(())
@@ -727,6 +801,13 @@ impl UiWorldEditor {
 
             ui.separator();
             self.event_ownership_panel(ui);
+
+            // ── Overworld ExAnimation (LM v2.40 parity) ─────────────────
+            ui.separator();
+            if ui.button("ExAnimated Frames…").clicked() {
+                self.show_exanimation_editor = true;
+            }
+            ui.small("Custom overworld tile/palette animation, live in the view.");
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();
@@ -1142,9 +1223,27 @@ impl UiWorldEditor {
             const ANIM_INTERVAL: std::time::Duration = std::time::Duration::from_millis(133);
             if self.last_anim_tick.elapsed() >= ANIM_INTERVAL {
                 self.last_anim_tick = std::time::Instant::now();
-                smwe_emu::emu::advance_ow_anim_frame(&mut self.cpu);
+                self.exanim_tick += 1;
+                // Custom overworld ExAnimation frames (LM v2.40 parity) play
+                // on the same tick. `disable_original` skips the game's own
+                // overworld animated tiles so the custom ones replace them.
+                let anim = self.exanimation.for_overworld();
+                if !anim.disable_original {
+                    smwe_emu::emu::advance_ow_anim_frame(&mut self.cpu);
+                }
                 let r = self.renderer.lock().expect("Cannot lock overworld renderer");
-                r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+                if anim.frames.is_empty() {
+                    r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+                } else {
+                    smwe_rom::exanimation::apply_tick(
+                        &anim,
+                        self.exanim_tick,
+                        &mut self.cpu.mem.vram,
+                        &mut self.cpu.mem.cgram,
+                    );
+                    r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+                    r.upload_palette(&self.gl, &self.cpu.mem.cgram);
+                }
             }
             ui.ctx().request_repaint_after(ANIM_INTERVAL);
 

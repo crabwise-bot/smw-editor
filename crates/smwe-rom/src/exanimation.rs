@@ -1,11 +1,12 @@
 //! Editable ExAnimation — per-level custom tile and palette animation.
 //!
 //! Lunar Magic parity (LM v1.60/v1.70 "Edit ExAnimated Frames", overworld
-//! variant v2.40): each level (plus one global list that runs in every level)
-//! can own a list of animation frames. A frame is either a *line* frame —
-//! copy the graphics of up to N 8x8 tiles from elsewhere in VRAM into a
-//! destination VRAM slot, one source set per animation step — or a *palette*
-//! frame — write N colors into CGRAM per step, or rotate a ring of colors.
+//! variant v2.40): each level (plus one global list that runs in every level,
+//! plus one overworld list that runs on the world maps) can own a list of
+//! animation frames. A frame is either a *line* frame — copy the graphics of
+//! up to N 8x8 tiles from elsewhere in VRAM into a destination VRAM slot,
+//! one source set per animation step — or a *palette* frame — write N colors
+//! into CGRAM per step, or rotate a ring of colors.
 //!
 //! # Storage format (smw-editor native, documented)
 //!
@@ -15,7 +16,7 @@
 //!
 //! ```text
 //! "SMWEXAN1"            8 bytes magic
-//! version               u8 (=1)
+//! version               u8 (=2; version 1 blocks have no overworld entry)
 //! level_count           u16 LE
 //! per level entry:
 //!   level               u16 LE (0x000-0x1FF)
@@ -35,6 +36,7 @@
 //!                       rotate:      one ring of units_per_frame BGR555 colors
 //!                       (frames = rotation steps shown)
 //! global entry: flags u8, frame_count u16 LE, frames as above
+//! overworld entry (version 2+): flags u8, frame_count u16 LE, frames as above
 //! ```
 //!
 //! The RATS tag is the standard `STAR` + size + ~size header LM itself uses,
@@ -47,6 +49,8 @@
 //! other than `Always` are stored for the game but ignored by the preview —
 //! the dialog says so next to the trigger picker. Line frames copy 4bpp tile
 //! graphics (32 bytes per 8x8 tile) inside VRAM; palette frames write CGRAM.
+//! The world-map editor ticks the *overworld* list on the same interval, so
+//! custom overworld animation plays live in the overworld view.
 //!
 //! # In-game playback
 //!
@@ -65,8 +69,10 @@ use thiserror::Error;
 
 /// Magic at the start of the RATS payload.
 pub const EXANIM_MAGIC: &[u8; 8] = b"SMWEXAN1";
-/// Payload format version.
-pub const EXANIM_FORMAT_VERSION: u8 = 1;
+/// Payload format version written by [`ExAnimationData::write_to_rom`].
+pub const EXANIM_FORMAT_VERSION: u8 = 2;
+/// Previous payload format version (no overworld list); still decoded.
+pub const EXANIM_FORMAT_VERSION_V1: u8 = 1;
 /// Maximum animation steps per frame, matching LM's 0x100-frame cap.
 pub const EXANIM_MAX_FRAMES: u16 = 0x100;
 /// Maximum tiles/colors per animation step (sanity cap for parsing).
@@ -222,12 +228,15 @@ pub struct ExAnimation {
     pub disable_original: bool,
 }
 
-/// All ExAnimation data in the ROM: per-level lists plus the global list
-/// that runs in every level (LM's "global ExAnimation list").
+/// All ExAnimation data in the ROM: per-level lists, the global list that
+/// runs in every level (LM's "global ExAnimation list"), and the overworld
+/// list that runs on the world maps (LM v2.40 "ExAnimation for the
+/// overworld").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExAnimationData {
-    pub levels: BTreeMap<u16, ExAnimation>,
-    pub global: ExAnimation,
+    pub levels:    BTreeMap<u16, ExAnimation>,
+    pub global:    ExAnimation,
+    pub overworld: ExAnimation,
 }
 
 #[derive(Debug, Error)]
@@ -344,6 +353,7 @@ fn encode_payload(data: &ExAnimationData) -> Result<Vec<u8>, ExAnimError> {
         out.extend_from_slice(&encode_animation(anim)?);
     }
     out.extend_from_slice(&encode_animation(&data.global)?);
+    out.extend_from_slice(&encode_animation(&data.overworld)?);
     Ok(out)
 }
 
@@ -351,8 +361,9 @@ fn decode_payload(payload: &[u8]) -> Result<ExAnimationData, ExAnimError> {
     if payload.len() < 11 || &payload[..8] != EXANIM_MAGIC {
         return Err(ExAnimError::Corrupt("bad magic".into()));
     }
-    if payload[8] != EXANIM_FORMAT_VERSION {
-        return Err(ExAnimError::Corrupt(format!("unsupported version {}", payload[8])));
+    let version = payload[8];
+    if version != EXANIM_FORMAT_VERSION && version != EXANIM_FORMAT_VERSION_V1 {
+        return Err(ExAnimError::Corrupt(format!("unsupported version {version}")));
     }
     let level_count = u16::from_le_bytes([payload[9], payload[10]]) as usize;
     let mut levels = BTreeMap::new();
@@ -370,11 +381,22 @@ fn decode_payload(payload: &[u8]) -> Result<ExAnimationData, ExAnimError> {
         pos += used;
         levels.insert(level, anim);
     }
-    let (global, _) = decode_animation(&payload[pos..]).map_err(|e| match e {
+    let (global, used) = decode_animation(&payload[pos..]).map_err(|e| match e {
         ExAnimError::Corrupt(s) => ExAnimError::Corrupt(format!("global list: {s}")),
         other => other,
     })?;
-    Ok(ExAnimationData { levels, global })
+    pos += used;
+    // Version 1 blocks predate the overworld list; they decode to an empty one.
+    let overworld = if version == EXANIM_FORMAT_VERSION_V1 {
+        ExAnimation::default()
+    } else {
+        let (ow, _) = decode_animation(&payload[pos..]).map_err(|e| match e {
+            ExAnimError::Corrupt(s) => ExAnimError::Corrupt(format!("overworld list: {s}")),
+            other => other,
+        })?;
+        ow
+    };
+    Ok(ExAnimationData { levels, global, overworld })
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -434,7 +456,7 @@ impl ExAnimationData {
 
         let payload = encode_payload(self)?;
         // Nothing to store: leave the ROM without a block.
-        if self.levels.is_empty() && self.global.frames.is_empty() {
+        if self.levels.is_empty() && self.global.frames.is_empty() && self.overworld.frames.is_empty() {
             return Ok(());
         }
 
@@ -464,6 +486,13 @@ impl ExAnimationData {
             disable_original |= local.disable_original;
         }
         ExAnimation { frames, disable_original }
+    }
+
+    /// The animation list that plays on the overworld maps: the dedicated
+    /// overworld list (LM v2.40 keeps this separate from the level/global
+    /// lists; the overworld has its own ExAnimation ASM hack).
+    pub fn for_overworld(&self) -> ExAnimation {
+        self.overworld.clone()
     }
 
     /// Mutable access to a level's list, creating it on demand.
@@ -602,9 +631,43 @@ mod tests {
             units_per_frame: 4,
             payload:         vec![0x001F, 0x03E0, 0x7C00, 0x7FFF],
         });
+        data.overworld = ExAnimation { frames: vec![sample_frame()], disable_original: true };
         let payload = encode_payload(&data).unwrap();
         let back = decode_payload(&payload).unwrap();
         assert_eq!(back, data);
+    }
+
+    #[test]
+    fn v1_payload_decodes_with_empty_overworld() {
+        // Hand-encode a version-1 payload (the format PR #27 wrote): magic,
+        // version 1, one level entry, an empty global list — no overworld
+        // entry. It must decode cleanly with an empty overworld list.
+        let mut out = Vec::new();
+        out.extend_from_slice(EXANIM_MAGIC);
+        out.push(EXANIM_FORMAT_VERSION_V1);
+        out.extend_from_slice(&1u16.to_le_bytes()); // one level entry
+        out.extend_from_slice(&0x105u16.to_le_bytes());
+        out.extend_from_slice(
+            &encode_animation(&ExAnimation { frames: vec![sample_frame()], disable_original: false }).unwrap(),
+        );
+        out.extend_from_slice(&encode_animation(&ExAnimation::default()).unwrap());
+        let back = decode_payload(&out).unwrap();
+        assert_eq!(back.levels.len(), 1);
+        assert_eq!(back.levels[&0x105].frames.len(), 1);
+        assert!(back.global.frames.is_empty());
+        assert!(back.overworld.frames.is_empty());
+        assert!(!back.overworld.disable_original);
+    }
+
+    #[test]
+    fn for_overworld_returns_the_overworld_list() {
+        let mut data = ExAnimationData::default();
+        data.global.frames.push(sample_frame());
+        data.overworld = ExAnimation { frames: vec![sample_frame()], disable_original: true };
+        let ow = data.for_overworld();
+        // The overworld list is separate: global/level frames do not leak in.
+        assert_eq!(ow.frames.len(), 1);
+        assert!(ow.disable_original);
     }
 
     #[test]
@@ -774,6 +837,7 @@ mod tests {
             units_per_frame: 3,
             payload:         vec![0x7FFF, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000],
         });
+        data.overworld = ExAnimation { frames: vec![sample_frame()], disable_original: false };
         data.write_to_rom(&mut rom, header_offset).unwrap();
 
         let back = ExAnimationData::parse(&rom).unwrap();

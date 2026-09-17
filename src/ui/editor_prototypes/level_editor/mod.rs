@@ -1,7 +1,6 @@
 mod background_layer;
 mod central_panel;
 mod editing;
-mod exanimation_editor;
 mod gfx_editor;
 mod gfx_slot_browser;
 mod message_editor;
@@ -223,15 +222,8 @@ pub struct UiLevelEditor {
     exanimation:             smwe_rom::exanimation::ExAnimationData,
     exanimation_dirty:       bool,
     show_exanimation_editor: bool,
-    /// Dialog shows the global list instead of the current level's list.
-    exanimation_global:      bool,
-    exanimation_selected:    usize,
-    /// (anim-frame, unit) slot awaiting a source-tile pick from the VRAM browser.
-    exanimation_pick_slot:   Option<(usize, usize)>,
-    /// CGRAM palette row used to color the VRAM tile browser.
-    exanimation_pal_row:     usize,
-    exanimation_atlas_tex:   Option<egui::TextureHandle>,
-    exanimation_atlas_for:   Option<(u16, usize)>,
+    /// Dialog state for the shared "ExAnimated Frames" window.
+    exanim_dialog:           crate::ui::exanimation_dialog::ExAnimDialog,
     /// Clean post-load VRAM snapshot the tile browser decodes from.
     exanimation_base_vram:   Vec<u8>,
 
@@ -384,12 +376,9 @@ impl UiLevelEditor {
             exanimation,
             exanimation_dirty: false,
             show_exanimation_editor: false,
-            exanimation_global: false,
-            exanimation_selected: 0,
-            exanimation_pick_slot: None,
-            exanimation_pal_row: 0,
-            exanimation_atlas_tex: None,
-            exanimation_atlas_for: None,
+            exanim_dialog: crate::ui::exanimation_dialog::ExAnimDialog::new(
+                crate::ui::exanimation_dialog::ExAnimList::Level,
+            ),
             exanimation_base_vram: Vec::new(),
             title_credits,
             title_credits_dirty: false,
@@ -428,7 +417,23 @@ impl DockableEditorTool for UiLevelEditor {
         self.gfx_slot_browser_window(&ctx);
         self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
-        self.exanimation_editor_window(&ctx);
+        if self.show_exanimation_editor {
+            let mut open = self.show_exanimation_editor;
+            let changed = self.exanim_dialog.show(
+                &ctx,
+                &mut open,
+                &mut self.exanimation,
+                &self.exanimation_base_vram,
+                &self.cpu.mem.cgram,
+                self.level_num as u64,
+                Some(self.level_num),
+            );
+            self.show_exanimation_editor = open;
+            if changed {
+                self.exanimation_dirty = true;
+                self.has_edits = true;
+            }
+        }
         self.xref_search_window(&ctx);
         self.title_credits_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.
@@ -885,8 +890,20 @@ impl DockableEditorTool for UiLevelEditor {
         // ── ExAnimation data (per-level custom tile/palette animation) ──────
         // Single RATS-tagged free-space block; erased and reallocated on
         // every save that touched it.
+        // Merge on save: the world editor owns the overworld list and may
+        // have saved a newer one since this tab loaded, so re-read the block
+        // and replace only the level/global lists instead of writing this
+        // tab's (possibly stale) copy of the overworld list.
         if self.exanimation_dirty {
-            self.exanimation
+            use smwe_rom::exanimation::{ExAnimError, ExAnimationData};
+            let mut merged = match ExAnimationData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(ExAnimError::NotFound) => ExAnimationData::default(),
+                Err(e) => anyhow::bail!("ExAnimation read failed: {e}"),
+            };
+            merged.levels = self.exanimation.levels.clone();
+            merged.global = self.exanimation.global.clone();
+            merged
                 .write_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("ExAnimation write failed: {e}"))?;
         }
@@ -999,8 +1016,7 @@ impl UiLevelEditor {
         // ExAnimation tick counter.
         self.exanimation_base_vram = self.cpu.mem.vram.clone();
         self.anim_tick = 0;
-        self.exanimation_atlas_tex = None;
-        self.exanimation_atlas_for = None;
+        self.exanim_dialog.reset_atlas();
 
         // For each unique sprite ID, clone the clean post-decompress CPU state,
         // run exec_sprite_id on the clone (so state never accumulates between IDs),
