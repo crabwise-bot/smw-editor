@@ -3,7 +3,9 @@
 //! MWL is FuSoYa's level-exchange format for Super Mario World: one file holds
 //! everything Lunar Magic needs to recreate a level (secondary header, Layer 1
 //! objects, Layer 2 objects or background tilemap, sprites) plus placeholder
-//! sections for palettes, secondary entrances, ExAnimation and ExGFX/bypass data.
+//! sections for palettes, secondary entrances and ExGFX/bypass data, plus a
+//! documented ExAnimation section (section 6) carrying this editor's native
+//! ExAnimation encoding (see [`crate::exanimation`]).
 //!
 //! # Format (binary MWL v3.63, clean-room description)
 //!
@@ -32,15 +34,17 @@
 //! # Scope of this module (v1)
 //!
 //! Vanilla levels only: legacy Layer 2 backgrounds and object layers,
-//! sprites, primary/secondary headers. Palette, secondary entrances,
-//! ExAnimation and ExGFX/bypass sections are exported empty and rejected on
-//! import when non-empty. RATS-tagged and LC_LZ2/LC_LZ3-compressed streams
-//! are not produced (LC-RLE1 is what the vanilla ROM uses).
+//! sprites, primary/secondary headers, and this editor's native ExAnimation
+//! section. Palette, secondary entrances and ExGFX/bypass sections are
+//! exported empty and rejected on import when non-empty. RATS-tagged and
+//! LC_LZ2/LC_LZ3-compressed streams are not produced (LC-RLE1 is what the
+//! vanilla ROM uses).
 
 use thiserror::Error;
 
 use crate::{
     compression::lc_rle1,
+    exanimation::{self, ExAnimationData},
     freespace,
     level::{
         headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
@@ -152,6 +156,8 @@ pub enum MwlError {
     NoFreeSpace(&'static str, usize),
     #[error("Invalid SNES address {0:#X}")]
     BadAddress(u32),
+    #[error("Bad ExAnimation section: {0}")]
+    BadExAnimation(#[from] exanimation::ExAnimError),
     #[error("ROM error: {0}")]
     Rom(#[from] RomError),
 }
@@ -436,10 +442,25 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
             section3,
             Vec::new(), // palette: not supported in v1
             Vec::new(), // secondary entrances: not supported in v1
-            Vec::new(), // ExAnimation: not supported in v1
+            exanimation_section(rom, level_num as u16),
             Vec::new(), // ExGFX/bypass: not supported in v1
         ],
     })
+}
+
+/// Section 6 payload: this editor's native [`exanimation`] encoding of the
+/// level's animation list (empty section when the level has none).
+fn exanimation_section(rom: &SmwRom, level_num: u16) -> Vec<u8> {
+    let Some(anim) = rom.exanimation.levels.get(&level_num) else {
+        return Vec::new();
+    };
+    match exanimation::encode_animation(anim) {
+        Ok(payload) => encode_section(0, 0, &payload),
+        Err(e) => {
+            log::warn!("Skipping ExAnimation MWL export for level {level_num:03X}: {e}");
+            Vec::new()
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -557,11 +578,26 @@ pub fn import_level(
         write_snes(rom_bytes, SPRITE_PTR_TABLE + target_level * 2, &ptr, header_offset)?;
     }
 
-    // --- Sections 4-7: unsupported in v1 ---
+    // --- Section 6: ExAnimation (this editor's native encoding) ---
+    {
+        let section = &mwl.sections[SECTION_EXANIMATION];
+        if !section.is_empty() {
+            let (_, _, payload) = decode_section(SECTION_EXANIMATION, section)?;
+            let (anim, _) = exanimation::decode_animation(payload).map_err(MwlError::BadExAnimation)?;
+            let mut data = match ExAnimationData::parse(rom_bytes) {
+                Ok(d) => d,
+                Err(exanimation::ExAnimError::NotFound) => ExAnimationData::default(),
+                Err(e) => return Err(MwlError::BadExAnimation(e)),
+            };
+            data.levels.insert(target_level as u16, anim);
+            data.write_to_rom(rom_bytes, header_offset).map_err(MwlError::BadExAnimation)?;
+        }
+    }
+
+    // --- Sections 4, 5, 7: unsupported in v1 ---
     for (i, name) in [
         (SECTION_PALETTE, "palette"),
         (SECTION_SECONDARY_ENTRANCES, "secondary entrances"),
-        (SECTION_EXANIMATION, "ExAnimation"),
         (SECTION_EXGFX_BYPASS, "ExGFX/bypass"),
     ] {
         if !mwl.sections[i].is_empty() {
@@ -705,6 +741,43 @@ mod tests {
             assert_eq!(back, entries);
             assert_eq!(back_high, high);
         }
+    }
+
+    #[test]
+    fn exanimation_section_round_trip() {
+        use crate::exanimation::{ExAnimFrame, ExAnimFrameKind, ExAnimTrigger, ExAnimation};
+        let anim = ExAnimation {
+            frames:           vec![
+                ExAnimFrame {
+                    kind:            ExAnimFrameKind::Line8x8,
+                    dest:            0x1940,
+                    speed:           0,
+                    trigger:         ExAnimTrigger::Always,
+                    frames:          3,
+                    units_per_frame: 1,
+                    payload:         vec![0x1920, 0x1930, 0x1950],
+                },
+                ExAnimFrame {
+                    kind:            ExAnimFrameKind::PaletteRotate,
+                    dest:            0x00,
+                    speed:           0,
+                    trigger:         ExAnimTrigger::Always,
+                    frames:          3,
+                    units_per_frame: 3,
+                    payload:         vec![0x0000, 0x2000, 0x4000],
+                },
+            ],
+            disable_original: true,
+        };
+        let body = exanimation::encode_animation(&anim).unwrap();
+        let section = encode_section(0x18, 0xFFD900, &body);
+        let (_, _, payload) = decode_section(SECTION_EXANIMATION, &section).unwrap();
+        let (back, _) = exanimation::decode_animation(payload).unwrap();
+        assert_eq!(back.frames.len(), 2);
+        assert_eq!(back.frames[0].dest, 0x1940);
+        assert_eq!(back.frames[0].payload, vec![0x1920, 0x1930, 0x1950]);
+        assert_eq!(back.frames[1].kind, ExAnimFrameKind::PaletteRotate);
+        assert!(back.disable_original);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod background_layer;
 mod central_panel;
 mod editing;
+mod exanimation_editor;
 mod gfx_editor;
 mod gfx_slot_browser;
 mod message_editor;
@@ -89,6 +90,9 @@ pub struct UiLevelEditor {
 
     // Animation
     last_anim_tick: Instant,
+    /// Editor animation tick counter (one per ~133ms animated-tile tick);
+    /// drives ExAnimation preview stepping.
+    anim_tick:      u64,
 
     // Editing state
     editing_mode:            EditingMode,
@@ -215,6 +219,22 @@ pub struct UiLevelEditor {
     show_xref_search:        bool,
     xref_search:             XrefSearchState,
 
+    // ExAnimation (custom per-level tile/palette animation) editor.
+    exanimation:             smwe_rom::exanimation::ExAnimationData,
+    exanimation_dirty:       bool,
+    show_exanimation_editor: bool,
+    /// Dialog shows the global list instead of the current level's list.
+    exanimation_global:      bool,
+    exanimation_selected:    usize,
+    /// (anim-frame, unit) slot awaiting a source-tile pick from the VRAM browser.
+    exanimation_pick_slot:   Option<(usize, usize)>,
+    /// CGRAM palette row used to color the VRAM tile browser.
+    exanimation_pal_row:     usize,
+    exanimation_atlas_tex:   Option<egui::TextureHandle>,
+    exanimation_atlas_for:   Option<(u16, usize)>,
+    /// Clean post-load VRAM snapshot the tile browser decodes from.
+    exanimation_base_vram:   Vec<u8>,
+
     // Title screen / ending credits fixed-location data.
     title_credits:             smwe_rom::title_credits::TitleCreditsData,
     title_credits_dirty:       bool,
@@ -259,6 +279,7 @@ impl UiLevelEditor {
         // text edits may not grow a message past its original span.
         let message_budgets: Vec<usize> = message_boxes.messages.iter().map(Vec::len).collect();
         let title_credits = rom.title_credits.clone();
+        let exanimation = rom.exanimation.clone();
 
         let mut editor = Self {
             gl,
@@ -286,6 +307,7 @@ impl UiLevelEditor {
             preview_texture: None,
             preview_for: None,
             last_anim_tick: Instant::now(),
+            anim_tick: 0,
             editing_mode: EditingMode::Select,
             selected_object_indices: HashSet::new(),
             selected_sprite_indices: HashSet::new(),
@@ -359,6 +381,16 @@ impl UiLevelEditor {
             message_text_error: None,
             show_xref_search: false,
             xref_search: XrefSearchState::default(),
+            exanimation,
+            exanimation_dirty: false,
+            show_exanimation_editor: false,
+            exanimation_global: false,
+            exanimation_selected: 0,
+            exanimation_pick_slot: None,
+            exanimation_pal_row: 0,
+            exanimation_atlas_tex: None,
+            exanimation_atlas_for: None,
+            exanimation_base_vram: Vec::new(),
             title_credits,
             title_credits_dirty: false,
             show_title_credits_editor: false,
@@ -396,6 +428,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.gfx_slot_browser_window(&ctx);
         self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
+        self.exanimation_editor_window(&ctx);
         self.xref_search_window(&ctx);
         self.title_credits_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.
@@ -849,6 +882,15 @@ impl DockableEditorTool for UiLevelEditor {
             }
         }
 
+        // ── ExAnimation data (per-level custom tile/palette animation) ──────
+        // Single RATS-tagged free-space block; erased and reallocated on
+        // every save that touched it.
+        if self.exanimation_dirty {
+            self.exanimation
+                .write_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("ExAnimation write failed: {e}"))?;
+        }
+
         Ok(())
     }
 
@@ -864,6 +906,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.has_edits = false;
         self.palette_dirty = false;
         self.title_credits_dirty = false;
+        self.exanimation_dirty = false;
         self.initial_spawn_x = self.mario_spawn_x;
         self.initial_spawn_y = self.mario_spawn_y;
     }
@@ -950,6 +993,14 @@ impl UiLevelEditor {
         // populated with their correct graphics instead of whatever the initial
         // GFX load left behind.
         smwe_emu::emu::fetch_anim_frame(&mut self.cpu);
+
+        // Snapshot clean VRAM for the ExAnimation tile browser (it decodes
+        // source tiles from the pre-animation graphics), and restart the
+        // ExAnimation tick counter.
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
+        self.anim_tick = 0;
+        self.exanimation_atlas_tex = None;
+        self.exanimation_atlas_for = None;
 
         // For each unique sprite ID, clone the clean post-decompress CPU state,
         // run exec_sprite_id on the clone (so state never accumulates between IDs),
