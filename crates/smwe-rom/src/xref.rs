@@ -187,7 +187,7 @@ mod tests {
 
         Level {
             primary_header:   PrimaryHeader::new(&header_bytes),
-            secondary_header: SecondaryHeader([0, 0, 0, 0]),
+            secondary_header: SecondaryHeader { bytes: [0, 0, 0, 0], scroll_ext: 0xFF },
             sprite_header:    SpriteHeader(0),
             layer1:           crate::level::ObjectLayer::parse(object_bytes).unwrap().1 .0,
             layer2:           Layer2Data::Objects {

@@ -584,7 +584,67 @@ impl UiLevelEditor {
 
                 row_check!("Vertical Level:", p.is_vertical);
                 row_check!("No Yoshi:", p.no_yoshi_level);
-                row_slider!("Layer 2 Scroll:", p.layer2_scroll, 0..=15_i32);
+                ui.label("Layer 2 Scroll:");
+                {
+                    // Named paired presets (vanilla 0-7, LM 3.00 additions 8-11);
+                    // LM 3.40's Fast/Auto-Scroll modes live in the separate H/V
+                    // settings below.
+                    use smwe_rom::level::scroll::paired_scroll_label;
+                    let before = p.layer2_scroll;
+                    egui::ComboBox::from_id_salt("layer2_scroll_preset")
+                        .selected_text(paired_scroll_label(p.layer2_scroll))
+                        .show_ui(ui, |ui| {
+                            for preset in 0..16u8 {
+                                ui.selectable_value(&mut p.layer2_scroll, preset, paired_scroll_label(preset));
+                            }
+                        });
+                    if p.layer2_scroll != before {
+                        changed = true;
+                    }
+                }
+                ui.end_row();
+                row_check!("Separate H/V Scroll:", p.layer2_scroll_separate);
+                if p.layer2_scroll_separate {
+                    use smwe_rom::level::scroll::{hscroll_entry, HSCROLL_ENTRIES, VSCROLL_NAMES};
+                    ui.label("H Scroll:");
+                    {
+                        let before_h = (p.layer2_hscroll_auto, p.layer2_scroll);
+                        let selected = hscroll_entry(p.layer2_hscroll_auto, p.layer2_scroll)
+                            .map(|e| e.name)
+                            .unwrap_or("?");
+                        egui::ComboBox::from_id_salt("layer2_hscroll")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for e in HSCROLL_ENTRIES {
+                                    let is_selected = p.layer2_hscroll_auto == e.h_bit && p.layer2_scroll == e.hhhh;
+                                    if ui.selectable_label(is_selected, e.name).clicked() {
+                                        p.layer2_hscroll_auto = e.h_bit;
+                                        p.layer2_scroll = e.hhhh;
+                                    }
+                                }
+                            });
+                        if (p.layer2_hscroll_auto, p.layer2_scroll) != before_h {
+                            changed = true;
+                        }
+                    }
+                    ui.end_row();
+                    ui.label("V Scroll:");
+                    {
+                        let before_v = p.layer2_vscroll;
+                        egui::ComboBox::from_id_salt("layer2_vscroll")
+                            .selected_text(VSCROLL_NAMES[(p.layer2_vscroll & 0x1F) as usize])
+                            .show_ui(ui, |ui| {
+                                for (i, name) in VSCROLL_NAMES.iter().enumerate() {
+                                    ui.selectable_value(&mut p.layer2_vscroll, i as u8, *name);
+                                }
+                            });
+                        if p.layer2_vscroll != before_v {
+                            changed = true;
+                        }
+                    }
+                    ui.end_row();
+                }
+                row_check!("Auto-Set Screens:", p.layer2_auto_set_screens);
                 row_slider!("Layer 3:", p.layer3, 0..=3_i32);
                 row_slider!("Entrance Action:", p.main_entrance_action, 0..=7_i32);
                 row_slider!("Midway Screen:", p.midway_entrance_screen, 0..=15_i32);

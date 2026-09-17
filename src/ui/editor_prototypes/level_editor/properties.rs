@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use smwe_rom::level::{Layer2Data, Level};
+use smwe_rom::level::{scroll::Layer2ScrollExt, Layer2Data, Level};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct LevelProperties {
@@ -31,6 +31,15 @@ pub(super) struct LevelProperties {
     pub no_yoshi_level:             bool,
     pub unknown_vertical_pos_level: bool,
 
+    // LM 3.40+ Layer 2 scroll extension ($06FA00, SHCvvvvv). `layer2_scroll`
+    // above is the paired preset (or the horizontal setting when separate).
+    pub layer2_scroll_separate:  bool,
+    pub layer2_hscroll_auto:     bool,
+    pub layer2_vscroll:          u8,
+    pub layer2_auto_set_screens: bool,
+    /// Raw $06FA00 byte as loaded; `$FF` means LM never installed the table.
+    pub layer2_scroll_ext_raw:   u8,
+
     // Layer 2 object-data header (5 bytes at the Layer 2 pointer, game-ignored).
     // Only meaningful when `has_layer2` is true.
     pub layer2_header: [u8; 5],
@@ -47,6 +56,21 @@ impl LevelProperties {
             Layer2Data::Background(_) => [0u8; 5],
         };
         let (_, _) = s.main_entrance_xy_pos();
+        // LM 3.40+ scroll extension ($06FA00). A vanilla ROM has $FF here
+        // (table not installed); treat that as paired mode, not as S=1.
+        // Default auto_set_screens to true so a fresh install matches LM's
+        // $20 initial value (auto-set screens on).
+        let ext_raw = s.scroll_ext;
+        let ext = if Layer2ScrollExt::is_installed(ext_raw) {
+            Layer2ScrollExt::decode(ext_raw)
+        } else {
+            Layer2ScrollExt {
+                separate:         false,
+                h_auto:           false,
+                auto_set_screens: true,
+                vscroll:          0,
+            }
+        };
         Self {
             palette_bg: h.palette_bg(),
             level_length: h.level_length(),
@@ -71,6 +95,11 @@ impl LevelProperties {
             bg_initial_pos: s.bg_initial_pos(),
             no_yoshi_level: s.no_yoshi_level(),
             unknown_vertical_pos_level: s.unknown_vertical_pos_level(),
+            layer2_scroll_separate: ext.separate,
+            layer2_hscroll_auto: ext.h_auto,
+            layer2_vscroll: ext.vscroll,
+            layer2_auto_set_screens: ext.auto_set_screens,
+            layer2_scroll_ext_raw: ext_raw,
             layer2_header,
         }
     }

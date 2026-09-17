@@ -25,6 +25,7 @@ use crate::{
 pub mod background;
 pub mod headers;
 pub mod object_layer;
+pub mod scroll;
 pub mod secondary_entrance;
 pub mod sprite_layer;
 

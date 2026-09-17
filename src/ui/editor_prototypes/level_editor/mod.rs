@@ -727,6 +727,30 @@ impl DockableEditorTool for UiLevelEditor {
             }
         }
 
+        // ── LM 3.40+ Layer 2 scroll extension ($06FA00, SHCvvvvv) ──────────────
+        // Preserve the raw byte when the table was never installed ($FF) and the
+        // user did not enable separate mode; otherwise encode the new settings.
+        {
+            use smwe_rom::level::scroll::{Layer2ScrollExt, SCROLL_EXT_UNINSTALLED};
+            let p = &self.level_properties;
+            let raw = p.layer2_scroll_ext_raw;
+            let new_byte = if !Layer2ScrollExt::is_installed(raw) && !p.layer2_scroll_separate {
+                SCROLL_EXT_UNINSTALLED
+            } else {
+                Layer2ScrollExt {
+                    separate:         p.layer2_scroll_separate,
+                    h_auto:           p.layer2_hscroll_auto,
+                    auto_set_screens: p.layer2_auto_set_screens,
+                    vscroll:          p.layer2_vscroll,
+                }
+                .encode()
+            };
+            let t = AddrPc::try_from_lorom(AddrSnes(0x06FA00))?.as_index() + header_offset + level_idx;
+            if let Some(b) = rom_bytes.get_mut(t) {
+                *b = new_byte;
+            }
+        }
+
         // ── Secondary entrance tables ($05F800 / $05FA00 / $05FC00 / $05FE00) ──
         // Four separate 512-byte tables, one per byte-lane of each entrance.
         if self.secondary_entrance_data.len() == 512 {
