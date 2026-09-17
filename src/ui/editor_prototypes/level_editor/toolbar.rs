@@ -142,6 +142,14 @@ impl UiLevelEditor {
             }
             if tbtn(
                 ui,
+                icon::FILM_STRIP,
+                "Edit ExAnimated frames (custom tile/palette animation)",
+                self.show_exanimation_editor,
+            ) {
+                self.show_exanimation_editor = !self.show_exanimation_editor;
+            }
+            if tbtn(
+                ui,
                 icon::MAGNIFYING_GLASS,
                 "Cross-reference search (find levels using a sprite, object, tile, or music track)",
                 self.show_xref_search,

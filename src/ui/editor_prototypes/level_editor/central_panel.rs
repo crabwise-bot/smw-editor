@@ -100,9 +100,27 @@ impl UiLevelEditor {
         const ANIM_INTERVAL: Duration = Duration::from_millis(133);
         if self.last_anim_tick.elapsed() >= ANIM_INTERVAL {
             self.last_anim_tick = std::time::Instant::now();
-            smwe_emu::emu::advance_anim_frame(&mut self.cpu);
+            self.anim_tick += 1;
+            // Custom ExAnimation frames for this level (plus the global
+            // list) play on the same tick. `disable_original` skips the
+            // game's own animated tiles so the custom ones replace them.
+            let anim = self.exanimation.for_level(self.level_num);
+            if !anim.disable_original {
+                smwe_emu::emu::advance_anim_frame(&mut self.cpu);
+            }
             let renderer = self.level_renderer.lock().expect("Cannot lock level_renderer");
-            renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+            if anim.frames.is_empty() {
+                renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+            } else {
+                smwe_rom::exanimation::apply_tick(
+                    &anim,
+                    self.anim_tick,
+                    &mut self.cpu.mem.vram,
+                    &mut self.cpu.mem.cgram,
+                );
+                renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+                renderer.upload_palette(&self.gl, &self.cpu.mem.cgram);
+            }
         }
         ui.ctx().request_repaint_after(ANIM_INTERVAL);
 

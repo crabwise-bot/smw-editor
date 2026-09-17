@@ -2,6 +2,7 @@
 
 pub mod block_behavior;
 pub mod compression;
+pub mod exanimation;
 pub mod font_map;
 pub mod freespace;
 pub mod graphics;
@@ -24,6 +25,7 @@ pub mod xref;
 use std::{fs, path::Path};
 
 use crate::{
+    exanimation::ExAnimationData,
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
     level::{
@@ -59,6 +61,7 @@ pub struct SmwRom {
     pub sprite_tweakers:     SpriteTweakers,
     pub message_boxes:       MessageBoxes,
     pub title_credits:       TitleCreditsData,
+    pub exanimation:         ExAnimationData,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -141,6 +144,16 @@ impl SmwRom {
             TitleCreditsData::empty()
         });
 
+        log::info!("Parsing ExAnimation data");
+        let exanimation = ExAnimationData::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has authored
+            // ExAnimation for yet simply has no block.
+            if !matches!(e, exanimation::ExAnimError::NotFound) {
+                log::warn!("Could not parse ExAnimation data: {e}");
+            }
+            ExAnimationData::default()
+        });
+
         Ok(Self {
             rom,
             internal_header,
@@ -154,6 +167,7 @@ impl SmwRom {
             sprite_tweakers,
             message_boxes,
             title_credits,
+            exanimation,
         })
     }
 
