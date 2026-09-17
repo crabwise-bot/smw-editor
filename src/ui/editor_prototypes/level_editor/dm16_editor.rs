@@ -775,7 +775,7 @@ mod dm16_editor_tests {
 
     #[test]
     fn flood_fill_empty_and_out_of_bounds() {
-        let mut set = HashSet::new();
+        let set = HashSet::new();
         let mut p = pred_of(&set);
         assert!(flood_fill_runs(&mut p, 0, 0, 8, 8).is_empty());
         let full = full_rect(8, 8);
@@ -789,7 +789,7 @@ mod dm16_editor_tests {
     #[test]
     fn flood_fill_4_connected_not_diagonal() {
         // Two tiles touching only diagonally are separate regions.
-        let mut set = HashSet::from([(0, 0), (1, 1)]);
+        let set = HashSet::from([(0, 0), (1, 1)]);
         let mut p = pred_of(&set);
         let rects = flood_fill_runs(&mut p, 0, 0, 4, 4);
         assert_eq!(rects, vec![(0, 0, 1, 1)]);

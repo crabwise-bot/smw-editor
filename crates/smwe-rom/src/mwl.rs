@@ -685,8 +685,6 @@ pub fn import_level(
         }
     }
 
-    // --- Sections 4, 5: unsupported in v1 ---
-    for (i, name) in [(SECTION_PALETTE, "palette"), (SECTION_SECONDARY_ENTRANCES, "secondary entrances")] {
     // --- Section 8: Direct Map16 (this editor's native encoding) ---
     // A non-empty section replaces the target level's Direct Map16 objects;
     // an empty section leaves existing data untouched.
@@ -711,12 +709,8 @@ pub fn import_level(
         }
     }
 
-    // --- Sections 4, 5, 7: unsupported in v1 ---
-    for (i, name) in [
-        (SECTION_PALETTE, "palette"),
-        (SECTION_SECONDARY_ENTRANCES, "secondary entrances"),
-        (SECTION_EXGFX_BYPASS, "ExGFX/bypass"),
-    ] {
+    // --- Sections 4, 5: unsupported in v1 ---
+    for (i, name) in [(SECTION_PALETTE, "palette"), (SECTION_SECONDARY_ENTRANCES, "secondary entrances")] {
         if !mwl.sections[i].is_empty() {
             let _ = name;
             return Err(MwlError::UnsupportedSection(i));

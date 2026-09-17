@@ -1398,6 +1398,8 @@ impl DockableEditorTool for UiLevelEditor {
             }
             smwe_rom::map16_expanded::write_acts_table(rom_bytes, header_offset, &table)
                 .map_err(|e| anyhow::anyhow!("act-as table: {e}"))?;
+        }
+
         // ── Direct Map16 objects ────────────────────────────────────────────
         // Single RATS-tagged free-space block (`SMWDM161`); erased and
         // reallocated on every save that touched the DM16 objects. Only this
