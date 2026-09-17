@@ -41,37 +41,22 @@ const TILEMAP_H: usize = 64;
 /// Apply one stripe image to `vram` (byte-addressed; VRAM word $5000 is byte
 /// $A000) with the exact `LoadStripeImage` DMA semantics. `stripe` is the raw
 /// fixed-slot bytes (without the FF terminator, though a leading 0x80+ byte
-/// also stops parsing).
+/// also stops parsing). Uses the shared `parse_title_stripe` for RLE support.
 fn apply_stripe_image(vram: &mut [u8], stripe: &[u8]) {
-    let mut i = 0usize;
-    while i < stripe.len() {
-        let b0 = stripe[i];
-        if b0 & 0x80 != 0 {
-            break; // end of stripe image
-        }
-        assert!(i + 4 <= stripe.len(), "truncated stripe header at {i:#x}");
+    let cmds = smwe_rom::title_stripe::parse_title_stripe(stripe).expect("parse stripe");
+    for cmd in cmds {
         // Stripe dest is a VRAM *word* address; vram is byte-addressed.
-        let mut dest = (((stripe[i] as usize) << 8) | stripe[i + 1] as usize) * 2;
-        let flags = stripe[i + 2] as usize;
-        let vertical = flags & 0x80 != 0;
-        assert!(flags & 0x40 == 0, "RLE stripe commands are not supported");
-        let nbytes = (((flags & 0x3F) << 8) | stripe[i + 3] as usize) + 1;
-        assert!(nbytes % 2 == 0, "odd stripe payload at {i:#x}");
-        assert!(i + 4 + nbytes <= stripe.len(), "truncated stripe payload at {i:#x}");
+        let mut dest = cmd.vram_dest as usize * 2;
         // 32-word stride for vertical (interleaves two columns 32 apart in
         // the 64-wide tilemap), 1 word otherwise; *2 for byte addressing.
-        let stride = if vertical { 64 } else { 2 };
-        let mut j = i + 4;
-        let end = j + nbytes;
-        while j < end {
-            // One DMA word: low byte to $2118, high byte to $2119.
+        let stride = if cmd.vertical { 64 } else { 2 };
+        for tile in cmd.expanded_tiles() {
             assert!(dest + 1 < vram.len(), "stripe write out of VRAM at {dest:#x}");
-            vram[dest] = stripe[j];
-            vram[dest + 1] = stripe[j + 1];
+            // One DMA word: low byte to $2118, high byte to $2119.
+            vram[dest] = (tile & 0xFF) as u8;
+            vram[dest + 1] = (tile >> 8) as u8;
             dest += stride;
-            j += 2;
         }
-        i = end;
     }
 }
 
@@ -112,8 +97,18 @@ fn main() -> anyhow::Result<()> {
     println!("title stripe: {} bytes", stripe.len());
     let mut vram = cpu.mem.vram.clone();
     apply_stripe_image(&mut vram, stripe);
+    // Apply the player-select menu stripe (drawn after the logo by the game).
+    let menu_stripe = &rom.title_credits.player_select_stripe;
+    println!("player select stripe: {} bytes", menu_stripe.len());
+    apply_stripe_image(&mut vram, menu_stripe);
 
-    // Rasterize the 32x32 Layer 3 tilemap at $5000, 4bpp tiles at $4000.
+    // Rasterize the 64x64 Layer 3 tilemap at $5000.
+    //
+    // The title screen runs in BG Mode 1, where BG3 is 2bpp: each tile is 16
+    // bytes, so VRAM $4000-$5FFF holds 512 tiles ($000-$1FF) — the stripe
+    // references tiles up to $1xx (e.g. the player-select menu text), which
+    // only fits a 2bpp layout. (An earlier 4bpp rendering produced scrambled
+    // tiles; 2bpp matches the hardware.)
     let (w, h) = (TILEMAP_W as u32 * 8, TILEMAP_H as u32 * 8);
     let mut pixels = vec![0u8; (w * h * 3) as usize];
     // Backdrop color behind transparent pixels.
@@ -121,6 +116,14 @@ fn main() -> anyhow::Result<()> {
     for px in pixels.chunks_exact_mut(3) {
         px.copy_from_slice(&backdrop);
     }
+    // 2bpp tile row: byte0 = bitplane 0, byte1 = bitplane 1.
+    let tile_row_2bpp = |tile: usize, sy: usize| -> Option<(u8, u8)> {
+        let off = L3_TILES_BASE + tile * 16 + sy * 2;
+        if off + 1 >= vram.len() {
+            return None;
+        }
+        Some((vram[off], vram[off + 1]))
+    };
     for ty in 0..TILEMAP_H {
         for tx in 0..TILEMAP_W {
             let off = L3_TILEMAP_BASE + (ty * TILEMAP_W + tx) * 2;
@@ -129,29 +132,24 @@ fn main() -> anyhow::Result<()> {
             let pal = ((t >> 10) & 0x7) as usize;
             let flip_x = t & 0x4000 != 0;
             let flip_y = t & 0x8000 != 0;
-            let tile_base = L3_TILES_BASE + tile * 32;
             for py in 0..8u32 {
                 for px in 0..8u32 {
                     let sx = if flip_x { 7 - px } else { px } as usize;
                     let sy = if flip_y { 7 - py } else { py } as usize;
-                    let row_off = tile_base + sy * 2;
-                    if row_off + 17 >= vram.len() {
-                        continue;
-                    }
-                    let b0 = vram[row_off];
-                    let b1 = vram[row_off + 1];
-                    let b2 = vram[row_off + 16];
-                    let b3 = vram[row_off + 17];
+                    let (b0, b1) = match tile_row_2bpp(tile, sy) {
+                        Some(b) => b,
+                        None => continue,
+                    };
                     let bit = 7 - sx;
                     let c0 = (b0 >> bit) & 1;
                     let c1 = (b1 >> bit) & 1;
-                    let c2 = (b2 >> bit) & 1;
-                    let c3 = (b3 >> bit) & 1;
-                    let ci = (c0 | (c1 << 1) | (c2 << 2) | (c3 << 3)) as usize;
+                    let ci = (c0 | (c1 << 1)) as usize;
                     if ci == 0 {
                         continue;
                     }
-                    let rgb = read_color(&cpu.mem.cgram, pal * 16 + ci);
+                    // 2bpp BG palettes: 8 palettes of 4 colors at CGRAM
+                    // pal*4..pal*4+3.
+                    let rgb = read_color(&cpu.mem.cgram, pal * 4 + ci);
                     let o = (((ty as u32 * 8 + py) * w + tx as u32 * 8 + px) * 3) as usize;
                     pixels[o..o + 3].copy_from_slice(&rgb);
                 }

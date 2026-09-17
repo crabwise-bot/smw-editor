@@ -21,6 +21,16 @@ pub const TITLE_SCREEN_STRIPE_SNES: AddrSnes = AddrSnes(0x05B375);
 pub const TITLE_SCREEN_STRIPE_END_SNES: AddrSnes = AddrSnes(0x05B7C9);
 pub const TITLE_SCREEN_STRIPE_MAX_SIZE: usize = 0x05B7C9 - 0x05B375;
 
+/// Player-select stripe (`PlayerSelectStripe` in SMWDisX `bank_05.asm`): the
+/// "1 PLAYER GAME" / "2 PLAYER GAME" menu plus the blank clears around it.
+/// Drawn by `LoadScrnImage` (stripe index `$12`) after the title logo stripe,
+/// so it composes over the logo on the same Layer 3 tilemap. Fixed slot
+/// `0x05B872..0x05B8C7` on the U ROM (85 bytes; the next stripe image starts
+/// at `0x05B8C7`).
+pub const PLAYER_SELECT_STRIPE_SNES: AddrSnes = AddrSnes(0x05B872);
+pub const PLAYER_SELECT_STRIPE_END_SNES: AddrSnes = AddrSnes(0x05B8C7);
+pub const PLAYER_SELECT_STRIPE_MAX_SIZE: usize = 0x05B8C7 - 0x05B872;
+
 pub const ENEMY_NAME_COUNT: usize = 13;
 pub const ENEMY_NAME_STRIPE_STARTS: [AddrSnes; ENEMY_NAME_COUNT] = [
     AddrSnes(0x0DF300),
@@ -63,19 +73,21 @@ pub struct TitleDemoInput {
 
 #[derive(Debug, Clone)]
 pub struct TitleCreditsData {
-    pub title_submap:        u8,
-    pub title_demo_inputs:   Vec<TitleDemoInput>,
-    pub title_screen_stripe: Vec<u8>,
-    pub enemy_name_stripes:  Vec<Vec<u8>>,
+    pub title_submap:         u8,
+    pub title_demo_inputs:    Vec<TitleDemoInput>,
+    pub title_screen_stripe:  Vec<u8>,
+    pub player_select_stripe: Vec<u8>,
+    pub enemy_name_stripes:   Vec<Vec<u8>>,
 }
 
 impl TitleCreditsData {
     pub fn empty() -> Self {
         Self {
-            title_submap:        0,
-            title_demo_inputs:   Vec::new(),
-            title_screen_stripe: vec![0xFF],
-            enemy_name_stripes:  vec![vec![0xFF]; ENEMY_NAME_COUNT],
+            title_submap:         0,
+            title_demo_inputs:    Vec::new(),
+            title_screen_stripe:  vec![0xFF],
+            player_select_stripe: vec![0xFF],
+            enemy_name_stripes:   vec![vec![0xFF]; ENEMY_NAME_COUNT],
         }
     }
 
@@ -109,6 +121,13 @@ impl TitleCreditsData {
             "title screen stripe image",
         )?;
 
+        let player_select_stripe = read_terminated_slot(
+            rom,
+            PLAYER_SELECT_STRIPE_SNES,
+            PLAYER_SELECT_STRIPE_END_SNES,
+            "player select stripe image",
+        )?;
+
         let mut enemy_name_stripes = Vec::with_capacity(ENEMY_NAME_COUNT);
         for i in 0..ENEMY_NAME_COUNT {
             let end_snes =
@@ -121,7 +140,7 @@ impl TitleCreditsData {
             )?);
         }
 
-        Ok(Self { title_submap, title_demo_inputs, title_screen_stripe, enemy_name_stripes })
+        Ok(Self { title_submap, title_demo_inputs, title_screen_stripe, player_select_stripe, enemy_name_stripes })
     }
 
     pub fn title_input_bytes(&self) -> anyhow::Result<Vec<u8>> {
@@ -173,6 +192,19 @@ impl TitleCreditsData {
         }
         if !self.title_screen_stripe.ends_with(&[0xFF]) {
             anyhow::bail!("Title screen stripe must end with FF");
+        }
+        Ok(())
+    }
+
+    pub fn validate_player_select_stripe(&self) -> anyhow::Result<()> {
+        if self.player_select_stripe.len() > PLAYER_SELECT_STRIPE_MAX_SIZE {
+            anyhow::bail!(
+                "Player select stripe is {} bytes, but the vanilla fixed slot is only {PLAYER_SELECT_STRIPE_MAX_SIZE} bytes",
+                self.player_select_stripe.len()
+            );
+        }
+        if !self.player_select_stripe.ends_with(&[0xFF]) {
+            anyhow::bail!("Player select stripe must end with FF");
         }
         Ok(())
     }
@@ -235,10 +267,11 @@ mod tests {
     #[test]
     fn title_input_bytes_include_terminator() {
         let data = TitleCreditsData {
-            title_submap:        0,
-            title_demo_inputs:   vec![TitleDemoInput { buttons: 0x41, duration: 0x0F }],
-            title_screen_stripe: vec![0xFF],
-            enemy_name_stripes:  vec![Vec::new(); ENEMY_NAME_COUNT],
+            title_submap:         0,
+            title_demo_inputs:    vec![TitleDemoInput { buttons: 0x41, duration: 0x0F }],
+            title_screen_stripe:  vec![0xFF],
+            player_select_stripe: vec![0xFF],
+            enemy_name_stripes:   vec![Vec::new(); ENEMY_NAME_COUNT],
         };
         assert_eq!(data.title_input_bytes().unwrap(), vec![0x41, 0x0F, 0xFF]);
     }
