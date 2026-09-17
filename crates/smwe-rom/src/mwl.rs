@@ -3,16 +3,25 @@
 //! MWL is FuSoYa's level-exchange format for Super Mario World: one file holds
 //! everything Lunar Magic needs to recreate a level (secondary header, Layer 1
 //! objects, Layer 2 objects or background tilemap, sprites) plus placeholder
-//! sections for palettes, secondary entrances and ExGFX/bypass data, plus a
+//! sections for palettes, secondary entrances and ExGFX/bypass data, a
 //! documented ExAnimation section (section 6) carrying this editor's native
-//! ExAnimation encoding (see [`crate::exanimation`]).
+//! ExAnimation encoding (see [`crate::exanimation`]), and a documented
+//! Direct Map16 section (section 8) carrying this editor's native Direct
+//! Map16 encoding (see [`crate::direct_map16`]).
 //!
 //! # Format (binary MWL v3.63, clean-room description)
 //!
 //! * 0x40-byte header: signature `LM`, version `u16` (3.63 = `0x0363`),
 //!   directory offset `u32`, directory byte-length `u32`, flags `u32`,
 //!   48-byte comment block.
-//! * Directory at the offset: 8 entries of `(u32 file_offset, u32 byte_length)`.
+//! * Directory at the offset: entries of `(u32 file_offset, u32 byte_length)`.
+//!   Real Lunar Magic 3.63 writes exactly 8; this editor's own Direct Map16
+//!   extension adds a ninth (section 8). The decoder tolerates fewer or
+//!   more entries.
+//! * Section 8 (Direct Map16, editor-native extension): a `direct_map16`
+//!   payload encoding only this level's objects. On import, a non-empty
+//!   section 8 replaces the target level's Direct Map16 objects; an empty
+//!   section leaves existing data untouched.
 //! * Section 0 (level info): exactly 0x40 bytes — level number `u16`,
 //!   4-byte secondary header, 1-byte flags, 4-byte midway fields, main
 //!   entrance X/Y, Layer 2 scroll-extension byte, the rest reserved.
@@ -48,6 +57,7 @@ use thiserror::Error;
 
 use crate::{
     compression::lc_rle1,
+    direct_map16::{self, DirectMap16Data},
     exanimation::{self, ExAnimationData},
     exgfx,
     freespace,
@@ -76,8 +86,8 @@ pub const MWL_VERSION: u16 = 0x0363;
 
 /// Byte offset of the section directory in a canonical MWL file.
 pub const MWL_DIRECTORY_OFFSET: u32 = 0x40;
-/// Byte offset where section data begins in a canonical MWL file.
-pub const MWL_DATA_OFFSET: u32 = 0x80;
+/// Byte offset where section data begins: right after the directory.
+pub const MWL_DATA_OFFSET: u32 = MWL_DIRECTORY_OFFSET + (SECTION_COUNT as u32) * 8;
 
 /// Section indexes in the MWL directory.
 pub const SECTION_LEVEL_INFO: usize = 0;
@@ -88,7 +98,19 @@ pub const SECTION_PALETTE: usize = 4;
 pub const SECTION_SECONDARY_ENTRANCES: usize = 5;
 pub const SECTION_EXANIMATION: usize = 6;
 pub const SECTION_EXGFX_BYPASS: usize = 7;
-pub const SECTION_COUNT: usize = 8;
+pub const SECTION_COUNT: usize = 9;
+/// Section 8 (editor-native extension): Direct Map16 objects for this level.
+///
+/// Real Lunar Magic 3.63 files carry exactly eight sections; a ninth
+/// directory entry is this editor's own extension, documented in the
+/// Direct Map16 row of `docs/LUNAR_MAGIC_PARITY.md`. Section 8 holds a
+/// `direct_map16` payload (see that module) encoding only this level's
+/// objects. `MwlFile::encode` only emits the ninth entry when section 8 is
+/// non-empty, so files without Direct Map16 objects keep LM's exact
+/// 8-entry shape. On import, a non-empty section 8 replaces the target
+/// level's Direct Map16 objects; an empty section leaves existing data
+/// untouched.
+pub const SECTION_DIRECT_MAP16: usize = 8;
 
 /// Exact size of the level-info section.
 pub const LEVEL_INFO_SIZE: usize = 0x40;
@@ -166,6 +188,8 @@ pub enum MwlError {
     #[error("ExGFX/bypass section: {0}")]
     ExGfx(#[from] crate::exgfx::ExGfxError),
 
+    #[error("Bad Direct Map16 section: {0}")]
+    BadDirectMap16(#[from] direct_map16::Dm16Error),
     #[error("ROM error: {0}")]
     Rom(#[from] RomError),
 }
@@ -174,22 +198,30 @@ pub enum MwlError {
 // Container
 // -------------------------------------------------------------------------------------------------
 
-/// A decoded `.mwl` file: header fields plus the eight raw sections.
+/// A decoded `.mwl` file: header fields plus the raw sections.
+///
+/// Real Lunar Magic 3.63 files have exactly eight directory entries; this
+/// editor's own Direct Map16 extension adds a ninth (see
+/// [`SECTION_DIRECT_MAP16`]). Decode tolerates files with fewer entries and
+/// never rejects longer directories.
 #[derive(Debug, Clone)]
 pub struct MwlFile {
     pub version:     u16,
     pub flags:       u32,
     pub attribution: [u8; 48],
     /// Raw section payloads in directory order (level info, L1, L2,
-    /// sprites, palette, secondary entrances, ExAnimation, ExGFX/bypass).
+    /// sprites, palette, secondary entrances, ExAnimation, ExGFX/bypass,
+    /// Direct Map16).
     pub sections:    [Vec<u8>; SECTION_COUNT],
 }
 
 impl MwlFile {
     /// Decode an MWL file from its bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, MwlError> {
-        if bytes.len() < MWL_DATA_OFFSET as usize {
-            return Err(MwlError::Truncated { needed: MWL_DATA_OFFSET as usize, have: bytes.len() });
+        // Minimum viable file: header + 8 directory entries (real Lunar
+        // Magic shape); the ninth entry is optional.
+        if bytes.len() < MWL_DIRECTORY_OFFSET as usize + 8 * 8 {
+            return Err(MwlError::Truncated { needed: MWL_DIRECTORY_OFFSET as usize + 8 * 8, have: bytes.len() });
         }
         if &bytes[0..2] != b"LM" {
             return Err(MwlError::BadSignature);
@@ -201,11 +233,15 @@ impl MwlFile {
         let mut attribution = [0u8; 48];
         attribution.copy_from_slice(&bytes[16..64]);
 
-        if dir_len < SECTION_COUNT * 8 || dir_offset + dir_len > bytes.len() {
+        if dir_offset + dir_len > bytes.len() || dir_len % 8 != 0 {
             return Err(MwlError::Truncated { needed: dir_offset + dir_len, have: bytes.len() });
         }
+        // Read up to SECTION_COUNT directory entries. Real Lunar Magic 3.63
+        // files carry exactly eight; a ninth is this editor's Direct Map16
+        // extension (see SECTION_DIRECT_MAP16). Longer directories are
+        // tolerated: extra entries are ignored.
         let mut sections: [Vec<u8>; SECTION_COUNT] = Default::default();
-        for i in 0..SECTION_COUNT {
+        for i in 0..(dir_len / 8).min(SECTION_COUNT) {
             let e = dir_offset + i * 8;
             let offset = u32::from_le_bytes(bytes[e..e + 4].try_into().unwrap()) as usize;
             let length = u32::from_le_bytes(bytes[e + 4..e + 8].try_into().unwrap()) as usize;
@@ -218,26 +254,33 @@ impl MwlFile {
     }
 
     /// Encode this file to its canonical byte layout.
+    ///
+    /// Compatibility: the ninth directory entry (Direct Map16) is only
+    /// emitted when section 8 is non-empty. Files without Direct Map16
+    /// objects therefore keep Lunar Magic 3.63's exact 8-entry directory
+    /// shape; files that use the feature carry the documented extension.
     pub fn encode(&self) -> Result<Vec<u8>, MwlError> {
-        let mut out = Vec::with_capacity(MWL_DATA_OFFSET as usize);
+        let dir_entries = if self.sections[SECTION_DIRECT_MAP16].is_empty() { 8 } else { SECTION_COUNT };
+        let data_start = MWL_DIRECTORY_OFFSET as usize + dir_entries * 8;
+        let mut out = Vec::with_capacity(data_start);
         out.extend_from_slice(b"LM");
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&MWL_DIRECTORY_OFFSET.to_le_bytes());
-        out.extend_from_slice(&((SECTION_COUNT * 8) as u32).to_le_bytes());
+        out.extend_from_slice(&((dir_entries * 8) as u32).to_le_bytes());
         out.extend_from_slice(&self.flags.to_le_bytes());
         out.extend_from_slice(&self.attribution);
         debug_assert_eq!(out.len(), MWL_DIRECTORY_OFFSET as usize);
 
         // Directory.
-        let mut data_offset = MWL_DATA_OFFSET as usize;
-        for section in &self.sections {
+        let mut data_offset = data_start;
+        for section in &self.sections[..dir_entries] {
             out.extend_from_slice(&(data_offset as u32).to_le_bytes());
             out.extend_from_slice(&(section.len() as u32).to_le_bytes());
             data_offset += section.len();
         }
-        debug_assert_eq!(out.len(), MWL_DATA_OFFSET as usize);
+        debug_assert_eq!(out.len(), data_start);
         // Section data.
-        for section in &self.sections {
+        for section in &self.sections[..dir_entries] {
             out.extend_from_slice(section);
         }
         Ok(out)
@@ -451,8 +494,21 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
             Vec::new(), // secondary entrances: not supported in v1
             exanimation_section(rom, level_num as u16),
             section7,
+            direct_map16_section(rom, level_num as u16),
         ],
     })
+}
+
+/// Section 8 payload: this editor's native [`direct_map16`] encoding of the
+/// level's Direct Map16 objects (empty section when the level has none).
+fn direct_map16_section(rom: &SmwRom, level_num: u16) -> Vec<u8> {
+    let objects = rom.direct_map16.objects_for(level_num);
+    if objects.is_empty() {
+        return Vec::new();
+    }
+    let mut data = DirectMap16Data::default();
+    data.levels.insert(level_num, objects.to_vec());
+    encode_section(0, 0, &data.encode())
 }
 
 /// Section 6 payload: this editor's native [`exanimation`] encoding of the
@@ -631,6 +687,36 @@ pub fn import_level(
 
     // --- Sections 4, 5: unsupported in v1 ---
     for (i, name) in [(SECTION_PALETTE, "palette"), (SECTION_SECONDARY_ENTRANCES, "secondary entrances")] {
+    // --- Section 8: Direct Map16 (this editor's native encoding) ---
+    // A non-empty section replaces the target level's Direct Map16 objects;
+    // an empty section leaves existing data untouched.
+    {
+        let section = &mwl.sections[SECTION_DIRECT_MAP16];
+        if !section.is_empty() {
+            let (_, _, payload) = decode_section(SECTION_DIRECT_MAP16, section)?;
+            let data = DirectMap16Data::decode(payload).map_err(MwlError::BadDirectMap16)?;
+            let mut rom_data = match DirectMap16Data::parse(rom_bytes) {
+                Ok(d) => d,
+                Err(direct_map16::Dm16Error::NotFound) => DirectMap16Data::default(),
+                Err(e) => return Err(MwlError::BadDirectMap16(e)),
+            };
+            let objects: Vec<direct_map16::DirectMap16Object> =
+                data.levels.into_values().flat_map(|v| v.into_iter()).collect();
+            if objects.is_empty() {
+                rom_data.levels.remove(&(target_level as u16));
+            } else {
+                rom_data.levels.insert(target_level as u16, objects);
+            }
+            rom_data.write_to_rom(rom_bytes, header_offset).map_err(MwlError::BadDirectMap16)?;
+        }
+    }
+
+    // --- Sections 4, 5, 7: unsupported in v1 ---
+    for (i, name) in [
+        (SECTION_PALETTE, "palette"),
+        (SECTION_SECONDARY_ENTRANCES, "secondary entrances"),
+        (SECTION_EXGFX_BYPASS, "ExGFX/bypass"),
+    ] {
         if !mwl.sections[i].is_empty() {
             let _ = name;
             return Err(MwlError::UnsupportedSection(i));
@@ -690,7 +776,7 @@ mod tests {
             version:     MWL_VERSION,
             flags:       0,
             attribution: mwl_attribution(),
-            sections:    [vec![1, 2, 3], vec![4, 5], vec![], vec![6], vec![], vec![], vec![], vec![]],
+            sections:    [vec![1, 2, 3], vec![4, 5], vec![], vec![6], vec![], vec![], vec![], vec![], vec![]],
         };
         let bytes = file.encode().unwrap();
         assert_eq!(&bytes[0..2], b"LM");
@@ -700,6 +786,35 @@ mod tests {
         assert_eq!(back.sections[0], vec![1, 2, 3]);
         assert_eq!(back.sections[3], vec![6]);
         assert!(back.sections[2].is_empty());
+    }
+
+    #[test]
+    fn encode_emits_8_entries_without_dm16_and_9_with() {
+        // The Direct Map16 ninth directory entry is only emitted when the
+        // level actually has DM16 data, so files without it keep Lunar
+        // Magic 3.63's exact 8-entry directory shape.
+        let mut file = MwlFile {
+            version:     MWL_VERSION,
+            flags:       0,
+            attribution: mwl_attribution(),
+            sections:    Default::default(),
+        };
+        file.sections[SECTION_LEVEL_INFO] = vec![1, 2, 3];
+
+        let bytes = file.encode().unwrap();
+        let dir_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        assert_eq!(dir_len, 8 * 8, "no DM16: directory must match LM's 8 entries");
+        let back = MwlFile::decode(&bytes).unwrap();
+        assert!(back.sections[SECTION_DIRECT_MAP16].is_empty());
+        assert_eq!(back.sections[SECTION_LEVEL_INFO], vec![1, 2, 3]);
+
+        file.sections[SECTION_DIRECT_MAP16] = vec![9, 9, 9];
+        let bytes = file.encode().unwrap();
+        let dir_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        assert_eq!(dir_len, 9 * 8, "with DM16: ninth entry must be present");
+        let back = MwlFile::decode(&bytes).unwrap();
+        assert_eq!(back.sections[SECTION_DIRECT_MAP16], vec![9, 9, 9]);
+        assert_eq!(back.sections[SECTION_LEVEL_INFO], vec![1, 2, 3]);
     }
 
     #[test]
@@ -928,6 +1043,72 @@ mod tests {
     fn export_import_round_trip_l2_objects() {
         // Level 0x9 uses Layer 2 objects instead of a background.
         round_trip_level(0x9);
+    }
+
+    #[test]
+    fn direct_map16_section_round_trip() {
+        use crate::direct_map16::{DirectMap16Condition, DirectMap16Data, DirectMap16Object};
+        let mut data = DirectMap16Data::default();
+        data.levels.insert(0x105, vec![DirectMap16Object {
+            x:         3,
+            y:         5,
+            w:         4,
+            h:         2,
+            pw:        2,
+            ph:        1,
+            tiles:     vec![0x25, 0x26],
+            condition: Some(DirectMap16Condition { ram_addr: 0x14AF, bit: 8 }),
+        }]);
+        let section = encode_section(0, 0, &data.encode());
+        let (_, _, payload) = decode_section(SECTION_DIRECT_MAP16, &section).unwrap();
+        let back = DirectMap16Data::decode(payload).unwrap();
+        let objs = back.objects_for(0x105);
+        assert_eq!(objs.len(), 1);
+        assert_eq!(objs[0].x, 3);
+        assert_eq!(objs[0].tiles, vec![0x25, 0x26]);
+        assert_eq!(objs[0].condition, Some(DirectMap16Condition { ram_addr: 0x14AF, bit: 8 }));
+    }
+
+    #[test]
+    #[ignore]
+    fn direct_map16_mwl_export_import_round_trip() {
+        use crate::direct_map16::{DirectMap16Data, DirectMap16Object};
+        let path = std::env::var("ROM_PATH").expect("ROM_PATH must point at a headerless SMW ROM");
+        let mut bytes = std::fs::read(&path).unwrap();
+
+        // Author DM16 objects for level 0x0 directly on the scratch ROM.
+        // (0x0's Layer 2 background compresses small enough to fit the
+        // vanilla ROM's bank-$0C free space on reimport; 0x105's does not,
+        // which is a pre-existing import_level limitation unrelated to DM16.)
+        let mut data = DirectMap16Data::default();
+        data.levels.insert(0x0, vec![DirectMap16Object {
+            x:         8,
+            y:         16,
+            w:         3,
+            h:         3,
+            pw:        1,
+            ph:        1,
+            tiles:     vec![0x130],
+            condition: None,
+        }]);
+        data.write_to_rom(&mut bytes, 0).unwrap();
+        let rom = SmwRom::from_rom(Rom::new(bytes.clone()).unwrap()).expect("reparse authored ROM");
+
+        // Export: section 8 carries the objects.
+        let mwl = export_level(&rom, 0x0).unwrap();
+        assert!(!mwl.sections[SECTION_DIRECT_MAP16].is_empty());
+
+        // Import into level 0x107 of a fresh scratch copy.
+        let mut bytes2 = std::fs::read(&path).unwrap();
+        import_level(&mut bytes2, &mwl, 0x107, 0).unwrap();
+        let rom2 = SmwRom::from_rom(Rom::new(bytes2).unwrap()).expect("reparse imported ROM");
+        let objs = rom2.direct_map16.objects_for(0x107);
+        assert_eq!(objs.len(), 1);
+        assert_eq!(objs[0].x, 8);
+        assert_eq!(objs[0].w, 3);
+        assert_eq!(objs[0].tiles, vec![0x130]);
+        // Level 0x0 of the fresh copy has no DM16 data.
+        assert!(rom2.direct_map16.objects_for(0x0).is_empty());
     }
 
     fn round_trip_level(level_num: u32) {

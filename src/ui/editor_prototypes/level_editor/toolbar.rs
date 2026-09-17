@@ -172,6 +172,14 @@ impl UiLevelEditor {
             if tbtn(ui, icon::GRID_NINE, "Edit 16×16 tile map (Map16)", self.show_map16_editor) {
                 self.show_map16_editor = !self.show_map16_editor;
             }
+            if tbtn(
+                ui,
+                icon::SQUARES_FOUR,
+                "Add Objects / Direct Map16 (rectangular Map16 patterns as resizable level objects)",
+                self.dm16_add_open,
+            ) {
+                self.dm16_add_open = !self.dm16_add_open;
+            }
             {
                 // Dedicated WYSIWYG background editor; only for levels with a
                 // legacy Layer 2 background.

@@ -19,6 +19,30 @@ impl UiLevelEditor {
         // the sub-editor launchers now live in the top toolbar (Lunar Magic-style).
         // The left panel keeps the tile/sprite palette and the selection inspector.
 
+        // ── Direct Map16 ───────────────────────────────────
+        ui.separator();
+        ui.label("Direct Map16:");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Add Objects…")
+                .on_hover_text("Rectangular Map16 patterns as resizable level objects (LM v1.70+)")
+                .clicked()
+            {
+                self.dm16_add_open = true;
+            }
+            if ui
+                .button("Remap…")
+                .on_hover_text("Remap Map16 tile IDs across this level's Direct Map16 objects")
+                .clicked()
+            {
+                if self.dm16_remap_rows.is_empty() {
+                    self.dm16_remap_rows.push((0, 0));
+                }
+                self.dm16_remap_open = true;
+            }
+        });
+        ui.small("Ctrl+Shift+RightClick fills an enclosed blank area with the selected pattern.");
+
         // ── Draw mode tile picker ──────────────────────────
         if self.editing_mode == EditingMode::Draw && self.edit_sprites {
             ui.separator();
@@ -200,6 +224,10 @@ impl UiLevelEditor {
                 ui.monospace(format!("  Screen: {screen:X}"));
             }
         }
+
+        // Selected Direct Map16 objects (mutually exclusive with the
+        // vanilla object/sprite selections).
+        self.dm16_inspector(ui);
 
         // Selected object properties
         if self.edit_sprites && !self.selected_sprite_indices.is_empty() {

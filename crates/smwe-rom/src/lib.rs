@@ -3,6 +3,7 @@
 pub mod block_behavior;
 pub mod boss_text;
 pub mod compression;
+pub mod direct_map16;
 pub mod exanimation;
 pub mod exgfx;
 
@@ -31,6 +32,7 @@ use std::{fs, path::Path};
 
 use crate::{
     boss_text::BossText,
+    direct_map16::DirectMap16Data,
     exanimation::ExAnimationData,
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
@@ -74,6 +76,7 @@ pub struct SmwRom {
     pub sprite_header_ext:   SpriteHeaderExtData,
     pub exgfx:               exgfx::ExGfxData,
     pub gfx_bypass:          exgfx::BypassData,
+    pub direct_map16:        DirectMap16Data,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -195,6 +198,15 @@ impl SmwRom {
         log::info!("Parsing ExGFX files and Super GFX Bypass table");
         let exgfx = exgfx::ExGfxData::parse(rom.bytes());
         let gfx_bypass = exgfx::BypassData::parse(rom.bytes()).unwrap_or_default();
+        log::info!("Parsing Direct Map16 data");
+        let direct_map16 = DirectMap16Data::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has authored
+            // Direct Map16 objects for yet simply has no block.
+            if !matches!(e, direct_map16::Dm16Error::NotFound) {
+                log::warn!("Could not parse Direct Map16 data: {e}");
+            }
+            DirectMap16Data::default()
+        });
 
         Ok(Self {
             rom,
@@ -215,6 +227,7 @@ impl SmwRom {
             sprite_header_ext,
             exgfx,
             gfx_bypass,
+            direct_map16,
         })
     }
 
