@@ -182,6 +182,18 @@ impl UiLevelEditor {
             if tbtn(ui, icon::PENCIL_SIMPLE, "Edit 8×8 tile pixels (pixel editor)", self.show_tile_editor) {
                 self.show_tile_editor = !self.show_tile_editor;
             }
+            if tbtn(ui, icon::IMAGES, "Super GFX Bypass (per-level FG/BG/sprite slot assignment)", self.show_gfx_bypass)
+            {
+                self.show_gfx_bypass = !self.show_gfx_bypass;
+            }
+            if tbtn(
+                ui,
+                icon::STACK,
+                "ExGFX Manager (insert/extract/delete extra graphics files)",
+                self.show_exgfx_manager,
+            ) {
+                self.show_exgfx_manager = !self.show_exgfx_manager;
+            }
             if tbtn(ui, icon::PALETTE, "Edit colors (palette)", self.show_palette_editor) {
                 self.show_palette_editor = !self.show_palette_editor;
             }
