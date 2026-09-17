@@ -8,6 +8,7 @@ pub mod font_map;
 pub mod freespace;
 pub mod graphics;
 pub mod internal_header;
+pub mod layer3;
 pub mod level;
 pub mod map16_file;
 pub mod message_boxes;

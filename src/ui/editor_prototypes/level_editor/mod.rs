@@ -5,6 +5,7 @@ mod central_panel;
 mod editing;
 mod gfx_editor;
 mod gfx_slot_browser;
+mod layer3_settings;
 mod message_editor;
 
 mod left_panel;
@@ -221,6 +222,13 @@ pub struct UiLevelEditor {
     // the 8x8 tile editor.
     show_gfx_slots: bool,
 
+    // "Change Layer 3 Settings" dialog (Lunar Magic parity): edits the
+    // secondary header Layer 3 field + primary header priority bit, with a
+    // WYSIWYG stripe preview and the per-level GFX bypass table.
+    show_layer3_settings: bool,
+    layer3_dialog:        Option<layer3_settings::Layer3SettingsDialog>,
+    layer3_bypass:        smwe_rom::layer3::Layer3GfxBypass,
+
     // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
     // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
     // editor's working state.
@@ -330,6 +338,8 @@ impl UiLevelEditor {
         let raw = std::fs::read(&rom_path)
             .map_err(|e| anyhow::anyhow!("Cannot read ROM for emulator at {}: {e}", rom_path.display()))?;
         let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+        // Per-level Layer 3 GFX bypass table (RATS L3BP block), if the ROM has one.
+        let layer3_bypass = smwe_rom::layer3::Layer3GfxBypass::load(&rom_bytes);
         let mut emu_rom = EmuRom::new(rom_bytes);
         emu_rom.load_symbols(include_str!("../../../../symbols/SMW_U.sym"));
         let cpu = smwe_emu::Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
@@ -439,6 +449,9 @@ impl UiLevelEditor {
             gfx_edits: HashMap::new(),
             show_gfx_editor: false,
             show_gfx_slots: false,
+            show_layer3_settings: false,
+            layer3_dialog: None,
+            layer3_bypass,
             gfx_editor_file_num: 0,
             show_tile_editor: false,
             tile_editor_file_num: 0,
@@ -520,6 +533,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.sprite_tweaker_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
         self.gfx_slot_browser_window(&ctx);
+        self.layer3_settings_window(&ctx);
         self.tile_editor_window(&ctx);
         self.message_editor_window(&ctx);
         self.boss_text_editor_window(&ctx);
@@ -565,6 +579,8 @@ impl DockableEditorTool for UiLevelEditor {
     fn level_number(&self) -> Option<u16> {
         Some(self.level_num)
     }
+
+    /// "Change Layer 3 Settings" dialog window.
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
         let level_idx = self.level_num as usize;
@@ -1057,6 +1073,11 @@ impl DockableEditorTool for UiLevelEditor {
                 .map_err(|e| anyhow::anyhow!("ExAnimation write failed: {e}"))?;
         }
 
+        // Persist the per-level Layer 3 GFX bypass table (RATS L3BP block).
+        if !self.layer3_bypass.save_to_rom(rom_bytes, header_offset) {
+            anyhow::bail!("No free space for the Layer 3 GFX bypass table");
+        }
+
         Ok(())
     }
 
@@ -1091,6 +1112,49 @@ fn read_u24(rom_bytes: &[u8], file_off: usize) -> Option<u32> {
 
 // Internals
 impl UiLevelEditor {
+    fn layer3_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_layer3_settings {
+            return;
+        }
+        let mut open = self.show_layer3_settings;
+        // Raw ROM bytes for the Layer3 tables (header-stripped, like the emu ROM).
+        // We re-read the file here; the dialog only needs the tables.
+        let rom_bytes = match std::fs::read(&self.rom_path) {
+            Ok(raw) => {
+                if raw.len() % 0x400 == 0x200 {
+                    raw[0x200..].to_vec()
+                } else {
+                    raw
+                }
+            }
+            Err(_) => Vec::new(),
+        };
+        let tileset = self.level_properties.fg_bg_gfx;
+        let vram = self.cpu.mem.vram.clone();
+        let cgram = self.cpu.mem.cgram.clone();
+        let level_num = self.level_num;
+        let changed = if let Some(dlg) = self.layer3_dialog.as_mut() {
+            dlg.show(
+                ctx,
+                &mut open,
+                tileset,
+                &rom_bytes,
+                &vram,
+                &cgram,
+                &mut self.layer3_bypass,
+                level_num,
+                &mut self.level_properties.layer3,
+                &mut self.level_properties.layer3_priority,
+            )
+        } else {
+            false
+        };
+        if changed {
+            self.mark_edited();
+        }
+        self.show_layer3_settings = open;
+    }
+
     pub(super) fn editing_objects(&self) -> Option<&UndoableData<EditableObjectLayer>> {
         if self.edit_layer == 2 {
             self.layer2_objects.as_ref()

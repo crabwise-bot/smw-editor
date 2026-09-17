@@ -1,6 +1,6 @@
 use egui::{vec2, Color32, Rect, Sense, Slider, Ui};
 
-use super::UiLevelEditor;
+use super::{layer3_settings::Layer3SettingsDialog, UiLevelEditor};
 use crate::ui::editing_mode::EditingMode;
 
 impl UiLevelEditor {
@@ -443,6 +443,7 @@ impl UiLevelEditor {
             let mut rebuild_tiles = false;
             let mut refresh_sprites = false;
             let mut open_gfx_slots = false;
+            let mut open_layer3_settings = false;
             let mut changed = false;
 
             ui.strong("Primary Header");
@@ -646,6 +647,13 @@ impl UiLevelEditor {
                 }
                 row_check!("Auto-Set Screens:", p.layer2_auto_set_screens);
                 row_slider!("Layer 3:", p.layer3, 0..=3_i32);
+                ui.label("");
+                if ui.button("Layer 3 Settings…").on_hover_text(
+                    "Change Layer 3 Settings: named tide/scroll behavior, WYSIWYG stripe preview, per-level GFX bypass (Lunar Magic parity)"
+                ).clicked() {
+                    open_layer3_settings = true;
+                }
+                ui.end_row();
                 row_slider!("Entrance Action:", p.main_entrance_action, 0..=7_i32);
                 row_slider!("Midway Screen:", p.midway_entrance_screen, 0..=15_i32);
                 row_slider!("FG Initial Pos:", p.fg_initial_pos, 0..=3_i32);
@@ -686,6 +694,15 @@ impl UiLevelEditor {
             }
             if open_gfx_slots {
                 self.show_gfx_slots = true;
+            }
+            if open_layer3_settings {
+                self.show_layer3_settings = true;
+                // (Re)create the dialog from current header state.
+                let bypass_gfx = self.layer3_bypass.get(self.level_num);
+                self.layer3_dialog = Some(Layer3SettingsDialog::new(
+                    self.level_properties.layer3,
+                    bypass_gfx,
+                ));
             }
         });
         self.show_level_header = open;
