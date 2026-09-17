@@ -10,7 +10,7 @@ impl UiLevelEditor {
             return;
         }
         let mut open = self.show_map16_editor;
-        egui::Window::new("Map16 Block Editor").open(&mut open).resizable(false).show(ctx, |ui| {
+        let win = egui::Window::new("Map16 Block Editor").open(&mut open).resizable(false).show(ctx, |ui| {
             // Block selector
             ui.horizontal(|ui| {
                 ui.label("Block:");
@@ -158,9 +158,76 @@ impl UiLevelEditor {
                 }
             }
 
+            // ── Clipboard: copy/paste this block's tile words ─────────────
+            // Lunar Magic v1.63 has clipboard copy/paste in the 16x16 editor;
+            // the payload is `smwclip:1:` text, so the four hex tile words
+            // can also be read straight out of a paste into any text field.
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("⧉ Copy block").on_hover_text("Copy this block's 4 tile words (Ctrl+C)").clicked() {
+                    crate::ui::clipboard::copy_payload(ctx, &crate::ui::clipboard::ClipboardPayload::Map16BlockWords {
+                        words: tile_words,
+                    });
+                    self.mwl_status = Some(format!("Copied Map16 block {block_id:#06X} to clipboard"));
+                }
+                if ui.button("⎘ Paste block").on_hover_text("Paste tile words from the clipboard (Ctrl+V)").clicked()
+                {
+                    // The integration answers with Event::Paste on the next
+                    // frame; picked up below (Ctrl+V arrives directly).
+                    crate::ui::clipboard::request_paste(ctx);
+                }
+            });
+            ui.small("Tip: Ctrl+C / Ctrl+V work here too when the window is focused.");
+
             self.map16_file_controls(ui);
         });
         self.show_map16_editor = open;
+        self.map16_window_hovered = win.is_some_and(|r| r.response.hovered());
+
+        // Ctrl+C while the pointer is over this window (the level canvas's
+        // own clipboard keys stand down — see central_panel). Paste arrives
+        // as Event::Paste directly on Ctrl+V, or after the Paste button's
+        // viewport request — drain it here while this window has copy intent.
+        if self.map16_window_hovered && !ctx.memory(|m| m.focused().is_some()) {
+            if ctx.input(|i| i.events.contains(&egui::Event::Copy)) {
+                let block_id = self.selected_map16_block_for_edit.unwrap_or(self.draw_block_id);
+                let words = self.get_block_tile_words(block_id);
+                crate::ui::clipboard::copy_payload(ctx, &crate::ui::clipboard::ClipboardPayload::Map16BlockWords {
+                    words,
+                });
+                self.mwl_status = Some(format!("Copied Map16 block {block_id:#06X} to clipboard"));
+            }
+            if let Some(text) = crate::ui::clipboard::take_paste_text(ctx) {
+                self.map16_apply_pasted_payload(&text);
+            }
+        }
+    }
+
+    /// Apply a pasted clipboard payload in the Map16 Block Editor: tile words
+    /// replace the current block's words; a single copied block ID jumps the
+    /// editor to that block.
+    fn map16_apply_pasted_payload(&mut self, text: &str) {
+        let block_id = self.selected_map16_block_for_edit.unwrap_or(self.draw_block_id);
+        match crate::ui::clipboard::ClipboardPayload::decode(text) {
+            Some(crate::ui::clipboard::ClipboardPayload::Map16BlockWords { words }) => {
+                self.map16_edits.insert(block_id, words);
+                self.mark_edited();
+                self.mwl_status = Some(format!("Pasted tile words into Map16 block {block_id:#06X}"));
+            }
+            Some(crate::ui::clipboard::ClipboardPayload::Map16Blocks { cols: 1, rows: 1, ids }) => {
+                let id = ids[0];
+                self.selected_map16_block_for_edit = Some(id);
+                self.mwl_status = Some(format!("Jumped to Map16 block {id:#06X}"));
+            }
+            Some(_) => {
+                self.mwl_status = Some(
+                    "Clipboard holds level/8x8/overworld data — nothing to paste into the Map16 editor".to_string(),
+                );
+            }
+            None => {
+                self.mwl_status = Some("Clipboard doesn't hold smw-editor data".to_string());
+            }
+        }
     }
 
     pub(super) fn get_block_tile_words(&self, block_id: u16) -> [u16; 4] {

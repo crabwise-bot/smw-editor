@@ -5,6 +5,7 @@ use egui::{
     Align2,
     Color32,
     CornerRadius,
+    Event,
     FontId,
     Key,
     PaintCallback,
@@ -499,6 +500,46 @@ impl UiLevelEditor {
                 self.editing_mode = EditingMode::Probe;
             }
         });
+
+        // ── Clipboard: Lunar Magic-style cut/copy/paste ────────────────
+        // Ctrl+C / Ctrl+X arrive as Event::Copy / Event::Cut (the same events
+        // TextEdit consumes, so a focused text widget keeps its own copy).
+        // Paste arrives as Event::Paste — pushed directly by the integration
+        // on Ctrl+V, and on the next frame after a ViewportCommand::RequestPaste
+        // (toolbar Paste button). The canvas stands down while the pointer is
+        // over a floating editor window with its own clipboard keys (Map16 /
+        // 8x8 tile editors).
+        let widget_focused = ui.ctx().memory(|m| m.focused().is_some());
+        let window_has_copy_intent = self.map16_window_hovered || self.tile_editor_window_hovered;
+        if !widget_focused && !window_has_copy_intent {
+            if ui.input(|i| i.events.contains(&Event::Copy)) {
+                self.clipboard_copy_selection(ui.ctx());
+            }
+            if ui.input(|i| i.events.contains(&Event::Cut)) {
+                self.clipboard_cut_selection(ui.ctx());
+            }
+            if let Some(text) = crate::ui::clipboard::take_paste_text(ui.ctx()) {
+                match crate::ui::clipboard::ClipboardPayload::decode(&text) {
+                    Some(payload) => {
+                        // Anchor at the hover tile when the pointer is over
+                        // the canvas, else just past the copied position.
+                        let anchor = resp
+                            .hover_pos()
+                            .map(|pos| {
+                                let rel = (pos - origin) / tile_sz;
+                                (rel.x.floor().max(0.0) as u32, rel.y.floor().max(0.0) as u32)
+                            })
+                            .or(self.clipboard_copy_origin.map(|(x, y)| (x + 1, y + 1)))
+                            .unwrap_or((0, 0));
+                        self.clipboard_paste_at(&payload, anchor, level_w, level_h);
+                    }
+                    None => {
+                        self.mwl_status =
+                            Some("Clipboard doesn't hold smw-editor data — copy a selection first".to_string());
+                    }
+                }
+            }
+        }
 
         // ── Selected tile highlight ────────────────────────────
         if let Some((x, y)) = self.selected_tile {

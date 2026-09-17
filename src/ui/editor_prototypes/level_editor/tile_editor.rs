@@ -102,9 +102,11 @@ impl UiLevelEditor {
             return;
         }
         let mut open = self.show_tile_editor;
-        egui::Window::new("8x8 Tile Editor").open(&mut open).resizable(true).default_size([880.0, 560.0]).show(
-            ctx,
-            |ui| {
+        let win = egui::Window::new("8x8 Tile Editor")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([880.0, 560.0])
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("GFX file:");
                     let mut file_num = self.tile_editor_file_num as i32;
@@ -144,9 +146,61 @@ impl UiLevelEditor {
                         self.tile_editor_pixel_pane(ui, file_num, format);
                     });
                 });
-            },
-        );
+            });
         self.show_tile_editor = open;
+        self.tile_editor_window_hovered = win.is_some_and(|r| r.response.hovered());
+
+        // Ctrl+C while the pointer is over this window (the level canvas's
+        // own clipboard keys stand down — see central_panel). Paste arrives
+        // as Event::Paste directly on Ctrl+V — drain it here while this
+        // window has copy intent. Lunar Magic v1.63 has clipboard
+        // copy/paste in the 8x8 editor.
+        if self.tile_editor_window_hovered && !ctx.memory(|m| m.focused().is_some()) {
+            if ctx.input(|i| i.events.contains(&egui::Event::Copy)) {
+                self.tile_editor_copy_selected(ctx);
+            }
+            if let Some(text) = crate::ui::clipboard::take_paste_text(ctx) {
+                self.tile_editor_apply_paste(&text);
+            }
+        }
+    }
+
+    /// Copy the selected 8x8 tile's color indices to the system clipboard
+    /// (`smwclip:1:` text — the hex pixel values read like LM's "tile hex
+    /// values copied as text").
+    fn tile_editor_copy_selected(&mut self, ctx: &egui::Context) -> bool {
+        let sel = self.tile_editor_selected;
+        let file_num = self.tile_editor_file_num;
+        let pixels: Option<[u8; 64]> =
+            self.tile_editor_tiles(file_num).get(sel).and_then(|t| t.color_indices.as_ref().try_into().ok());
+        let Some(pixels) = pixels else { return false };
+        crate::ui::clipboard::copy_payload(ctx, &crate::ui::clipboard::ClipboardPayload::Tile8x8 {
+            file: file_num as u8,
+            pixels,
+        });
+        self.mwl_status = Some(format!("Copied 8x8 tile {sel:#04X} (GFX file {file_num:02X}) to clipboard"));
+        true
+    }
+
+    /// Paste 8x8 tile pixels from the clipboard: loads them into the pixel
+    /// working buffer and applies (stages) immediately, like LM's 8x8 editor
+    /// paste. Indices clamp to this file's bit depth on apply.
+    fn tile_editor_apply_paste(&mut self, text: &str) {
+        match crate::ui::clipboard::ClipboardPayload::decode(text) {
+            Some(crate::ui::clipboard::ClipboardPayload::Tile8x8 { file, pixels }) => {
+                self.tile_editor_pixels = pixels;
+                self.apply_tile_editor_pixels();
+                self.mwl_status = Some(format!("Pasted 8x8 tile (from GFX file {file:02X})"));
+            }
+            Some(_) => {
+                self.mwl_status = Some(
+                    "Clipboard holds level/Map16/overworld data — nothing to paste into the 8x8 editor".to_string(),
+                );
+            }
+            None => {
+                self.mwl_status = Some("Clipboard doesn't hold smw-editor data".to_string());
+            }
+        }
     }
 
     /// Tiles currently displayed for a file: the staged working copy when the
@@ -448,8 +502,16 @@ impl UiLevelEditor {
             if ui.button("Revert file").clicked() {
                 self.revert_tile_editor_file();
             }
+            if ui.button("⧉ Copy tile").on_hover_text("Copy this tile's pixels to the clipboard (Ctrl+C)").clicked() {
+                self.tile_editor_copy_selected(ui.ctx());
+            }
+            if ui.button("⎘ Paste tile").on_hover_text("Paste tile pixels from the clipboard (Ctrl+V)").clicked() {
+                // The integration answers with Event::Paste on the next
+                // frame; picked up below (Ctrl+V arrives directly).
+                crate::ui::clipboard::request_paste(ui.ctx());
+            }
         });
-        ui.small("Left-drag paints • right-click picks up a color • Apply stages the tile for save.");
+        ui.small("Left-drag paints • right-click picks up a color • Apply stages the tile for save. Ctrl+C copies the tile • Ctrl+V pastes.");
     }
 }
 

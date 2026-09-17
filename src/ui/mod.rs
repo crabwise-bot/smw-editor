@@ -7,6 +7,8 @@ mod tool;
 mod welcome;
 mod world_editor;
 
+pub mod clipboard;
+
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
