@@ -175,6 +175,9 @@ impl UiLevelEditor {
             if tbtn(ui, icon::CHAT, "Edit message box text", self.show_message_editor) {
                 self.show_message_editor = !self.show_message_editor;
             }
+            if tbtn(ui, icon::FILM_SCRIPT, "Edit boss sequence text", self.show_boss_text_editor) {
+                self.show_boss_text_editor = !self.show_boss_text_editor;
+            }
             if tbtn(
                 ui,
                 icon::FILM_STRIP,
