@@ -37,6 +37,7 @@ use crate::{
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
     level::{
+        dimensions::LevelHeights,
         secondary_entrance::{SecondaryEntrance, SecondaryExitExtData, SECONDARY_ENTRANCE_TABLE},
         sprite_header_ext::{SpriteHeaderExtData, SpriteHeaderExtError},
         Level,
@@ -77,6 +78,7 @@ pub struct SmwRom {
     pub exgfx:               exgfx::ExGfxData,
     pub gfx_bypass:          exgfx::BypassData,
     pub direct_map16:        DirectMap16Data,
+    pub level_heights:       LevelHeights,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -208,6 +210,16 @@ impl SmwRom {
             DirectMap16Data::default()
         });
 
+        log::info!("Parsing dynamic level heights");
+        let level_heights = LevelHeights::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has set a custom
+            // level height for yet simply has no block.
+            if !matches!(e, level::dimensions::LevelHeightError::NotFound) {
+                log::warn!("Could not parse level height data: {e}");
+            }
+            LevelHeights::default()
+        });
+
         Ok(Self {
             rom,
             internal_header,
@@ -228,6 +240,7 @@ impl SmwRom {
             exgfx,
             gfx_bypass,
             direct_map16,
+            level_heights,
         })
     }
 

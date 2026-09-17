@@ -1495,6 +1495,30 @@ impl DockableEditorTool for UiLevelEditor {
                 .write_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Direct Map16 write failed: {e}"))?;
         }
+        // ── Dynamic level height (LM v3.00) ──────────────────────────────────
+        // Single RATS-tagged free-space block ("SMWLVLH1"). Merge on save:
+        // re-read the block from the bytes being saved and replace only this
+        // level's entry, so other tabs' heights are never clobbered. Skip the
+        // write entirely when the stored height already matches — the RATS
+        // block is reallocated on every write, so an unconditional write
+        // would churn free space on every save.
+        {
+            use smwe_rom::level::dimensions::{LevelHeightError, LevelHeights};
+            let mut merged = match LevelHeights::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(LevelHeightError::NotFound) => LevelHeights::default(),
+                Err(e) => anyhow::bail!("Level height read failed: {e}"),
+            };
+            if merged.get(self.level_num) != self.level_properties.level_height_tiles {
+                let screens = self.level_properties.num_screens();
+                merged
+                    .set(self.level_num, self.level_properties.level_height_tiles, screens)
+                    .map_err(|e| anyhow::anyhow!("Level height invalid: {e}"))?;
+                merged
+                    .write_to_rom(rom_bytes, header_offset)
+                    .map_err(|e| anyhow::anyhow!("Level height write failed: {e}"))?;
+            }
+        }
 
         Ok(())
     }
@@ -1643,7 +1667,10 @@ impl UiLevelEditor {
 
         let (sprite_layer, is_vertical) = {
             let level = &self.rom.levels[level_idx];
-            self.level_properties = LevelProperties::from_level(level);
+            // Dynamic level dimensions (LM v3.00): the height travels in a
+            // RATS block, not the vanilla header, so load it alongside.
+            let height_tiles = self.rom.level_heights.get(self.level_num);
+            self.level_properties = LevelProperties::from_level(level, height_tiles);
             let layer1 = EditableObjectLayer::from_level(level);
             self.layer1 = UndoableData::new(layer1);
             self.direct_map16 =

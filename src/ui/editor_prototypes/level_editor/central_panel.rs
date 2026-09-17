@@ -44,7 +44,7 @@ impl UiLevelEditor {
         // object (or one of its handles) suppresses canvas panning.
         // (level_w/level_h are copied first: update_object_drag needs
         // &mut self while `props` below borrows it immutably.)
-        self.update_object_drag(&resp, origin, tile_sz, level_w, level_h);
+        self.update_object_drag(&resp, origin, tile_sz, level_w, level_h, self.level_properties.is_vertical);
 
         let props = &self.level_properties;
         let (scr_w, scr_h) = props.screen_dimensions_in_tiles();

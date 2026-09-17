@@ -519,7 +519,65 @@ impl UiLevelEditor {
                 }
 
                 row_slider!("Level Length:", p.level_length, 0..=31_i32);
+                // Shrinking the tilemap-RAM budget (more screens) can leave
+                // the height over budget: clamp it immediately so the height
+                // slider and the save path never disagree.
+                {
+                    let max_h = smwe_rom::level::dimensions::max_height_tiles(p.num_screens());
+                    if !p.is_vertical && p.level_height_tiles > max_h {
+                        p.level_height_tiles = max_h;
+                        changed = true;
+                    }
+                }
                 row_slider_hex!("Level Mode:", p.level_mode, 0..=31_i32, 2);
+
+                // ── Dynamic level dimensions (LM v3.00) ──
+                // Horizontal levels can be taller than the vanilla 27 tiles,
+                // limited by the tilemap-RAM budget (screens × height ≤ 896).
+                // The height is stored in a RATS block ("SMWLVLH1"), not the
+                // vanilla header: without LM's in-game dynamic-dimensions
+                // engine the ROM still plays 27 tiles.
+                {
+                    let max_h = smwe_rom::level::dimensions::max_height_tiles(p.num_screens()) as i32;
+                    ui.label("Level Height:");
+                    ui.horizontal(|ui| {
+                        if p.is_vertical {
+                            let mut v = 16_i32;
+                            ui.add_enabled(false, Slider::new(&mut v, 16..=16_i32)).on_hover_text(
+                                "Vertical levels are always 16 tiles per screen; \
+                                 dynamic height is horizontal-only (LM v3.00).",
+                            );
+                        } else {
+                            let mut v = p.level_height_tiles as i32;
+                            let resp = ui.add(Slider::new(&mut v, 1..=max_h)).on_hover_text(format!(
+                                "LM v3.00 dynamic level height (vanilla: 27 tiles).\n\
+                                 Tilemap RAM budget: screens × height ≤ 896 — \
+                                 with {} screen(s) the max is {} tiles.\n\
+                                 In-game playback needs LM's dynamic-dimensions engine; \
+                                 without it the ROM plays 27 tiles.",
+                                p.num_screens(),
+                                max_h
+                            ));
+                            if resp.changed() {
+                                p.level_height_tiles = v as u16;
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    if !p.is_vertical && p.level_height_tiles > 32 {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "Rows 32+ need LM's 32-row band objects (ext 01/03); \
+                                 the vanilla object stream places rows 0–31.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.end_row();
+                    }
+                }
 
                 ui.label("FG/BG GFX:");
                 {
