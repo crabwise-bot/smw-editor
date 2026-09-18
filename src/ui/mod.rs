@@ -9,6 +9,7 @@ mod welcome;
 mod world_editor;
 
 pub mod clipboard;
+pub mod restore;
 
 use std::{
     path::{Path, PathBuf},
@@ -33,6 +34,7 @@ use crate::{
     ui::{
         dev_utils::address_converter::UiAddressConverter,
         editor_prototypes::{level_editor::UiLevelEditor, sprite_map_editor::UiSpriteMapEditor},
+        restore::RestoreManager,
         tab_viewer::EditorToolTabViewer,
         tool::DockableEditorTool,
         world_editor::UiWorldEditor,
@@ -84,6 +86,30 @@ pub struct UiMainWindow {
     batch_status:             Option<String>,
     /// Set when user tries to close the app with unsaved changes
     show_exit_dialog:         bool,
+    /// Restore points + original-ROM reference copy (Restore menu, LM v1.80).
+    restore_manager:          RestoreManager,
+    /// In-egui file dialog for Apply IPS Patch.
+    ips_apply_dialog:         FileDialog,
+    /// "Create Restore Point" dialog state.
+    show_restore_dialog:      bool,
+    /// Name typed into the "Create Restore Point" dialog.
+    restore_point_name:       String,
+    /// Restore-point index awaiting revert confirmation.
+    pending_revert:           Option<usize>,
+    /// IPS patch path + preview awaiting apply confirmation.
+    pending_ips_apply:        Option<PendingIpsApply>,
+    /// IPS export destination awaiting same-directory-warning confirmation.
+    pending_ips_export:       Option<PathBuf>,
+    /// Status line for restore/IPS actions (shown in the Restore menu area).
+    restore_status:           Option<String>,
+}
+
+/// An IPS patch the user picked, applied in-memory to the current ROM image,
+/// waiting for the user to confirm installing it.
+struct PendingIpsApply {
+    patch_path:    PathBuf,
+    patched_bytes: Vec<u8>,
+    bytes_changed: usize,
 }
 
 impl UiMainWindow {
@@ -122,6 +148,14 @@ impl UiMainWindow {
             batch_include_sprites: true,
             batch_status: None,
             show_exit_dialog: false,
+            restore_manager: RestoreManager::new(),
+            ips_apply_dialog: FileDialog::new(),
+            show_restore_dialog: false,
+            restore_point_name: String::new(),
+            pending_revert: None,
+            pending_ips_apply: None,
+            pending_ips_export: None,
+            restore_status: None,
         }
     }
 }
@@ -164,6 +198,17 @@ impl eframe::App for UiMainWindow {
             self.batch_out_dir = Some(dir);
             self.batch_status = None;
         }
+        // IPS export same-directory warning (LM v1.80).
+        self.show_ips_export_warning_dialog(ctx, rom.as_ref());
+
+        // Apply IPS dialog (Restore menu).
+        self.show_ips_apply_dialog(ctx);
+
+        // Create Restore Point dialog (Restore menu).
+        self.show_restore_point_dialog(ctx);
+
+        // Revert-to-restore-point confirmation (Restore menu).
+        self.show_revert_confirm_dialog(ctx);
 
         // Save error toast.
         if let Some(err) = &self.save_error.clone() {
@@ -328,6 +373,8 @@ impl UiMainWindow {
                     data.insert_temp(Project::rom_id(), Arc::clone(&project.rom));
                 });
                 self.rom_path = Some(path.clone());
+                // Capture the original-ROM reference copy for the Restore menu.
+                self.restore_manager.open_rom(&path);
                 let rom: Arc<SmwRom> = Arc::clone(&project.rom);
                 match UiLevelEditor::new(Arc::clone(&self.gl), rom, path) {
                     Ok(editor) => self.open_tool(editor),
@@ -339,7 +386,7 @@ impl UiMainWindow {
     }
 
     fn save_rom(&mut self, ctx: &Context) {
-        let Some(path) = &self.rom_path else {
+        let Some(path) = self.rom_path.clone() else {
             self.save_error = Some("No ROM path — open a ROM first.".into());
             return;
         };
@@ -348,9 +395,10 @@ impl UiMainWindow {
             self.save_error = Some("No ROM loaded.".into());
             return;
         };
-        match self.write_rom_to_path(path, path) {
+        self.maybe_auto_restore_point(&path);
+        match self.write_rom_to_path(&path, &path) {
             Ok(()) => {
-                if let Err(e) = self.reload_rom_into_context(ctx, path) {
+                if let Err(e) = self.reload_rom_into_context(ctx, &path) {
                     self.save_error = Some(format!("Saved ROM, but reload failed: {e}"));
                 } else {
                     log::info!("Saved ROM to {}", path.display());
@@ -482,20 +530,13 @@ impl UiMainWindow {
     fn show_ips_export_dialog(&mut self, ctx: &Context, rom: Option<&Arc<SmwRom>>) {
         self.ips_export_dialog.update(ctx);
         if let Some(patch_dest) = self.ips_export_dialog.take_picked() {
-            let Some(rom) = rom else {
-                self.save_error = Some("No ROM loaded.".into());
-                return;
-            };
-            let Some(src) = self.rom_path.clone() else {
-                self.save_error = Some("No ROM path — open a ROM first.".into());
-                return;
-            };
-
-            match self.create_ips_patch(rom, &src, &patch_dest) {
-                Ok(_) => {
-                    log::info!("Exported IPS patch to {}", patch_dest.display());
-                }
-                Err(e) => self.save_error = Some(format!("IPS export failed: {e}")),
+            // LM v1.80 warns when the patch lands next to the ROM.
+            let same_dir =
+                self.rom_path.as_ref().and_then(|r| r.parent()).zip(patch_dest.parent()).is_some_and(|(a, b)| a == b);
+            if same_dir {
+                self.pending_ips_export = Some(patch_dest);
+            } else {
+                self.run_ips_export(rom, &patch_dest);
             }
         }
     }
@@ -704,6 +745,285 @@ impl UiMainWindow {
         log::info!("Batch-exported {exported} level PNGs to {}", out_dir.display());
     }
 
+    // ── Restore menu (LM v1.80 parity) ──────────────────────────────
+
+    /// Full current ROM image: the file on disk with all unsaved tab edits
+    /// merged in — the same base Save and the patch exporters use.
+    fn current_rom_image(&self) -> anyhow::Result<Vec<u8>> {
+        let Some(src) = self.rom_path.clone() else { anyhow::bail!("No ROM path — open a ROM first.") };
+        let mut bytes = std::fs::read(&src).with_context(|| format!("Failed to read ROM from {}", src.display()))?;
+        let has_smc_header = bytes.len() % 0x400 == 0x200;
+        for (_, tab) in self.dock_state.iter_all_tabs() {
+            tab.save_to_rom(&mut bytes, has_smc_header)?;
+        }
+        Ok(bytes)
+    }
+
+    /// Snapshot the pre-save file image as an automatic restore point when
+    /// change-tracking is on. Called before every in-place save.
+    fn maybe_auto_restore_point(&mut self, path: &Path) {
+        if !self.restore_manager.auto_track_on_save {
+            return;
+        }
+        match std::fs::read(path) {
+            Ok(before) => self.restore_manager.auto_point_before_save(before),
+            Err(e) => log::warn!("auto restore point skipped: {e:#}"),
+        }
+    }
+
+    /// "Create Restore Point..." dialog (Restore menu).
+    fn show_restore_point_dialog(&mut self, ctx: &Context) {
+        if !self.show_restore_dialog {
+            return;
+        }
+        let mut open = true;
+        let mut close_requested = false;
+        let mut create = false;
+        Window::new("Create Restore Point").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label("Snapshot the current ROM, including unsaved edits.");
+            ui.text_edit_singleline(&mut self.restore_point_name);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Create").clicked() {
+                    create = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+        if create {
+            let name = self.restore_point_name.trim().to_string();
+            let name = if name.is_empty() { self.restore_manager.suggested_name() } else { name };
+            match self.current_rom_image() {
+                Ok(bytes) => {
+                    self.restore_manager.create_point(name.clone(), bytes);
+                    self.restore_status = Some(format!("Restore point \"{name}\" created."));
+                    log::info!("Created restore point \"{name}\"");
+                }
+                Err(e) => self.save_error = Some(format!("Could not snapshot ROM: {e:#}")),
+            }
+            self.show_restore_dialog = false;
+        } else if !open || close_requested {
+            self.show_restore_dialog = false;
+        }
+    }
+
+    /// "Revert to Restore Point" confirmation dialog.
+    fn show_revert_confirm_dialog(&mut self, ctx: &Context) {
+        let Some(index) = self.pending_revert else { return };
+        let Some(name) = self.restore_manager.points().get(index).map(|p| p.name.clone()) else {
+            self.pending_revert = None;
+            return;
+        };
+        let unsaved = self.has_any_unsaved_changes();
+        let mut open = true;
+        let mut close_requested = false;
+        let mut revert = false;
+        Window::new("Revert to Restore Point").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(format!("Revert the ROM to \"{name}\"?"));
+            if unsaved {
+                ui.label(
+                    RichText::new("Open editors have unsaved changes — reverting discards them.")
+                        .color(Color32::YELLOW),
+                );
+            }
+            ui.label(
+                "The current file is kept as a .bak backup. All open editors will be\n\
+                 closed and reopened on the reverted ROM.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Revert").clicked() {
+                    revert = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+        if revert {
+            self.pending_revert = None;
+            self.perform_revert(ctx, index, &name);
+        } else if !open || close_requested {
+            self.pending_revert = None;
+        }
+    }
+
+    fn perform_revert(&mut self, ctx: &Context, index: usize, name: &str) {
+        let Some(bytes) = self.restore_manager.revert_bytes(index).map(<[u8]>::to_vec) else {
+            self.save_error = Some("Restore point no longer exists.".to_string());
+            return;
+        };
+        match self.install_rom_image(ctx, &bytes) {
+            Ok(()) => {
+                self.restore_status = Some(format!("Reverted to \"{name}\"."));
+                log::info!("Reverted ROM to restore point \"{name}\"");
+            }
+            Err(e) => self.save_error = Some(format!("Revert failed: {e:#}")),
+        }
+    }
+
+    /// Write a full ROM image to the open ROM's path (`.bak` backup), reload
+    /// it into the context, then close every open editor tab — tabs hold
+    /// `Arc<SmwRom>`s parsed from the old image — and reopen the level
+    /// editor on the new image.
+    fn install_rom_image(&mut self, ctx: &Context, bytes: &[u8]) -> anyhow::Result<()> {
+        let path = self.rom_path.clone().context("No ROM is open.")?;
+        Self::atomic_write_with_backup(&path, bytes)?;
+        self.reload_rom_into_context(ctx, &path)?;
+        self.dock_state = DockState::new(vec![]);
+        let rom: Option<Arc<SmwRom>> = ctx.data(|d| d.get_temp(Project::rom_id()));
+        let Some(rom) = rom else { anyhow::bail!("Reloaded ROM missing from context") };
+        match UiLevelEditor::new(Arc::clone(&self.gl), rom, path) {
+            Ok(editor) => self.open_tool(editor),
+            Err(e) => self.save_error = Some(format!("ROM installed, but the level editor failed to reopen: {e:#}")),
+        }
+        Ok(())
+    }
+
+    /// "Apply IPS Patch..." (Restore menu): pick a `.ips` file.
+    fn pick_ips_to_apply(&mut self) {
+        let initial_dir = self
+            .rom_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.ips_apply_dialog =
+            FileDialog::new().initial_directory(initial_dir).add_file_filter_extensions("IPS patches", vec!["ips"]);
+        self.ips_apply_dialog.pick_file();
+    }
+
+    /// File-dialog pump for Apply IPS; on pick, apply the patch in-memory and
+    /// stage the confirmation dialog.
+    fn show_ips_apply_dialog(&mut self, ctx: &Context) {
+        self.ips_apply_dialog.update(ctx);
+        if let Some(patch_path) = self.ips_apply_dialog.take_picked() {
+            match self.preview_ips_apply(&patch_path) {
+                Ok(pending) => self.pending_ips_apply = Some(pending),
+                Err(e) => self.save_error = Some(format!("Could not read IPS patch: {e:#}")),
+            }
+        }
+        self.show_ips_apply_confirm_dialog(ctx);
+    }
+
+    /// Apply the picked patch to the current ROM image in memory so the
+    /// confirmation dialog can show exactly what will change.
+    fn preview_ips_apply(&self, patch_path: &Path) -> anyhow::Result<PendingIpsApply> {
+        let patch_bytes =
+            std::fs::read(patch_path).with_context(|| format!("Failed to read IPS patch {}", patch_path.display()))?;
+        let current = self.current_rom_image()?;
+        let patched_bytes = smwe_ips::apply_patch(&current, &patch_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let common = current.len().min(patched_bytes.len());
+        let mut bytes_changed = current.iter().zip(patched_bytes.iter()).take(common).filter(|(a, b)| a != b).count();
+        bytes_changed += current.len().abs_diff(patched_bytes.len());
+        Ok(PendingIpsApply { patch_path: patch_path.to_path_buf(), patched_bytes, bytes_changed })
+    }
+
+    /// Confirmation dialog showing what the staged patch will do.
+    fn show_ips_apply_confirm_dialog(&mut self, ctx: &Context) {
+        let Some(pending) = self.pending_ips_apply.as_ref() else { return };
+        let patch_name = pending.patch_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let bytes_changed = pending.bytes_changed;
+        let old_len = self.current_image_len_for_preview(pending);
+        let new_len = pending.patched_bytes.len();
+        let mut open = true;
+        let mut close_requested = false;
+        let mut apply = false;
+        Window::new("Apply IPS Patch").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(format!("Patch: {patch_name}"));
+            ui.label(format!(
+                "{bytes_changed} byte(s) will change. ROM size: {} → {}.",
+                format_size(old_len),
+                format_size(new_len)
+            ));
+            ui.label(
+                "The patched ROM is written to disk (a .bak backup is kept).\n\
+                 All open editors will be closed and reopened on the patched ROM.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Apply").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+        if apply {
+            let pending = self.pending_ips_apply.take().expect("staged above");
+            match self.install_rom_image(ctx, &pending.patched_bytes) {
+                Ok(()) => {
+                    self.restore_status = Some(format!("Applied {patch_name}: {bytes_changed} byte(s) changed."));
+                    log::info!("Applied IPS patch {patch_name}");
+                }
+                Err(e) => self.save_error = Some(format!("Apply IPS failed: {e:#}")),
+            }
+        } else if !open || close_requested {
+            self.pending_ips_apply = None;
+        }
+    }
+
+    /// Length of the current ROM image for the apply-preview line.
+    /// `current_rom_image` can fail (no ROM); fall back to the staged size.
+    fn current_image_len_for_preview(&self, pending: &PendingIpsApply) -> usize {
+        self.current_rom_image().map(|b| b.len()).unwrap_or(pending.patched_bytes.len())
+    }
+
+    /// LM v1.80 warns when an IPS patch is created in the same directory as
+    /// the ROM (patchers tend to auto-apply same-folder patches to that ROM).
+    fn show_ips_export_warning_dialog(&mut self, ctx: &Context, rom: Option<&Arc<SmwRom>>) {
+        if self.pending_ips_export.is_none() {
+            return;
+        }
+        let mut open = true;
+        let mut close_requested = false;
+        let mut create_anyway = false;
+        Window::new("IPS Patch Location").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label("The patch will be saved in the same folder as the ROM.");
+            ui.label(
+                "Patching tools often apply a same-folder patch to that ROM\n\
+                 automatically — make sure this is what you want.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Create Anyway").clicked() {
+                    create_anyway = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+        if create_anyway {
+            let dest = self.pending_ips_export.take().expect("staged above");
+            self.run_ips_export(rom, &dest);
+        } else if !open || close_requested {
+            self.pending_ips_export = None;
+        }
+    }
+
+    /// Shared IPS-create path for File > Export IPS and Restore > Create IPS.
+    fn run_ips_export(&mut self, rom: Option<&Arc<SmwRom>>, patch_dest: &Path) {
+        let Some(rom) = rom else {
+            self.save_error = Some("No ROM loaded.".into());
+            return;
+        };
+        let Some(src) = self.rom_path.clone() else {
+            self.save_error = Some("No ROM path — open a ROM first.".into());
+            return;
+        };
+        match self.create_ips_patch(rom, &src, patch_dest) {
+            Ok(_) => {
+                log::info!("Exported IPS patch to {}", patch_dest.display());
+                self.restore_status = Some(format!("IPS patch written to {}", patch_dest.display()));
+            }
+            Err(e) => self.save_error = Some(format!("IPS export failed: {e}")),
+        }
+    }
+
     fn main_menu_bar(&mut self, ctx: &Context, rom: Option<&Arc<SmwRom>>) {
         let has_rom = rom.is_some();
         // Ctrl+S shortcut.
@@ -773,6 +1093,59 @@ impl UiMainWindow {
                     if ui.button("Exit").clicked() {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
+                });
+
+                // ── Restore (LM v1.80 parity: restore points + create/apply IPS) ──
+                ui.menu_button("Restore", |ui| {
+                    ui.add_enabled_ui(has_rom, |ui| {
+                        if ui.button("Create Restore Point...").clicked() {
+                            self.restore_point_name = self.restore_manager.suggested_name();
+                            self.show_restore_dialog = true;
+                            ui.close_menu();
+                        }
+                        let point_count = self.restore_manager.points().len();
+                        ui.add_enabled_ui(point_count > 0, |ui| {
+                            // Collect summaries first: the submenu closure borrows
+                            // `self` mutably when a revert is picked.
+                            let summaries: Vec<(usize, String, String)> = self
+                                .restore_manager
+                                .points()
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| (i, p.name.clone(), p.stamp()))
+                                .collect();
+                            ui.menu_button("Revert to Restore Point", |ui| {
+                                for (i, name, stamp) in summaries {
+                                    if ui.button(format!("{name}  ({stamp})")).clicked() {
+                                        self.pending_revert = Some(i);
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                        if ui.button("Create IPS Patch...").clicked() {
+                            self.export_ips_patch();
+                            ui.close_menu();
+                        }
+                        if ui.button("Apply IPS Patch...").clicked() {
+                            self.pick_ips_to_apply();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.checkbox(
+                            &mut self.restore_manager.auto_track_on_save,
+                            "Track changes (restore point before each save)",
+                        )
+                        .on_hover_text(
+                            "When on, a restore point of the ROM is captured automatically \
+                             before every save, so any save can be undone from this menu.",
+                        );
+                        if let Some(status) = self.restore_status.clone() {
+                            ui.separator();
+                            ui.label(RichText::new(status).small().italics());
+                        }
+                    });
                 });
 
                 // ── Editors ──
@@ -928,6 +1301,7 @@ impl UiMainWindow {
         }
         if should_save {
             if let Some(path) = &self.rom_path.clone() {
+                self.maybe_auto_restore_point(path);
                 if let Err(e) = self.write_rom_to_path(path, path) {
                     self.save_error = Some(format!("Save failed: {e}"));
                 } else {
