@@ -138,6 +138,16 @@ impl UiLevelEditor {
             {
                 self.open_edit_manual();
             }
+            // Custom Object Tooltips — Lunar Magic v3.60: user-settable
+            // tooltip text for objects, shown on canvas hover.
+            if ui
+                .add(cbtn(icon::CHAT_TEARDROP_TEXT))
+                .on_hover_text("Custom Object Tooltips — user-settable tooltip text for objects (LM v3.60)")
+                .clicked()
+            {
+                self.show_custom_tooltips = true;
+                self.sync_tooltip_edit_buffer();
+            }
             ui.separator();
 
             // Layer / overlay visibility toggles.

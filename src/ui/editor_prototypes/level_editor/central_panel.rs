@@ -19,7 +19,7 @@ use egui::{
 use egui_glow::CallbackFn;
 
 use super::UiLevelEditor;
-use crate::ui::editing_mode::EditingMode;
+use crate::{custom_tooltips::ObjectKind, ui::editing_mode::EditingMode};
 
 // Pixels per game tile at zoom=1
 const TILE_PX: f32 = 16.0;
@@ -411,6 +411,47 @@ impl UiLevelEditor {
                         }
                     }
                 });
+            }
+        }
+
+        // ── Custom object tooltip on hover (LM v3.60) ─────────
+        // Hovering an object shows the user's custom tooltip text, if one
+        // was set in the Custom Object Tooltips window. Topmost object wins.
+        if let Some(cursor) = resp.hover_pos() {
+            if !self.edit_sprites {
+                if let Some(layer_data) = self.editing_objects() {
+                    let hovered = layer_data.read(|layer| {
+                        layer.objects.iter().rev().find_map(|obj| {
+                            let (w, h) = if obj.is_extended {
+                                (1_u32, 1_u32)
+                            } else {
+                                let w = (obj.settings & 0x0F) as u32 + 1;
+                                let h = (obj.settings >> 4) as u32 + 1;
+                                (w.max(1), h.max(1))
+                            };
+                            let rect = Rect::from_min_size(
+                                origin + vec2(obj.x as f32 * tile_sz, obj.y as f32 * tile_sz),
+                                vec2(w as f32 * tile_sz, h as f32 * tile_sz),
+                            );
+                            if rect.contains(cursor) {
+                                let kind = if obj.is_extended { ObjectKind::Extended } else { ObjectKind::Standard };
+                                let id = if obj.is_extended { obj.extended_id } else { obj.id };
+                                Some((kind, id))
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    if let Some((kind, id)) = hovered {
+                        if let Some(tip) = self.custom_tooltips.get(kind, id) {
+                            // `on_hover_text_at_pointer` consumes the
+                            // response; clone so later code can keep using
+                            // `resp`. Hover state is keyed by widget id, so
+                            // the tooltip still shows.
+                            resp.clone().on_hover_text_at_pointer(tip);
+                        }
+                    }
+                }
             }
         }
 

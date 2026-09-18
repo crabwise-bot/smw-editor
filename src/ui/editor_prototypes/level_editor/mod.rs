@@ -2,6 +2,7 @@ mod background_layer;
 mod bg_tilemap_editor;
 mod boss_text_editor;
 mod central_panel;
+mod custom_tooltips_ui;
 mod edit_manual_dialog;
 mod editing;
 mod exgfx_manager;
@@ -381,6 +382,15 @@ pub struct UiLevelEditor {
     edit_manual_bytes:  [String; 3],
     edit_manual_error:  Option<String>,
 
+    // Custom object tooltips (Lunar Magic v3.60: user-settable tooltip text
+    // for objects). Per-user store — never written to the ROM.
+    custom_tooltips:      crate::custom_tooltips::CustomTooltips,
+    show_custom_tooltips: bool,
+    tooltip_kind:         crate::custom_tooltips::ObjectKind,
+    tooltip_selected_id:  u8,
+    tooltip_edit_text:    String,
+    tooltip_search:       String,
+
     // ExAnimation (custom per-level tile/palette animation) editor.
     exanimation:             smwe_rom::exanimation::ExAnimationData,
     exanimation_dirty:       bool,
@@ -626,6 +636,12 @@ impl UiLevelEditor {
             edit_manual_target: None,
             edit_manual_bytes: [String::new(), String::new(), String::new()],
             edit_manual_error: None,
+            custom_tooltips: crate::custom_tooltips::CustomTooltips::load(),
+            show_custom_tooltips: false,
+            tooltip_kind: crate::custom_tooltips::ObjectKind::Standard,
+            tooltip_selected_id: 0x2B,
+            tooltip_edit_text: String::new(),
+            tooltip_search: String::new(),
             exanimation,
             exanimation_dirty: false,
             show_exanimation_editor: false,
@@ -706,6 +722,7 @@ impl DockableEditorTool for UiLevelEditor {
         }
         self.xref_search_window(&ctx);
         self.edit_manual_window(&ctx);
+        self.custom_tooltips_window(&ctx);
         self.title_credits_editor_window(&ctx);
         self.bg_tilemap_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.
