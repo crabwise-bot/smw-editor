@@ -466,10 +466,34 @@ impl UiLevelEditor {
         }
     }
 
+    /// Place the armed Custom Collections entry as a 3-byte extended object
+    /// at (tx, ty). Paints no tiles: custom extended objects are
+    /// level-setting commands, not visible geometry (LM 3.60 "Custom
+    /// Collections of Objects" category of the Add Objects window).
+    fn place_custom_object_at(&mut self, tx: u32, ty: u32) {
+        let Some((_, extended_id)) = self.armed_custom_entry() else { return };
+        let new_obj = EditableObject { x: tx, y: ty, id: 0, settings: 0, is_extended: true, extended_id };
+        let Some(layer_data) = self.editing_objects_mut() else { return };
+        let new_idx = layer_data.read(|layer| layer.objects.len());
+        layer_data.write(|layer| layer.objects.push(new_obj));
+        self.mark_edited();
+        self.selected_object_indices.clear();
+        self.selected_object_indices.insert(new_idx);
+        self.rebuild_tiles();
+    }
+
     fn place_object_at(&mut self, pos: Pos2, origin: Pos2, tile_sz: f32) {
         let rel = (pos - origin) / tile_sz;
         let tx = rel.x.floor() as u32;
         let ty = rel.y.floor() as u32;
+
+        // Custom Collections of Objects (LM 3.60): an armed custom entry
+        // places a 3-byte extended object and paints no tiles — these are
+        // level-setting commands, not visible geometry.
+        if self.draw_custom_entry.is_some() {
+            self.place_custom_object_at(tx, ty);
+            return;
+        }
 
         if self.edit_layer == 2 && self.layer2_objects.is_none() {
             let idx = self.block_map_index(tx, ty) as usize;

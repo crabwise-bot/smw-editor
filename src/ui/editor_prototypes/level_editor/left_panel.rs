@@ -82,6 +82,10 @@ impl UiLevelEditor {
                 }
             });
 
+            // Custom Collections of Objects (LM 3.60): arming an entry makes
+            // the next canvas click place that extended object.
+            self.custom_collections_picker(ui);
+
             let bg_l2_mode = self.edit_layer == 2 && self.layer2_objects.is_none();
             if bg_l2_mode {
                 ui.small("Layer 2 background mode uses background tile IDs and repeats across the background strip.");
