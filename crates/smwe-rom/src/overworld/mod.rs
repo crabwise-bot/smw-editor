@@ -8,8 +8,10 @@
 
 pub mod event_ownership;
 pub mod level_names;
+pub mod reveal_list;
 pub mod secret_exits;
 pub mod sprites;
+pub mod start_positions;
 
 use crate::snes_utils::{
     addr::{AddrPc, AddrSnes},

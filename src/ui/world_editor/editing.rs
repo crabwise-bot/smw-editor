@@ -173,7 +173,7 @@ impl UiWorldEditor {
         self.upload_tiles_from_vram();
     }
 
-    fn upload_tiles_from_vram(&mut self) {
+    pub(super) fn upload_tiles_from_vram(&mut self) {
         let l2_scroll_x = i16::from_le_bytes(self.cpu.mem.load_u16(0x001E).to_le_bytes()) as i32;
         let l2_scroll_y = i16::from_le_bytes(self.cpu.mem.load_u16(0x0020).to_le_bytes()) as i32;
         let l1 = build_bg_tiles(&self.cpu.mem.vram, VRAM_L1_TILEMAP_BASE, self.submap, l2_scroll_x, l2_scroll_y);
@@ -185,28 +185,24 @@ impl UiWorldEditor {
     pub(super) fn handle_undo(&mut self) {
         self.edit_state.undo();
         self.has_edits = self.edit_state.can_undo();
-        self.sync_vram_from_edit_state();
-        self.upload_tiles_from_vram();
+        self.sync_l2_from_edit_state();
+        // Re-applies the destruction events with the (possibly undone)
+        // reveal list, so the preview matches what `load_submap` showed.
+        self.refresh_event_preview();
     }
 
     pub(super) fn handle_redo(&mut self) {
         self.edit_state.redo();
         self.has_edits = true;
-        self.sync_vram_from_edit_state();
-        self.upload_tiles_from_vram();
+        self.sync_l2_from_edit_state();
+        self.refresh_event_preview();
     }
 
-    fn sync_vram_from_edit_state(&mut self) {
-        let layer1_tiles = self.edit_state.read(|s| s.layer1_tiles.clone());
-        let offset = if self.submap == 0 { 0usize } else { 0x400 };
-        let n = (layer1_tiles.len().saturating_sub(offset)).min(0x400);
-        for idx in 0..n {
-            let col = (idx % 32) as u32;
-            let row = (idx / 32) as u32;
-            let tile_id = layer1_tiles[offset + idx];
-            self.write_source_l1_block_words(col, row, tile_id);
-        }
-
+    /// Push the edit state's layer-2 words back into the emulated WRAM/VRAM
+    /// (the layer-1 half of the old `sync_vram_from_edit_state` is now
+    /// covered by [`UiWorldEditor::refresh_event_preview`], which additionally
+    /// applies the current reveal list like the emulated game init does).
+    fn sync_l2_from_edit_state(&mut self) {
         let layer2_words = self.edit_state.read(|s| s.layer2_words.clone());
         let wram_base = (0x7F4000 - 0x7E0000) as usize;
         for (idx, word) in layer2_words.iter().enumerate() {
