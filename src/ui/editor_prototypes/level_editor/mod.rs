@@ -554,6 +554,10 @@ impl DockableEditorTool for UiLevelEditor {
         self.pending_close = true;
     }
 
+    fn level_number(&self) -> Option<u16> {
+        Some(self.level_num)
+    }
+
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
         let level_idx = self.level_num as usize;
         let level = self
