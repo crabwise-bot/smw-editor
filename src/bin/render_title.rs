@@ -9,7 +9,11 @@
 //! 2. `load_title_screen_palette()` — runs the real `CODE_00ADA6` (title
 //!    colors over palettes 0/1) + `CODE_00922F` (MainPalette → CGRAM), exactly
 //!    as `GM04PrepTitleScreen` does.
-//! 3. The title stripe image (`TITLE_SCREEN_STRIPE_SNES`) is parsed and applied
+//! 3. `ClearOutLayer3` — `GM04PrepTitleScreen` cleans out the Layer 3 tilemap
+//!    (fills VRAM words $5000-$5FFF with `!EmptyTile` = `$38FC`) before the
+//!    stripe upload. Without this, the tilemap still holds level 0xEB's Layer
+//!    3 data and renders as repeating garbage behind the logo.
+//! 4. The title stripe image (`TITLE_SCREEN_STRIPE_SNES`) is parsed and applied
 //!    to a byte-level VRAM mirror with the exact `LoadStripeImage` DMA
 //!    semantics (SMWDisX bank_00.asm): 3-byte header `[dest-hi][dest-lo]`
 //!    (VRAM word address) + `[flags]` (bit 7 = vertical → +32-word stride,
@@ -96,6 +100,16 @@ fn main() -> anyhow::Result<()> {
     let stripe = &rom.title_credits.title_screen_stripe;
     println!("title stripe: {} bytes", stripe.len());
     let mut vram = cpu.mem.vram.clone();
+    // ClearOutLayer3 (GM04PrepTitleScreen): the real game fills the whole
+    // Layer 3 tilemap (VRAM words $5000-$5FFF) with !EmptyTile ($38FC) before
+    // the stripe upload, so the logo sits on a clean background. Without
+    // this the tilemap still holds level 0xEB's Layer 3 data and renders as
+    // repeating garbage behind the logo.
+    for word in 0..0x1000usize {
+        let off = L3_TILEMAP_BASE + word * 2;
+        vram[off] = 0xFC;
+        vram[off + 1] = 0x38;
+    }
     apply_stripe_image(&mut vram, stripe);
     // Apply the player-select menu stripe (drawn after the logo by the game).
     let menu_stripe = &rom.title_credits.player_select_stripe;
@@ -126,8 +140,20 @@ fn main() -> anyhow::Result<()> {
     };
     for ty in 0..TILEMAP_H {
         for tx in 0..TILEMAP_W {
-            let off = L3_TILEMAP_BASE + (ty * TILEMAP_W + tx) * 2;
+            // SNES 64x64 tilemap PPU addressing: four contiguous 32x32
+            // screens (top-left, top-right, bottom-left, bottom-right).
+            // A linear ty*64+tx read here would scramble/misplace rows.
+            let block_x = tx / 32;
+            let block_y = ty / 32;
+            let word_off = (block_y * 2 + block_x) * 0x400 + (ty % 32) * 32 + (tx % 32);
+            let off = L3_TILEMAP_BASE + word_off * 2;
             let t = vram[off] as u16 | ((vram[off + 1] as u16) << 8);
+            // !EmptyTile ($38FC, written by ClearOutLayer3) is blank: skip it
+            // so the backdrop shows through, exactly like the editor's
+            // WYSIWYG title preview does.
+            if t == 0x38FC {
+                continue;
+            }
             let tile = (t & 0x3FF) as usize;
             let pal = ((t >> 10) & 0x7) as usize;
             let flip_x = t & 0x4000 != 0;

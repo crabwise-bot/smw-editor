@@ -17,11 +17,11 @@
 //! - a first byte with bit 7 set terminates the image (the editor always
 //!   writes the `$FF` terminator).
 //!
-//! Note the vertical stride (32 words) against the 64-wide tilemap: one
-//! vertical command draws two interleaved columns 32 apart (e.g. the logo's
-//! left edge lives in columns 0–1 *and* 32–33). The parser reproduces this
-//! exactly; commands are applied in order so overlapping writes compose like
-//! the hardware DMA does.
+//! Note the vertical stride (32 words) against the 64×64 tilemap's four
+//! 32×32 screens: one vertical step moves to the next visual row *within the
+//! same 32×32 block* (see [`tilemap_64x64_word_offset`]). The parser
+//! reproduces this exactly; commands are applied in order so overlapping
+//! writes compose like the hardware DMA does.
 //!
 //! RLE commands are decoded (expanded). The encoder emits raw horizontal runs
 //! and never emits RLE; callers that must preserve RLE (e.g. the player-select
@@ -53,6 +53,28 @@ pub const TITLE_TILEMAP_VRAM_BASE: u16 = 0x5000;
 /// title stripe uploads (`!EmptyTile` in SMWDisX `constants.asm`). Cells
 /// holding this value are "blank" and skipped by the encoder.
 pub const TITLE_TILEMAP_BLANK: u16 = 0x38FC;
+
+/// PPU word offset (from [`TITLE_TILEMAP_VRAM_BASE`]) of tile `(x, y)` in a
+/// 64×64 SNES tilemap.
+///
+/// A 64×64 tilemap is four contiguous 32×32 screens: block 0 top-left, block
+/// 1 top-right, block 2 bottom-left, block 3 bottom-right, each 0x400 words.
+/// This is the mapping the PPU uses to display the tilemap; a linear
+/// `y * 64 + x` address is wrong and scrambles/misplaces rows.
+pub fn tilemap_64x64_word_offset(x: usize, y: usize) -> usize {
+    debug_assert!(x < 64 && y < 64);
+    let block = (y / 32) * 2 + (x / 32);
+    block * 0x400 + (y % 32) * 32 + (x % 32)
+}
+
+/// Inverse of [`tilemap_64x64_word_offset`]: the `(x, y)` tile coordinates
+/// the PPU displays for a word offset from [`TITLE_TILEMAP_VRAM_BASE`].
+pub fn tilemap_64x64_xy(word_offset: usize) -> (usize, usize) {
+    debug_assert!(word_offset < 0x1000);
+    let block = word_offset / 0x400;
+    let inside = word_offset % 0x400;
+    ((block % 2) * 32 + inside % 32, (block / 2) * 32 + inside / 32)
+}
 
 /// One parsed stripe-image command (see `LoadStripeImage` in SMWDisX
 /// `bank_00.asm`).
@@ -180,7 +202,9 @@ impl TitleTileGrid {
     /// semantics: the VRAM word address advances by 1 word (horizontal) or 32
     /// words (vertical) per tile. RLE commands repeat their tile. Later
     /// commands overwrite earlier words, so overlapping commands compose
-    /// exactly like the hardware DMA does.
+    /// exactly like the hardware DMA does. VRAM word offsets map to grid
+    /// coordinates with the PPU's 64×64 screen-block layout
+    /// ([`tilemap_64x64_xy`]), so the grid matches what the PPU displays.
     pub fn from_commands(commands: &[TitleStripeCommand]) -> Self {
         let mut cells = [[TITLE_TILEMAP_BLANK; TITLE_TILEMAP_WIDTH]; TITLE_TILEMAP_HEIGHT];
         let base = TITLE_TILEMAP_VRAM_BASE as usize;
@@ -193,7 +217,8 @@ impl TitleTileGrid {
                 if dest >= base {
                     let wo = dest - base;
                     if wo < max_word {
-                        cells[wo / TITLE_TILEMAP_WIDTH][wo % TITLE_TILEMAP_WIDTH] = tile;
+                        let (x, y) = tilemap_64x64_xy(wo);
+                        cells[y][x] = tile;
                     }
                 }
                 dest += stride;
@@ -211,29 +236,35 @@ impl TitleTileGrid {
     ///
     /// The result is DMA-equivalent to the grid: applying it over a
     /// [`TITLE_TILEMAP_BLANK`] background reproduces every cell exactly.
-    /// Errors if the encoding would exceed
-    /// [`crate::title_credits::TITLE_SCREEN_STRIPE_MAX_SIZE`] — over-budget
-    /// edits are refused, never silently truncated.
+    /// Runs never cross a 32-column screen-block boundary (a run from x=31
+    /// to x=32 is not contiguous in VRAM). Errors if the encoding would
+    /// exceed [`crate::title_credits::TITLE_SCREEN_STRIPE_MAX_SIZE`] —
+    /// over-budget edits are refused, never silently truncated.
     pub fn to_stripe_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut commands = Vec::new();
         for (y, row) in self.cells.iter().enumerate() {
-            let mut x = 0;
-            while x < TITLE_TILEMAP_WIDTH {
-                if row[x] == TITLE_TILEMAP_BLANK {
-                    x += 1;
-                    continue;
+            // Two 32-column screen blocks per row; a DMA run cannot span the
+            // block boundary.
+            for block_x in 0..2 {
+                let mut x = block_x * 32;
+                let end = x + 32;
+                while x < end {
+                    if row[x] == TITLE_TILEMAP_BLANK {
+                        x += 1;
+                        continue;
+                    }
+                    let x0 = x;
+                    while x < end && row[x] != TITLE_TILEMAP_BLANK {
+                        x += 1;
+                    }
+                    commands.push(TitleStripeCommand {
+                        vram_dest: TITLE_TILEMAP_VRAM_BASE + tilemap_64x64_word_offset(x0, y) as u16,
+                        vertical:  false,
+                        rle:       false,
+                        nbytes:    (x - x0) * 2,
+                        tiles:     row[x0..x].to_vec(),
+                    });
                 }
-                let x0 = x;
-                while x < TITLE_TILEMAP_WIDTH && row[x] != TITLE_TILEMAP_BLANK {
-                    x += 1;
-                }
-                commands.push(TitleStripeCommand {
-                    vram_dest: TITLE_TILEMAP_VRAM_BASE + (y * TITLE_TILEMAP_WIDTH + x0) as u16,
-                    vertical:  false,
-                    rle:       false,
-                    nbytes:    (x - x0) * 2,
-                    tiles:     row[x0..x].to_vec(),
-                });
             }
         }
         let bytes = serialize_title_stripe(&commands);
@@ -254,7 +285,8 @@ mod tests {
 
     /// Hand-built stripe: one horizontal command writing 3 tiles at (0,0),
     /// one vertical command writing 2 tiles at dest $500A (word offset 10 →
-    /// (10,0), 32-word stride → (10,0) and (42,0) in the 64-wide map).
+    /// (10,0); 32-word stride → word offset 42 → (10,1), the next row in the
+    /// same 32×32 screen block).
     fn sample_stripe() -> Vec<u8> {
         vec![
             0x50, 0x00, 0x00, 0x05, // dest $5000, horizontal, 6 bytes
@@ -322,12 +354,38 @@ mod tests {
         assert_eq!(grid.cells[0][0], 0x2C58);
         assert_eq!(grid.cells[0][1], 0x2C59);
         assert_eq!(grid.cells[0][2], 0x2C38);
-        // vertical command: (10,0) and (42,0) — 32-word stride in 64-wide map
+        // vertical command: (10,0) and (10,1) — 32-word stride steps to the
+        // next row within the same 32x32 screen block
         assert_eq!(grid.cells[0][10], 0x3C98);
-        assert_eq!(grid.cells[0][42], 0x3CA9);
+        assert_eq!(grid.cells[1][10], 0x3CA9);
         // untouched cells are blank
         assert_eq!(grid.cells[0][3], TITLE_TILEMAP_BLANK);
-        assert_eq!(grid.cells[1][10], TITLE_TILEMAP_BLANK);
+        assert_eq!(grid.cells[0][42], TITLE_TILEMAP_BLANK);
+    }
+
+    #[test]
+    fn tilemap_64x64_block_mapping() {
+        // Screen-block layout: (x,y) -> block*0x400 + (y%32)*32 + (x%32).
+        assert_eq!(tilemap_64x64_word_offset(0, 0), 0x000);
+        assert_eq!(tilemap_64x64_word_offset(31, 0), 0x01F);
+        assert_eq!(tilemap_64x64_word_offset(32, 0), 0x400);
+        assert_eq!(tilemap_64x64_word_offset(63, 31), 0x7FF);
+        assert_eq!(tilemap_64x64_word_offset(0, 32), 0x800);
+        assert_eq!(tilemap_64x64_word_offset(32, 32), 0xC00);
+        assert_eq!(tilemap_64x64_word_offset(63, 63), 0xFFF);
+        // Inverse mapping round-trips.
+        for y in [0, 1, 31, 32, 33, 63] {
+            for x in [0, 1, 31, 32, 33, 63] {
+                let wo = tilemap_64x64_word_offset(x, y);
+                assert_eq!(tilemap_64x64_xy(wo), (x, y), "round-trip ({x},{y})");
+            }
+        }
+        // $500A + 32 words steps (10,0) -> (10,1), not (42,0).
+        assert_eq!(tilemap_64x64_xy(10), (10, 0));
+        assert_eq!(tilemap_64x64_xy(42), (10, 1));
+        // Crossing $53FF/$5400 moves between left/right screen blocks.
+        assert_eq!(tilemap_64x64_xy(0x3FF), (31, 31));
+        assert_eq!(tilemap_64x64_xy(0x400), (32, 0));
     }
 
     #[test]
@@ -409,16 +467,20 @@ mod real_rom_tests {
         assert_eq!(serialize_title_stripe(&cmds), bytes);
 
         let grid = TitleTileGrid::from_commands(&cmds);
-        // Row 0 is the 64-wide top of the "SUPER MARIO WORLD" logo:
-        // palette-3 tiles across the full row.
-        for x in 0..64 {
+        // Row 0 is the top of the "SUPER MARIO WORLD" logo: palette-3 tiles
+        // across x 0-31 (the left 32x32 screen block; x 32-63 is blank).
+        for x in 0..32 {
             let w = grid.cells[0][x];
             assert_ne!(w, TITLE_TILEMAP_BLANK, "row 0 col {x} should be logo");
             assert_eq!((w >> 10) & 7, 3, "row 0 col {x}: expected palette 3, got {w:#06X}");
         }
-        // The logo's vertical strips live in columns 0-1 and 32-33.
+        for x in 32..64 {
+            assert_eq!(grid.cells[0][x], TITLE_TILEMAP_BLANK, "row 0 col {x} should be blank");
+        }
+        // The logo's vertical strips live in columns 0-1 (32-word stride
+        // steps to the next row within the same 32x32 block).
         assert_ne!(grid.cells[1][0], TITLE_TILEMAP_BLANK);
-        assert_ne!(grid.cells[1][32], TITLE_TILEMAP_BLANK);
+        assert_ne!(grid.cells[1][1], TITLE_TILEMAP_BLANK);
 
         // Normalized re-encode is DMA-equivalent and fits the budget.
         let reencoded = grid.to_stripe_bytes().expect("re-encode fits budget");
@@ -456,8 +518,8 @@ mod real_rom_tests {
 ///
 /// The menu owns tilemap rows [`MENU_FIRST_ROW`]`..=`[`MENU_LAST_ROW`]; paints
 /// outside those rows belong to the title logo stripe.
-pub const MENU_FIRST_ROW: usize = 7;
-pub const MENU_LAST_ROW: usize = 10;
+pub const MENU_FIRST_ROW: usize = 15;
+pub const MENU_LAST_ROW: usize = 21;
 
 /// Split player-select commands into the preserved RLE clear commands and the
 /// editable text commands (non-RLE).
@@ -478,28 +540,34 @@ pub fn split_player_select_commands(
 
 /// Encode a player-select stripe from preserved clear commands and a text
 /// grid. For each row in `MENU_FIRST_ROW..=MENU_LAST_ROW`, the span from the
-/// first to the last non-blank cell is encoded as one raw horizontal run
-/// (interior blanks are kept, matching the vanilla encoding); the clears run
-/// first so edited text draws over the cleared logo area exactly like the
-/// hardware does.
+/// first to the last non-blank cell is encoded as raw horizontal runs
+/// (interior blanks are kept, matching the vanilla encoding), split at the
+/// 32-column screen-block boundary; the clears run first so edited text draws
+/// over the cleared logo area exactly like the hardware does.
 pub fn encode_player_select_stripe(
     clears: &[TitleStripeCommand], text_grid: &TitleTileGrid,
 ) -> anyhow::Result<Vec<u8>> {
     let mut commands: Vec<TitleStripeCommand> = clears.to_vec();
     for y in MENU_FIRST_ROW..=MENU_LAST_ROW {
         let row = &text_grid.cells[y];
-        let first = row.iter().position(|&w| w != TITLE_TILEMAP_BLANK);
-        let last = row.iter().rposition(|&w| w != TITLE_TILEMAP_BLANK);
-        if let (Some(x0), Some(x1)) = (first, last) {
-            let tiles = row[x0..=x1].to_vec();
-            let nbytes = tiles.len() * 2;
-            commands.push(TitleStripeCommand {
-                vram_dest: TITLE_TILEMAP_VRAM_BASE + (y * TITLE_TILEMAP_WIDTH + x0) as u16,
-                vertical: false,
-                rle: false,
-                nbytes,
-                tiles,
-            });
+        // Two 32-column screen blocks per row; a DMA run cannot span the
+        // block boundary.
+        for block_x in 0..2 {
+            let (b0, b1) = (block_x * 32, block_x * 32 + 32);
+            let first = row[b0..b1].iter().position(|&w| w != TITLE_TILEMAP_BLANK);
+            let last = row[b0..b1].iter().rposition(|&w| w != TITLE_TILEMAP_BLANK);
+            if let (Some(f), Some(l)) = (first, last) {
+                let (x0, x1) = (b0 + f, b0 + l);
+                let tiles = row[x0..=x1].to_vec();
+                let nbytes = tiles.len() * 2;
+                commands.push(TitleStripeCommand {
+                    vram_dest: TITLE_TILEMAP_VRAM_BASE + tilemap_64x64_word_offset(x0, y) as u16,
+                    vertical: false,
+                    rle: false,
+                    nbytes,
+                    tiles,
+                });
+            }
         }
     }
     let bytes = serialize_title_stripe(&commands);
@@ -592,8 +660,9 @@ mod player_select_tests {
 
 /// First editable Layer-3 row in the credits scenes.
 pub const CREDITS_L3_FIRST_ROW: usize = 0;
-/// Last editable Layer-3 row in the credits scenes (vanilla text uses 1-13).
-pub const CREDITS_L3_LAST_ROW: usize = 13;
+/// Last editable Layer-3 row in the credits scenes (vanilla text uses rows
+/// 3-26 across the 13 scenes; 27 is the bottom of the 28-row viewport).
+pub const CREDITS_L3_LAST_ROW: usize = 27;
 
 /// True if a stripe command writes to Layer-3 tilemap VRAM ($5000-$5FFF word).
 pub fn is_credits_l3_command(cmd: &TitleStripeCommand) -> bool {
@@ -621,33 +690,38 @@ pub fn split_credits_commands(commands: &[TitleStripeCommand]) -> (Vec<TitleStri
 /// grid. Each maximal contiguous non-blank run in rows
 /// `CREDITS_L3_FIRST_ROW..=CREDITS_L3_LAST_ROW` is encoded as one raw
 /// horizontal run (matching the vanilla encoding, which uses separate short
-/// runs rather than full-row spans). The caller enforces the fixed slot
-/// budget.
+/// runs rather than full-row spans), split at the 32-column screen-block
+/// boundary. The caller enforces the fixed slot budget.
 pub fn encode_credits_stripe(
     non_l3: &[TitleStripeCommand], l3_grid: &TitleTileGrid, max_size: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let mut commands: Vec<TitleStripeCommand> = non_l3.to_vec();
     for y in CREDITS_L3_FIRST_ROW..=CREDITS_L3_LAST_ROW {
         let row = &l3_grid.cells[y];
-        let mut x = 0;
-        while x < TITLE_TILEMAP_WIDTH {
-            if row[x] == TITLE_TILEMAP_BLANK {
-                x += 1;
-                continue;
+        // Two 32-column screen blocks per row; a DMA run cannot span the
+        // block boundary.
+        for block_x in 0..2 {
+            let mut x = block_x * 32;
+            let end = x + 32;
+            while x < end {
+                if row[x] == TITLE_TILEMAP_BLANK {
+                    x += 1;
+                    continue;
+                }
+                let x0 = x;
+                while x < end && row[x] != TITLE_TILEMAP_BLANK {
+                    x += 1;
+                }
+                let tiles = row[x0..x].to_vec();
+                let nbytes = tiles.len() * 2;
+                commands.push(TitleStripeCommand {
+                    vram_dest: TITLE_TILEMAP_VRAM_BASE + tilemap_64x64_word_offset(x0, y) as u16,
+                    vertical: false,
+                    rle: false,
+                    nbytes,
+                    tiles,
+                });
             }
-            let x0 = x;
-            while x < TITLE_TILEMAP_WIDTH && row[x] != TITLE_TILEMAP_BLANK {
-                x += 1;
-            }
-            let tiles = row[x0..x].to_vec();
-            let nbytes = tiles.len() * 2;
-            commands.push(TitleStripeCommand {
-                vram_dest: TITLE_TILEMAP_VRAM_BASE + (y * TITLE_TILEMAP_WIDTH + x0) as u16,
-                vertical: false,
-                rle: false,
-                nbytes,
-                tiles,
-            });
         }
     }
     let bytes = serialize_title_stripe(&commands);

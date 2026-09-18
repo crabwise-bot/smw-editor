@@ -7,6 +7,8 @@ use smwe_rom::{
         parse_title_stripe,
         split_credits_commands,
         split_player_select_commands,
+        tilemap_64x64_word_offset,
+        tilemap_64x64_xy,
         TitleStripeCommand,
         TitleTileGrid,
         CREDITS_L3_FIRST_ROW,
@@ -414,19 +416,23 @@ impl UiLevelEditor {
         // Rebuild text commands from the menu grid for compositing.
         for y in MENU_FIRST_ROW..=MENU_LAST_ROW {
             let row = &menu_grid.cells[y];
-            if let (Some(x0), Some(x1)) = (
-                row.iter().position(|&w| w != TITLE_TILEMAP_BLANK),
-                row.iter().rposition(|&w| w != TITLE_TILEMAP_BLANK),
-            ) {
-                let tiles = row[x0..=x1].to_vec();
-                let nbytes = tiles.len() * 2;
-                all_menu_cmds.push(TitleStripeCommand {
-                    vram_dest: TITLE_TILEMAP_VRAM_BASE + (y * TITLE_TILEMAP_WIDTH + x0) as u16,
-                    vertical: false,
-                    rle: false,
-                    nbytes,
-                    tiles,
-                });
+            for block_x in 0..2 {
+                let (b0, b1) = (block_x * 32, block_x * 32 + 32);
+                if let (Some(f), Some(l)) = (
+                    row[b0..b1].iter().position(|&w| w != TITLE_TILEMAP_BLANK),
+                    row[b0..b1].iter().rposition(|&w| w != TITLE_TILEMAP_BLANK),
+                ) {
+                    let (x0, x1) = (b0 + f, b0 + l);
+                    let tiles = row[x0..=x1].to_vec();
+                    let nbytes = tiles.len() * 2;
+                    all_menu_cmds.push(TitleStripeCommand {
+                        vram_dest: TITLE_TILEMAP_VRAM_BASE + tilemap_64x64_word_offset(x0, y) as u16,
+                        vertical: false,
+                        rle: false,
+                        nbytes,
+                        tiles,
+                    });
+                }
             }
         }
         for cmd in &all_menu_cmds {
@@ -436,7 +442,8 @@ impl UiLevelEditor {
                 if dest >= TITLE_TILEMAP_VRAM_BASE as usize {
                     let wo = dest - TITLE_TILEMAP_VRAM_BASE as usize;
                     if wo < TITLE_TILEMAP_WIDTH * TITLE_TILEMAP_HEIGHT {
-                        display.cells[wo / TITLE_TILEMAP_WIDTH][wo % TITLE_TILEMAP_WIDTH] = tile;
+                        let (x, y) = tilemap_64x64_xy(wo);
+                        display.cells[y][x] = tile;
                     }
                 }
                 dest += stride;
@@ -693,9 +700,12 @@ impl UiLevelEditor {
                 let flip_y = word & 0x8000 != 0;
                 for py in 0..8 {
                     for px in 0..8 {
-                        // GFX2F tiles are stored mirrored; flip by default.
-                        let sx = if flip_x { px } else { 7 - px };
-                        let sy = if flip_y { py } else { 7 - py };
+                        // Standard SNES flip semantics: flip bits mirror the
+                        // tile; no flip by default. GFX2F is decoded
+                        // left-to-right like every other 2bpp font — the old
+                        // inverted logic drew every glyph mirrored.
+                        let sx = if flip_x { 7 - px } else { px };
+                        let sy = if flip_y { 7 - py } else { py };
                         let ci = tile.color_indices[sy * 8 + sx];
                         if ci == 0 {
                             continue;
