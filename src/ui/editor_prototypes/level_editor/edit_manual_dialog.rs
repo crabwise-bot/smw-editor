@@ -12,7 +12,7 @@
 use egui::{Color32, Context, RichText};
 
 use super::UiLevelEditor;
-use crate::edit_manual;
+use crate::{custom_tooltips::ObjectKind, edit_manual};
 
 /// Which selected item the Edit Manual dialog edits.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -198,6 +198,24 @@ impl UiLevelEditor {
                 "Edit the selected entry's raw level-data bytes, Lunar Magic style. \
                           Type 1–2 hex digits per byte ($ or 0x prefix accepted).",
             );
+            // The object's custom tooltip (Lunar Magic v3.60), if the user
+            // set one — managed in the 💬 Custom Object Tooltips window.
+            if let Some(EditManualTarget::Object(i)) = self.edit_manual_target {
+                let kind_id = self.editing_objects().and_then(|l| {
+                    l.read(|l| {
+                        l.objects.get(i).map(|o| {
+                            let kind = if o.is_extended { ObjectKind::Extended } else { ObjectKind::Standard };
+                            (kind, if o.is_extended { o.extended_id } else { o.id })
+                        })
+                    })
+                });
+                if let Some((kind, id)) = kind_id {
+                    if let Some(tip) = self.custom_tooltips.get(kind, id) {
+                        ui.small(format!("💬 {tip}"))
+                            .on_hover_text("Custom tooltip — edit it in the 💬 Custom Object Tooltips window");
+                    }
+                }
+            }
             ui.small(
                 "The new-screen flag (bit 7 of byte 0) is stream layout — \
                           it is recomputed when the level is saved.",
