@@ -260,6 +260,8 @@ pub struct UiLevelEditor {
     // level load; Lunar Magic extended entries are resolved on demand.
     map16_block_ptrs:              Vec<u32>,
     selected_map16_block_for_edit: Option<u16>,
+    // Pending "acts like" (act-as) edits: FG tile -> act-as tile.
+    map16_acts_edits:              HashMap<u16, u16>,
 
     // Sprite tweaker byte editor (global, per-sprite-ID behavior; shared across
     // every placement of that sprite, matching Lunar Magic's Sprite Header Editor)
@@ -406,9 +408,18 @@ pub struct UiLevelEditor {
     mwl_status: Option<String>,
 
     // Map16 page import/export.
-    map16_file_status: Option<String>,
-    map16_page_idx:    usize,
-    map16_tileset_idx: usize,
+    map16_file_status:   Option<String>,
+    // Page selector: FG or BG, page 0x00-0x7F (0x00/0x01 vanilla, 0x02+
+    // Lunar Magic expanded pages).
+    map16_page_fg:       bool,
+    map16_page:          u8,
+    map16_tileset_idx:   usize,
+    // "Remap act-as…" dialog state.
+    map16_remap_open:    bool,
+    map16_remap_mode_g:  bool, // true = remap references (G), false = assign range from base (R)
+    map16_remap_src:     String,
+    map16_remap_ref:     String,
+    map16_remap_preview: Option<String>,
 }
 
 impl UiLevelEditor {
@@ -523,6 +534,7 @@ impl UiLevelEditor {
             selected_palette_idx: 0,
             palette_gesture_before: None,
             map16_edits: UndoableData::new(map16_editor::EditableMap16Edits::default()),
+            map16_acts_edits: HashMap::new(),
             map16_gesture_before: None,
             map16_block_ptrs: Vec::new(),
             selected_map16_block_for_edit: None,
@@ -606,7 +618,13 @@ impl UiLevelEditor {
             rom_path: rom_path.clone(),
             mwl_status: None,
             map16_file_status: None,
-            map16_page_idx: 0,
+            map16_page_fg: true,
+            map16_page: 0x00,
+            map16_remap_open: false,
+            map16_remap_mode_g: true,
+            map16_remap_src: String::new(),
+            map16_remap_ref: String::new(),
+            map16_remap_preview: None,
             map16_tileset_idx: 0,
         };
         editor.load_level();
@@ -623,6 +641,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.secondary_entrance_editor_window(&ctx);
         self.palette_editor_window(&ctx);
         self.map16_editor_window(&ctx);
+        self.map16_remap_window(&ctx);
         self.sprite_tweaker_editor_window(&ctx);
         self.sprite_header_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
@@ -1204,6 +1223,48 @@ impl DockableEditorTool for UiLevelEditor {
             anyhow::bail!("No free space for the Layer 3 GFX bypass table");
         }
 
+        // ── Map16 expanded-page edits without a resolved pointer ─────────────
+        // Edits to blocks 0x200+ on pages the LM table doesn't own yet have no
+        // SNES pointer; read-modify-write whole pages through the
+        // expanded-page model (LM locations when its table resolves, else the
+        // editor's RATS block).
+        {
+            let mut by_page: HashMap<u8, Vec<(u16, [u16; 4])>> = HashMap::new();
+            let pending: Vec<(u16, [u16; 4])> =
+                self.map16_edits.read(|e| e.edits.iter().map(|(&id, &tw)| (id, tw)).collect());
+            for (block_id, tile_words) in pending {
+                let ptr = self.map16_block_ptrs.get(block_id as usize).copied().unwrap_or(0);
+                if ptr == 0 && block_id >= 0x200 {
+                    by_page.entry((block_id >> 8) as u8).or_default().push((block_id, tile_words));
+                }
+            }
+            for (page, edits) in by_page {
+                let mut page_bytes = smwe_rom::map16_expanded::read_expanded_fg_page(rom_bytes, header_offset, page)
+                    .map_err(|e| anyhow::anyhow!("expanded Map16 page {page:02X}: {e}"))?
+                    .unwrap_or([0u8; smwe_rom::map16_file::MAP16_PAGE_BYTES]);
+                for (block_id, tile_words) in edits {
+                    let base = (block_id as usize & 0xFF) * 8;
+                    for (i, &tw) in tile_words.iter().enumerate() {
+                        page_bytes[base + i * 2] = (tw & 0xFF) as u8;
+                        page_bytes[base + i * 2 + 1] = (tw >> 8) as u8;
+                    }
+                }
+                smwe_rom::map16_expanded::write_expanded_fg_page(rom_bytes, header_offset, page, &page_bytes)
+                    .map_err(|e| anyhow::anyhow!("expanded Map16 page {page:02X}: {e}"))?;
+            }
+        }
+
+        // ── Map16 "acts like" edits ──────────────────────────────────────────
+        if !self.map16_acts_edits.is_empty() {
+            let mut table = smwe_rom::map16_expanded::read_acts_table(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("act-as table: {e}"))?;
+            for (&tile, &act) in &self.map16_acts_edits {
+                table.insert(tile, act);
+            }
+            smwe_rom::map16_expanded::write_acts_table(rom_bytes, header_offset, &table)
+                .map_err(|e| anyhow::anyhow!("act-as table: {e}"))?;
+        }
+
         Ok(())
     }
 
@@ -1489,6 +1550,14 @@ impl UiLevelEditor {
         }
         let mut scratch = self.cpu.clone();
         *slot = smwe_emu::emu::lm_ext_map16_data_addr(&mut scratch, block_id).unwrap_or(0);
+        if *slot == 0 {
+            // No LM resolver hit: point at this editor's expanded-page
+            // storage when the page already exists there, so edits to the
+            // block save in place. (Pages not stored anywhere yet are
+            // handled by the read-modify-write path in `save_to_rom`.)
+            let bytes = self.rom.rom_bytes();
+            *slot = smwe_rom::map16_expanded::expanded_fg_tile_snes(bytes, 0, block_id).unwrap_or(0);
+        }
     }
 
     #[allow(dead_code)]

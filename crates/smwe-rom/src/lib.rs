@@ -10,6 +10,7 @@ pub mod graphics;
 pub mod internal_header;
 pub mod layer3;
 pub mod level;
+pub mod map16_expanded;
 pub mod map16_file;
 pub mod message_boxes;
 pub mod message_raster;

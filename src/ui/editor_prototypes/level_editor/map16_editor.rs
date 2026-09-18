@@ -4,7 +4,7 @@ use egui::{vec2, Color32, Context, Rect, Sense, Slider, Vec2};
 use egui_phosphor::regular as icon;
 
 use super::{tile_picker::render_sub_tile, UiLevelEditor};
-use crate::undo::Undo;
+use crate::{ui::tool::DockableEditorTool, undo::Undo};
 
 const PREVIEW_PX: usize = 32; // display size for each 8x8 sub-tile preview
 
@@ -55,11 +55,12 @@ impl UiLevelEditor {
         }
         let mut open = self.show_map16_editor;
         let win = egui::Window::new("Map16 Block Editor").open(&mut open).resizable(false).show(ctx, |ui| {
-            // Block selector
+            // Block selector (full FG range: vanilla 0x000-0x1FF plus LM
+            // expanded pages 0x02-0x7F).
             ui.horizontal(|ui| {
                 ui.label("Block:");
                 let mut bid = self.selected_map16_block_for_edit.unwrap_or(self.draw_block_id);
-                if ui.add(Slider::new(&mut bid, 0..=0x3FFF).hexadecimal(4, false, true)).changed() {
+                if ui.add(Slider::new(&mut bid, 0..=0x7FFF).hexadecimal(4, false, true)).changed() {
                     self.selected_map16_block_for_edit = Some(bid);
                 }
                 if ui.small_button("Use draw block").clicked() {
@@ -73,13 +74,40 @@ impl UiLevelEditor {
             // Get current tile words (from edits or ROM)
             let mut tile_words = self.get_block_tile_words(block_id);
 
-            // "Acts like" reference: vanilla dispatches block behavior by
-            // hardcoded ID range, not a per-block byte, so a custom block
-            // already gets this category's behavior for free just by
-            // using an ID from the matching range (with its own graphics).
+            // "Acts like" (act-as): the per-FG-tile gameplay reference,
+            // Lunar Magic 1.91+ parity. BG tiles have no act-as value.
+            if block_id < 0x8000 {
+                ui.horizontal(|ui| {
+                    ui.label("Acts like:");
+                    let mut act = self.act_as_of(block_id) as i32;
+                    if ui.add(Slider::new(&mut act, 0..=0x7FFF).hexadecimal(4, false, true)).changed() {
+                        self.map16_acts_edits.insert(block_id, act as u16);
+                        self.mark_edited();
+                    }
+                    if ui.small_button("Reset").clicked() {
+                        let rom_act = smwe_rom::map16_expanded::act_as_in_rom(self.rom.rom_bytes(), 0, block_id);
+                        if rom_act == block_id {
+                            self.map16_acts_edits.remove(&block_id);
+                        } else {
+                            // ROM has a stored non-identity value: write identity back.
+                            self.map16_acts_edits.insert(block_id, block_id);
+                        }
+                        self.mark_edited();
+                    }
+                    if ui.small_button("Remap…").clicked() {
+                        self.map16_remap_open = true;
+                        self.map16_remap_preview = None;
+                    }
+                });
+                ui.small("Gameplay values are < 0x200 (LM enforces this in-game). Blank = acts as itself.");
+            } else {
+                ui.small("BG tiles have no acts-like value.");
+            }
+            // Vanilla behavior-category reference (hardcoded ID ranges, not
+            // the act-as table).
             let category = smwe_rom::block_behavior::category_of(block_id);
             ui.horizontal(|ui| {
-                ui.label("Acts like:");
+                ui.label("Behavior:");
                 ui.strong(category.label());
             });
             if let Some(behavior) = smwe_rom::block_behavior::specific_behavior(block_id) {
@@ -223,12 +251,15 @@ impl UiLevelEditor {
             });
 
             // Revert button
-            if self.map16_edits.read(|e| e.edits.contains_key(&block_id)) {
+            if self.map16_edits.read(|e| e.edits.contains_key(&block_id))
+                || self.map16_acts_edits.contains_key(&block_id)
+            {
                 ui.separator();
                 if ui.button("Revert to ROM").clicked() {
                     self.map16_edits.write(|e| {
                         e.edits.remove(&block_id);
                     });
+                    self.map16_acts_edits.remove(&block_id);
                     self.mark_edited();
                 }
             }
@@ -360,6 +391,32 @@ impl UiLevelEditor {
         }
     }
 
+    /// Effective "acts like" value for an FG tile: pending edit, else the
+    /// ROM's act-as table, else identity. BG tiles have no act-as value.
+    pub(super) fn act_as_of(&self, block_id: u16) -> u16 {
+        if block_id >= 0x8000 {
+            return block_id;
+        }
+        if let Some(&a) = self.map16_acts_edits.get(&block_id) {
+            return a;
+        }
+        smwe_rom::map16_expanded::act_as_in_rom(self.rom.rom_bytes(), 0, block_id)
+    }
+
+    /// The act-as table as the user currently sees it: ROM table with
+    /// pending edits overlaid.
+    fn effective_acts_table(&self) -> std::collections::HashMap<u16, u16> {
+        let mut table = smwe_rom::map16_expanded::read_acts_table(self.rom.rom_bytes(), 0).unwrap_or_default();
+        for (&t, &a) in &self.map16_acts_edits {
+            if a == t {
+                table.remove(&t);
+            } else {
+                table.insert(t, a);
+            }
+        }
+        table
+    }
+
     pub(super) fn get_block_tile_words(&self, block_id: u16) -> [u16; 4] {
         if let Some(words) = self.map16_edits.read(|e| e.edits.get(&block_id).copied()) {
             return words;
@@ -381,7 +438,217 @@ impl UiLevelEditor {
                 }
             }
         }
+        // Expanded FG blocks without a resolved pointer: read the page
+        // through the expanded-page model (LM table, then the editor's
+        // RATS block).
+        if (0x200..0x8000).contains(&block_id) {
+            if let Ok(Some(page)) =
+                smwe_rom::map16_expanded::read_expanded_fg_page(self.rom.rom_bytes(), 0, (block_id >> 8) as u8)
+            {
+                let base = (block_id as usize & 0xFF) * 8;
+                let mut words = [0u16; 4];
+                for (i, w) in words.iter_mut().enumerate() {
+                    let off = base + i * 2;
+                    if off + 1 < page.len() {
+                        *w = page[off] as u16 | ((page[off + 1] as u16) << 8);
+                    }
+                }
+                return words;
+            }
+        }
         [0u16; 4]
+    }
+}
+
+impl UiLevelEditor {
+    /// Lunar Magic "Remap…" dialog (v1.91 / v3.01 parity). Two operations:
+    /// - G: remap act-as *references* — `G100-101,+25` shifts every act-as
+    ///   value in 0x100-0x101 by +0x25; `G100-101,M125` remaps them onto
+    ///   base 0x125 (relative).
+    /// - R: assign a tile range act-as values from a base — `R200-211,S25`
+    ///   makes tiles 0x200-0x211 act as 0x25-0x36.
+    /// Source values refer to pre-remap values; LM does not rewrite
+    /// references automatically when blocks move, and neither does this.
+    pub(super) fn map16_remap_window(&mut self, ctx: &Context) {
+        if !self.map16_remap_open {
+            return;
+        }
+        let mut open = self.map16_remap_open;
+        egui::Window::new("Remap act-as values").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label("Which tiles' act-as values point where. Values are hex; ranges like 100-1F3.");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.map16_remap_mode_g, true, "Remap references (G)");
+                ui.radio_value(&mut self.map16_remap_mode_g, false, "Assign range from base (R)");
+            });
+            if self.map16_remap_mode_g {
+                ui.horizontal(|ui| {
+                    ui.label("Source range:");
+                    ui.text_edit_singleline(&mut self.map16_remap_src);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Reference:");
+                    ui.text_edit_singleline(&mut self.map16_remap_ref);
+                });
+                ui.small("G100-101,+25 shifts by +0x25 · G100-101,M125 (or 125) remaps onto 0x125.");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Tile range:");
+                    ui.text_edit_singleline(&mut self.map16_remap_src);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Base:");
+                    ui.text_edit_singleline(&mut self.map16_remap_ref);
+                });
+                ui.small("R200-211,S25 (or 25): tiles 0x200-0x211 act as 0x25-0x36.");
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Preview").clicked() {
+                    self.map16_remap_preview = Some(self.preview_remap());
+                }
+                if ui.button("Apply").clicked() {
+                    match self.apply_remap() {
+                        Ok(msg) => {
+                            log::info!("{msg}");
+                            self.map16_file_status = Some(msg);
+                            self.map16_remap_open = false;
+                        }
+                        Err(e) => self.map16_remap_preview = Some(format!("Error: {e:#}")),
+                    }
+                }
+            });
+            if let Some(p) = self.map16_remap_preview.clone() {
+                ui.separator();
+                ui.monospace(p);
+            }
+            ui.small(
+                "Note: in-game use of non-identity act-as values needs runtime support \
+                 (Lunar Magic's expanded-Map16 ASM); the editor preserves and remaps the table.",
+            );
+        });
+        self.map16_remap_open = open;
+    }
+
+    /// Compute the remap result against the effective table without writing.
+    fn preview_remap(&self) -> String {
+        match self.compute_remap() {
+            Ok((before, after)) => {
+                let mut changes: Vec<(u16, u16, u16)> = Vec::new();
+                for (&t, &a_before) in &before {
+                    let a_after = after.get(&t).copied().unwrap_or(t);
+                    if a_before != a_after {
+                        changes.push((t, a_before, a_after));
+                    }
+                }
+                for (&t, &a_after) in &after {
+                    if !before.contains_key(&t) && t != a_after {
+                        changes.push((t, t, a_after));
+                    }
+                }
+                changes.sort_unstable();
+                if changes.is_empty() {
+                    return "No tiles would change.".to_string();
+                }
+                let mut out = format!("{} tile(s) would change:\n", changes.len());
+                for (t, b, a) in changes.iter().take(12) {
+                    out.push_str(&format!("  {t:04X}: {b:04X} → {a:04X}\n"));
+                }
+                if changes.len() > 12 {
+                    out.push_str(&format!("  … and {} more", changes.len() - 12));
+                }
+                out
+            }
+            Err(e) => format!("Error: {e:#}"),
+        }
+    }
+
+    /// Apply the remap dialog operation to the ROM file, preserving pending
+    /// block/act-as edits by flushing them first.
+    fn apply_remap(&mut self) -> anyhow::Result<String> {
+        let (before, after) = self.compute_remap()?;
+        let changed = after.iter().filter(|(&t, &a)| before.get(&t).copied().unwrap_or(t) != a).count()
+            + before.iter().filter(|(&t, &a)| !after.contains_key(&t) && t != a).count();
+        let mut rom_bytes = std::fs::read(&self.rom_path)?;
+        let header_offset = super::mwl::smc_header_offset(&rom_bytes);
+        // Flush pending edits first so the reload below doesn't drop them.
+        self.save_to_rom(&mut rom_bytes, header_offset != 0)?;
+        smwe_rom::map16_expanded::write_acts_table(&mut rom_bytes, header_offset, &after)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        super::mwl::write_rom_file_atomic(&self.rom_path, &rom_bytes)?;
+        let fresh = smwe_rom::SmwRom::from_file(&self.rom_path)?;
+        self.rom = std::sync::Arc::new(fresh);
+        self.map16_edits = crate::undo::UndoableData::new(EditableMap16Edits::default());
+        self.map16_acts_edits.clear();
+        self.load_level();
+        self.has_edits = false;
+        Ok(format!("Remapped act-as values ({changed} tile(s) changed)"))
+    }
+
+    /// Parse the dialog fields and run the operation on a copy of the
+    /// effective act-as table. Returns (before, after).
+    fn compute_remap(
+        &self,
+    ) -> anyhow::Result<(std::collections::HashMap<u16, u16>, std::collections::HashMap<u16, u16>)> {
+        use smwe_rom::map16_expanded::{remap_act_refs, remap_act_refs_delta, set_act_range_from_base};
+
+        let before = self.effective_acts_table();
+        let mut after = before.clone();
+        if self.map16_remap_mode_g {
+            let (s0, s1) = parse_hex_range(&self.map16_remap_src)
+                .ok_or_else(|| anyhow::anyhow!("bad source range '{}'", self.map16_remap_src))?;
+            if s0 >= 0x8000 || s1 >= 0x8000 {
+                anyhow::bail!("source range must be FG act-as values (< 0x8000)");
+            }
+            let r = self.map16_remap_ref.trim();
+            if let Some(d) = r.strip_prefix('+') {
+                let delta = parse_hex_u16(d).ok_or_else(|| anyhow::anyhow!("bad delta '{d}'"))? as i32;
+                remap_act_refs_delta(&mut after, s0, s1, delta);
+            } else if let Some(d) = r.strip_prefix('-') {
+                let delta = parse_hex_u16(d).ok_or_else(|| anyhow::anyhow!("bad delta '{d}'"))? as i32;
+                remap_act_refs_delta(&mut after, s0, s1, -delta);
+            } else {
+                let base = parse_hex_u16(r.trim_start_matches(['M', 'm']))
+                    .ok_or_else(|| anyhow::anyhow!("bad reference '{}'", self.map16_remap_ref))?;
+                if base >= 0x8000 {
+                    anyhow::bail!("reference must be < 0x8000");
+                }
+                remap_act_refs(&mut after, s0, s1, base);
+            }
+        } else {
+            let (s0, s1) = parse_hex_range(&self.map16_remap_src)
+                .ok_or_else(|| anyhow::anyhow!("bad tile range '{}'", self.map16_remap_src))?;
+            if s1 >= 0x8000 {
+                anyhow::bail!("tile range must be FG tiles (< 0x8000)");
+            }
+            let base = parse_hex_u16(self.map16_remap_ref.trim().trim_start_matches(['S', 's']))
+                .ok_or_else(|| anyhow::anyhow!("bad base '{}'", self.map16_remap_ref))?;
+            if base >= 0x8000 {
+                anyhow::bail!("base must be < 0x8000");
+            }
+            set_act_range_from_base(&mut after, s0, s1, base);
+        }
+        Ok((before, after))
+    }
+}
+
+/// Parse a hex u16, tolerating an optional `0x` prefix.
+fn parse_hex_u16(s: &str) -> Option<u16> {
+    let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    if s.is_empty() {
+        return None;
+    }
+    u16::from_str_radix(s, 16).ok()
+}
+
+/// Parse `A-B` or a single `A` as an inclusive hex range, tolerating a
+/// leading `G`/`R` (so `G100-101` pastes straight from LM docs).
+fn parse_hex_range(s: &str) -> Option<(u16, u16)> {
+    let s = s.trim().trim_start_matches(['G', 'R', 'g', 'r']);
+    if let Some((a, b)) = s.split_once('-') {
+        let (a, b) = (parse_hex_u16(a)?, parse_hex_u16(b)?);
+        Some((a.min(b), a.max(b)))
+    } else {
+        let a = parse_hex_u16(s)?;
+        Some((a, a))
     }
 }
 

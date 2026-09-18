@@ -6,6 +6,7 @@ use nom::{combinator::map, multi::many0, number::complete::le_u16};
 use thiserror::Error;
 
 use crate::{
+    map16_expanded,
     objects::{
         animated_tile_data::AnimatedTileDataParseError,
         map16::{Block, Tile8x8},
@@ -305,6 +306,30 @@ fn parse_lm_map16(rom: &Rom) -> Result<LmMap16, TilesetParseError> {
     }
 
     let present_count = present.iter().filter(|p| **p).count();
+    // Then the editor-owned RATS block: fills pages the LM table did not
+    // cover (does not overwrite pages the LM table already provided).
+    // (Rom has any SMC header already stripped, so header_offset = 0.)
+    if let Ok(pages) = map16_expanded::rats_fg_pages(&rom.0, 0) {
+        for (page, bytes) in pages {
+            if page < 0x02 || bytes.len() != 0x800 {
+                continue;
+            }
+            for i in 0..0x100 {
+                let tile_num = page as usize * 0x100 + i;
+                if tile_num < blocks.len() && !present[tile_num] {
+                    let off = i * 8;
+                    present[tile_num] = true;
+                    blocks[tile_num] = Block {
+                        upper_left:  Tile8x8(u16::from_le_bytes([bytes[off], bytes[off + 1]])),
+                        lower_left:  Tile8x8(u16::from_le_bytes([bytes[off + 2], bytes[off + 3]])),
+                        upper_right: Tile8x8(u16::from_le_bytes([bytes[off + 4], bytes[off + 5]])),
+                        lower_right: Tile8x8(u16::from_le_bytes([bytes[off + 6], bytes[off + 7]])),
+                    };
+                }
+            }
+        }
+    }
+
     if present_count == 0 {
         // Fallback for Lunar Magic expanded ROMs: try a flat block starting at $0F8000.
         // This is a heuristic for ROMs that store Map16 pages contiguously.
