@@ -55,6 +55,29 @@ impl<Data: Undo> UndoableData<Data> {
         reader(&self.data)
     }
 
+    /// Direct mutable access for gesture-style edits: the caller snapshots
+    /// `Data::clone()` before the gesture, mutates through this, and pushes
+    /// one undo step with [`UndoableData::commit_change`] when the gesture
+    /// ends (e.g. on pointer release), so a slider/color-picker drag is a
+    /// single undo step instead of one per frame.
+    pub fn data_mut(&mut self) -> &mut Data {
+        &mut self.data
+    }
+
+    /// Push one undo step for a change that was already applied through
+    /// [`UndoableData::data_mut`], given the pre-change snapshot. No-op steps
+    /// (snapshot equal to current data) are skipped.
+    pub fn commit_change(&mut self, before: &Data) {
+        let before_bytes = before.to_bytes();
+        let after_bytes = self.data.to_bytes();
+        if before_bytes == after_bytes {
+            return;
+        }
+        let step = UndoStep::delta(&before_bytes, &after_bytes);
+        self.stack.push(step);
+        self.max_size_so_far = self.max_size_so_far.max(self.data.size_bytes());
+    }
+
     pub fn can_undo(&self) -> bool {
         self.stack.step_number > 0
     }

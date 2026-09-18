@@ -181,16 +181,24 @@ pub struct UiLevelEditor {
     // Hex text of the "go to entrance" field.
     se_goto_text:                String,
 
-    // Palette editor (12 ABGR1555 colors per group, stored as raw u16)
-    palette_bg_colors:      [u16; 12],
-    palette_fg_colors:      [u16; 12],
-    palette_sprite_colors:  [u16; 12],
+    // Palette editor (12 ABGR1555 colors per group, stored as raw u16).
+    // Undoable so Ctrl+Z / Ctrl+Y and the Undo/Redo buttons work like
+    // Lunar Magic v1.80's palette editors.
+    palettes:               UndoableData<palette_editor::EditablePalettes>,
     palette_dirty:          bool,
     selected_palette_group: u8,
     selected_palette_idx:   usize,
+    // Pre-drag snapshot for gesture-style color edits (see
+    // palette_editor_window); one undo step is committed per drag.
+    palette_gesture_before: Option<palette_editor::EditablePalettes>,
 
-    // Map16 editor
-    map16_edits:                   HashMap<u16, [u16; 4]>,
+    // Map16 editor. Undoable so Ctrl+Z / Ctrl+Y work like Lunar Magic
+    // v1.91's Map16 editor. Serialized sorted-by-key, so undo deltas are
+    // deterministic (a HashMap's order is not).
+    map16_edits:                   UndoableData<map16_editor::EditableMap16Edits>,
+    // Pre-drag snapshot for gesture-style tile-word edits; one undo step
+    // is committed when the gesture ends.
+    map16_gesture_before:          Option<map16_editor::EditableMap16Edits>,
     // SNES address of each block's data. Vanilla entries are populated at
     // level load; Lunar Magic extended entries are resolved on demand.
     map16_block_ptrs:              Vec<u32>,
@@ -415,13 +423,13 @@ impl UiLevelEditor {
             secondary_exit_ext_dirty: false,
             selected_secondary_entrance: 0,
             se_goto_text: String::new(),
-            palette_bg_colors: [0u16; 12],
-            palette_fg_colors: [0u16; 12],
-            palette_sprite_colors: [0u16; 12],
+            palettes: UndoableData::new(palette_editor::EditablePalettes::default()),
             palette_dirty: false,
             selected_palette_group: 3, // none
             selected_palette_idx: 0,
-            map16_edits: HashMap::new(),
+            palette_gesture_before: None,
+            map16_edits: UndoableData::new(map16_editor::EditableMap16Edits::default()),
+            map16_gesture_before: None,
             map16_block_ptrs: Vec::new(),
             selected_map16_block_for_edit: None,
             sprite_tweakers,
@@ -1002,28 +1010,31 @@ impl DockableEditorTool for UiLevelEditor {
                 }
                 Ok(())
             };
-            write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &self.palette_bg_colors)?;
-            write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &self.palette_fg_colors)?;
-            write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &self.palette_sprite_colors)?;
+            let (bg, fg, sprite) = self.palettes.read(|pal| (pal.bg, pal.fg, pal.sprite));
+            write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &bg)?;
+            write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &fg)?;
+            write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &sprite)?;
         }
 
         // ── Map16 block edits ─────────────────────────────────────────────────
-        for (&block_id, &tile_words) in &self.map16_edits {
-            if let Some(&snes_addr) = self.map16_block_ptrs.get(block_id as usize) {
-                if snes_addr != 0 {
-                    if let Ok(pc) = AddrPc::try_from_lorom(AddrSnes(snes_addr)) {
-                        let file_off = pc.as_index() + header_offset;
-                        for (sub_i, &tw) in tile_words.iter().enumerate() {
-                            let off = file_off + sub_i * 2;
-                            if off + 1 < rom_bytes.len() {
-                                rom_bytes[off] = (tw & 0xFF) as u8;
-                                rom_bytes[off + 1] = (tw >> 8) as u8;
+        self.map16_edits.read(|edits| {
+            for (&block_id, &tile_words) in &edits.edits {
+                if let Some(&snes_addr) = self.map16_block_ptrs.get(block_id as usize) {
+                    if snes_addr != 0 {
+                        if let Ok(pc) = AddrPc::try_from_lorom(AddrSnes(snes_addr)) {
+                            let file_off = pc.as_index() + header_offset;
+                            for (sub_i, &tw) in tile_words.iter().enumerate() {
+                                let off = file_off + sub_i * 2;
+                                if off + 1 < rom_bytes.len() {
+                                    rom_bytes[off] = (tw & 0xFF) as u8;
+                                    rom_bytes[off + 1] = (tw >> 8) as u8;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+        });
 
         // ── ExAnimation data (per-level custom tile/palette animation) ──────
         // Single RATS-tagged free-space block; erased and reallocated on
@@ -1234,10 +1245,13 @@ impl UiLevelEditor {
                 }
                 colors
             };
-            self.palette_bg_colors = read_palette(0x00B0B0 + p.palette_bg() as u32 * 0x18);
-            self.palette_fg_colors = read_palette(0x00B190 + p.palette_fg() as u32 * 0x18);
-            self.palette_sprite_colors = read_palette(0x00B318 + p.palette_sprite() as u32 * 0x18);
+            self.palettes = UndoableData::new(palette_editor::EditablePalettes {
+                bg:     read_palette(0x00B0B0 + p.palette_bg() as u32 * 0x18),
+                fg:     read_palette(0x00B190 + p.palette_fg() as u32 * 0x18),
+                sprite: read_palette(0x00B318 + p.palette_sprite() as u32 * 0x18),
+            });
             self.palette_dirty = false;
+            self.palette_gesture_before = None;
         }
 
         // ── Map16 block pointers ─────────────────────────────────────────────
