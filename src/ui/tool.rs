@@ -23,4 +23,9 @@ pub trait DockableEditorTool {
     /// Called by the main window after a ROM save completes successfully.
     /// Implementations should clear their unsaved-changes flag here.
     fn on_save_succeeded(&mut self) {}
+    /// SMW translevel number this tab edits, if it is a level editor.
+    /// Used by File > Export Level to PNG to pick the current level.
+    fn level_number(&self) -> Option<u16> {
+        None
+    }
 }

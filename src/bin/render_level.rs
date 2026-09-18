@@ -1,8 +1,7 @@
-use std::{env, path::Path, sync::Arc};
+use std::{env, path::Path};
 
-use image::{ImageBuffer, Rgb};
-use smw_editor::render_util::{read_color, render_layer, render_sp_tile};
-use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
+use smw_editor::level_png_export::{level_png_bytes, load_level_cpu, LevelPngOptions};
+use smwe_emu::Cpu;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let level = args
@@ -23,59 +22,24 @@ fn main() {
     });
 
     let raw = std::fs::read(rom_path).expect("cannot read ROM");
-    let rom_bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
-    let mut emu_rom = EmuRom::new(rom_bytes);
-    emu_rom.load_symbols(include_str!("../../symbols/SMW_U.sym"));
-    let mut cpu = Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
 
-    smwe_emu::emu::decompress_sublevel(&mut cpu, level);
-
-    let level_mode = cpu.mem.load_u8(0x1925);
-    let vertical = cpu.mem.load_u8(0x5B) & 1 != 0;
-    let renderer_table = cpu.mem.cart.resolve("CODE_058955").unwrap() + 9;
-    let renderer = cpu.mem.load_u24(renderer_table + (level_mode as u32) * 3);
-    let l2_renderers = [cpu.mem.cart.resolve("CODE_058B8D"), cpu.mem.cart.resolve("CODE_058C71")];
-    let has_layer2 = l2_renderers.contains(&Some(renderer));
-
-    let scr_len = match (vertical, has_layer2) {
-        (false, false) => 0x20,
-        (true, false) => 0x1C,
-        (false, true) => 0x10,
-        (true, true) => 0x0E,
-    };
-    let screens = scr_len as u32;
-    let (width, height) = if vertical { (32 * 16, screens * 16 * 16) } else { (screens * 16 * 16, 27 * 16) };
-
-    // Fill the canvas with the level's backdrop colour (CGRAM index 0) the way
-    // the SNES shows it behind layers 1/2, instead of leaving it black. This
-    // matches what the GUI editor paints under the GL tiles.
-    let mut pixels = vec![0u8; (width * height * 3) as usize];
-    {
-        let backdrop = read_color(&cpu.mem.cgram, 0);
-        for px in pixels.chunks_exact_mut(3) {
-            px.copy_from_slice(&backdrop);
-        }
-    }
+    // The pixel data comes from the shared library pipeline so the binary and
+    // the File-menu export can never drift apart.
     let layer = args.iter().find_map(|a| a.strip_prefix("--layer="));
-    match layer {
-        Some("1") => render_layer(&mut cpu, false, width, &mut pixels),
-        Some("2") => render_layer(&mut cpu, true, width, &mut pixels),
-        _ => {
-            render_layer(&mut cpu, true, width, &mut pixels);
-            render_layer(&mut cpu, false, width, &mut pixels);
-        }
-    }
+    let opts = LevelPngOptions {
+        include_layer1:  layer.map_or(true, |l| l != "2"),
+        include_layer2:  layer.map_or(true, |l| l != "1"),
+        include_sprites: !args.iter().any(|a| a == "--no-sprites"),
+    };
+    let png = level_png_bytes(&raw, level, &opts).expect("render level to PNG");
+    std::fs::write(output, &png).expect("save png");
+    println!("wrote {output}");
+
     if let Some((x, y)) = inspect {
+        let mut cpu = load_level_cpu(&raw, level).expect("load level CPU");
         inspect_block(&mut cpu, false, x, y);
         inspect_block(&mut cpu, true, x, y);
     }
-    if !args.iter().any(|a| a == "--no-sprites") {
-        render_sprites(&mut cpu, width, &mut pixels);
-    }
-
-    let img = ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, pixels).expect("image buffer");
-    img.save(output).expect("save png");
-    println!("wrote {output}");
 }
 
 fn inspect_block(cpu: &mut Cpu, bg: bool, block_x_wanted: u32, block_y_wanted: u32) {
@@ -160,28 +124,5 @@ fn inspect_block(cpu: &mut Cpu, bg: bool, block_x_wanted: u32, block_y_wanted: u
             println!("  sub{}={:04X}", sub, t);
         }
         break;
-    }
-}
-
-fn render_sprites(cpu: &mut Cpu, width: u32, pixels: &mut [u8]) {
-    smwe_emu::emu::exec_sprites(cpu);
-    for spr in (0..64).rev() {
-        let x = cpu.mem.load_u8(0x300 + spr * 4) as u32;
-        let y = cpu.mem.load_u8(0x301 + spr * 4) as u32;
-        if y >= 0xE0 {
-            continue;
-        }
-        let tile = cpu.mem.load_u16(0x302 + spr * 4);
-        let size = cpu.mem.load_u8(0x460 + spr);
-        if size & 0x02 != 0 {
-            let (xn, xf) = if tile & 0x4000 == 0 { (0, 8) } else { (8, 0) };
-            let (yn, yf) = if tile & 0x8000 == 0 { (0, 8) } else { (8, 0) };
-            render_sp_tile(&cpu.mem.vram, &cpu.mem.cgram, x + xn, y + yn, tile, width, pixels);
-            render_sp_tile(&cpu.mem.vram, &cpu.mem.cgram, x + xf, y + yn, tile + 1, width, pixels);
-            render_sp_tile(&cpu.mem.vram, &cpu.mem.cgram, x + xn, y + yf, tile + 16, width, pixels);
-            render_sp_tile(&cpu.mem.vram, &cpu.mem.cgram, x + xf, y + yf, tile + 17, width, pixels);
-        } else {
-            render_sp_tile(&cpu.mem.vram, &cpu.mem.cgram, x, y, tile, width, pixels);
-        }
     }
 }

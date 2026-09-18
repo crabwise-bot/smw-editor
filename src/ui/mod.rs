@@ -28,6 +28,7 @@ use smwe_rom::{
 };
 
 use crate::{
+    level_png_export::{level_export_filename, level_png_bytes, LevelPngOptions, LEVEL_COUNT},
     project::Project,
     ui::{
         dev_utils::address_converter::UiAddressConverter,
@@ -39,29 +40,50 @@ use crate::{
 };
 
 pub struct UiMainWindow {
-    gl:                 Arc<glow::Context>,
-    dock_style:         DockStyle,
-    dock_state:         DockState<Box<dyn DockableEditorTool>>,
+    gl:                       Arc<glow::Context>,
+    dock_style:               DockStyle,
+    dock_state:               DockState<Box<dyn DockableEditorTool>>,
     /// Path of the currently-open ROM (for Save).
-    rom_path:           Option<PathBuf>,
+    rom_path:                 Option<PathBuf>,
     /// Set when a Save error needs to be shown.
-    save_error:         Option<String>,
+    save_error:               Option<String>,
     /// In-egui file dialog for Open ROM.
-    open_dialog:        FileDialog,
+    open_dialog:              FileDialog,
     /// In-egui file dialog for Save As.
-    save_as_dialog:     FileDialog,
+    save_as_dialog:           FileDialog,
     /// In-egui file dialog for BPS patch export.
-    bps_export_dialog:  FileDialog,
+    bps_export_dialog:        FileDialog,
     /// In-egui file dialog for IPS patch export.
-    ips_export_dialog:  FileDialog,
+    ips_export_dialog:        FileDialog,
     /// Expand-ROM dialog (File > Expand ROM...).
-    show_expand_dialog: bool,
+    show_expand_dialog:       bool,
     /// Selected expansion target size in bytes.
-    expand_target:      usize,
+    expand_target:            usize,
     /// Status line shown in the Expand-ROM dialog.
-    expand_status:      Option<String>,
+    expand_status:            Option<String>,
+    /// In-egui file dialog for single-level PNG export (File > Export Level to PNG...).
+    png_export_dialog:        FileDialog,
+    /// Translevel chosen for the pending single-level PNG export.
+    png_export_level:         Option<u16>,
+    /// Status line for the last single-level PNG export.
+    png_export_status:        Option<String>,
+    /// Batch level-export dialog (File > Levels > Export Multiple Levels to Image Files...).
+    show_batch_export_dialog: bool,
+    /// In-egui directory picker for the batch export output folder.
+    batch_export_dir_dialog:  FileDialog,
+    /// Hex strings for the batch export range (inclusive), e.g. "000"–"1FF".
+    batch_from:               String,
+    batch_to:                 String,
+    /// Batch export output folder.
+    batch_out_dir:            Option<PathBuf>,
+    /// Batch export layer toggles (mirror the single-level options).
+    batch_include_l1:         bool,
+    batch_include_l2:         bool,
+    batch_include_sprites:    bool,
+    /// Status line shown in the batch-export dialog.
+    batch_status:             Option<String>,
     /// Set when user tries to close the app with unsaved changes
-    show_exit_dialog:   bool,
+    show_exit_dialog:         bool,
 }
 
 impl UiMainWindow {
@@ -87,6 +109,18 @@ impl UiMainWindow {
             show_expand_dialog: false,
             expand_target: 0,
             expand_status: None,
+            png_export_dialog: FileDialog::new(),
+            png_export_level: None,
+            png_export_status: None,
+            show_batch_export_dialog: false,
+            batch_export_dir_dialog: FileDialog::new(),
+            batch_from: "000".to_string(),
+            batch_to: "1FF".to_string(),
+            batch_out_dir: None,
+            batch_include_l1: true,
+            batch_include_l2: true,
+            batch_include_sprites: true,
+            batch_status: None,
             show_exit_dialog: false,
         }
     }
@@ -118,6 +152,19 @@ impl eframe::App for UiMainWindow {
         // IPS export dialog.
         self.show_ips_export_dialog(ctx, rom.as_ref());
 
+        // Single-level PNG export dialog (File > Export Level to PNG...).
+        self.show_png_export_dialog(ctx);
+
+        // Batch level-export dialog (File > Levels > Export Multiple Levels to Image Files...).
+        if self.show_batch_export_dialog {
+            self.batch_export_window(ctx);
+        }
+        self.batch_export_dir_dialog.update(ctx);
+        if let Some(dir) = self.batch_export_dir_dialog.take_picked() {
+            self.batch_out_dir = Some(dir);
+            self.batch_status = None;
+        }
+
         // Save error toast.
         if let Some(err) = &self.save_error.clone() {
             let mut open = true;
@@ -129,6 +176,20 @@ impl eframe::App for UiMainWindow {
             });
             if !open {
                 self.save_error = None;
+            }
+        }
+
+        // PNG export status toast.
+        if let Some(status) = &self.png_export_status.clone() {
+            let mut open = true;
+            Window::new("Level PNG Export").open(&mut open).show(ctx, |ui| {
+                ui.label(status);
+                if ui.button("OK").clicked() {
+                    self.png_export_status = None;
+                }
+            });
+            if !open {
+                self.png_export_status = None;
             }
         }
 
@@ -463,6 +524,186 @@ impl UiMainWindow {
         Ok(())
     }
 
+    /// Read the ROM from disk with every open tab's unsaved edits merged in —
+    /// shared by the PNG export actions so exports reflect on-screen edits
+    /// (same merge the BPS/IPS exports do).
+    fn rom_bytes_with_tab_edits(&self) -> anyhow::Result<Vec<u8>> {
+        let Some(src) = self.rom_path.clone() else { anyhow::bail!("No ROM path — open a ROM first.") };
+        let mut rom_bytes =
+            std::fs::read(&src).with_context(|| format!("Failed to read ROM from {}", src.display()))?;
+        let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
+        for (_, tab) in self.dock_state.iter_all_tabs() {
+            tab.save_to_rom(&mut rom_bytes, has_smc_header)?;
+        }
+        Ok(rom_bytes)
+    }
+
+    /// File > Export Level to PNG... — exports the focused level-editor tab
+    /// (falling back to the first open level editor), like LM exports the
+    /// active level window.
+    fn export_level_png(&mut self) {
+        let level = self
+            .dock_state
+            .find_active_focused()
+            .and_then(|(_, tab)| tab.level_number())
+            .or_else(|| self.dock_state.iter_all_tabs().find_map(|(_, tab)| tab.level_number()));
+        let Some(level) = level else {
+            self.save_error = Some("No level editor tab is open — open a level first.".to_string());
+            return;
+        };
+        let initial_dir = self.rom_path.as_ref().and_then(|p| p.parent()).map(|d| d.to_path_buf()).unwrap_or_default();
+        self.png_export_level = Some(level);
+        self.png_export_status = None;
+        self.png_export_dialog =
+            FileDialog::new().initial_directory(initial_dir).default_file_name(&level_export_filename(level));
+        self.png_export_dialog.save_file();
+    }
+
+    fn show_png_export_dialog(&mut self, ctx: &Context) {
+        self.png_export_dialog.update(ctx);
+        let Some(png_dest) = self.png_export_dialog.take_picked() else {
+            return;
+        };
+        let Some(level) = self.png_export_level else {
+            return;
+        };
+        self.png_export_level = None;
+        let result = (|| -> anyhow::Result<()> {
+            let rom_bytes = self.rom_bytes_with_tab_edits()?;
+            let png = level_png_bytes(&rom_bytes, level, &LevelPngOptions::default())?;
+            std::fs::write(&png_dest, &png)
+                .with_context(|| format!("Failed to write PNG to {}", png_dest.display()))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.png_export_status = Some(format!("Exported level {level:03X} to {}", png_dest.display()));
+                log::info!("Exported level {level:03X} PNG to {}", png_dest.display());
+            }
+            Err(e) => {
+                self.png_export_status = Some(format!("Level export failed: {e}"));
+            }
+        }
+    }
+
+    /// File > Levels > Export Multiple Levels to Image Files... dialog.
+    /// Mirrors LM v3.20: a hex level range plus output folder, one PNG per
+    /// level named `level_XXX.png`.
+    fn batch_export_window(&mut self, ctx: &Context) {
+        let mut open = true;
+        let mut close_requested = false;
+        Window::new("Export Multiple Levels to Image Files")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Renders each level in the range as a PNG image,\none file per level (level_000.png … level_{:03X}.png).",
+                    LEVEL_COUNT - 1
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("From level (hex):");
+                    ui.text_edit_singleline(&mut self.batch_from);
+                    ui.label("To level (hex):");
+                    ui.text_edit_singleline(&mut self.batch_to);
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.batch_include_l1, "Layer 1");
+                    ui.checkbox(&mut self.batch_include_l2, "Layer 2");
+                    ui.checkbox(&mut self.batch_include_sprites, "Sprites");
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Output folder:");
+                    ui.label(
+                        self.batch_out_dir
+                            .as_ref()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| "(not chosen)".to_string()),
+                    );
+                    if ui.button("Choose...").clicked() {
+                        let initial = self
+                            .batch_out_dir
+                            .clone()
+                            .or_else(|| {
+                                self.rom_path.as_ref().and_then(|p| p.parent()).map(|d| d.to_path_buf())
+                            })
+                            .unwrap_or_default();
+                        self.batch_export_dir_dialog = FileDialog::new().initial_directory(initial);
+                        self.batch_export_dir_dialog.pick_directory();
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_export = self.batch_out_dir.is_some();
+                    if ui.add_enabled(can_export, Button::new("Export")).clicked() {
+                        self.perform_batch_export();
+                    }
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                });
+                if let Some(status) = &self.batch_status.clone() {
+                    ui.separator();
+                    ui.label(status);
+                }
+            });
+        if !open || close_requested {
+            self.show_batch_export_dialog = false;
+        }
+    }
+
+    fn perform_batch_export(&mut self) {
+        fn parse_hex(s: &str) -> Option<u16> {
+            u16::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches('$').trim_start_matches('#'), 16)
+                .ok()
+        }
+        let (from, to) = (parse_hex(&self.batch_from), parse_hex(&self.batch_to));
+        let (Some(from), Some(to)) = (from, to) else {
+            self.batch_status = Some("Invalid level range — enter hex numbers like 000 and 1FF.".to_string());
+            return;
+        };
+        if from > to || to >= LEVEL_COUNT {
+            self.batch_status = Some(format!("Range must satisfy 000 ≤ from ≤ to ≤ {:03X}.", LEVEL_COUNT - 1));
+            return;
+        }
+        let Some(out_dir) = self.batch_out_dir.clone() else {
+            self.batch_status = Some("Choose an output folder first.".to_string());
+            return;
+        };
+        let opts = LevelPngOptions {
+            include_layer1:  self.batch_include_l1,
+            include_layer2:  self.batch_include_l2,
+            include_sprites: self.batch_include_sprites,
+        };
+        let rom_bytes = match self.rom_bytes_with_tab_edits() {
+            Ok(b) => b,
+            Err(e) => {
+                self.batch_status = Some(format!("Batch export failed: {e}"));
+                return;
+            }
+        };
+        let mut exported = 0u32;
+        for level in from..=to {
+            match level_png_bytes(&rom_bytes, level, &opts) {
+                Ok(png) => {
+                    let dest = out_dir.join(level_export_filename(level));
+                    if let Err(e) = std::fs::write(&dest, &png) {
+                        self.batch_status = Some(format!("Failed writing {}: {e}", dest.display()));
+                        return;
+                    }
+                    exported += 1;
+                }
+                Err(e) => {
+                    self.batch_status = Some(format!("Failed rendering level {level:03X}: {e}"));
+                    return;
+                }
+            }
+        }
+        self.batch_status = Some(format!("Exported {exported} level PNGs to {}", out_dir.display()));
+        log::info!("Batch-exported {exported} level PNGs to {}", out_dir.display());
+    }
+
     fn main_menu_bar(&mut self, ctx: &Context, rom: Option<&Arc<SmwRom>>) {
         let has_rom = rom.is_some();
         // Ctrl+S shortcut.
@@ -510,6 +751,23 @@ impl UiMainWindow {
                             self.export_ips_patch();
                             ui.close_menu();
                         }
+                        ui.separator();
+                        if ui.button("Export Level to PNG...").clicked() {
+                            self.export_level_png();
+                            ui.close_menu();
+                        }
+                        ui.menu_button("Levels", |ui| {
+                            if ui.button("Export Multiple Levels to Image Files...").clicked() {
+                                self.batch_from = "000".to_string();
+                                self.batch_to = format!("{:03X}", LEVEL_COUNT - 1);
+                                self.batch_include_l1 = true;
+                                self.batch_include_l2 = true;
+                                self.batch_include_sprites = true;
+                                self.batch_status = None;
+                                self.show_batch_export_dialog = true;
+                                ui.close_menu();
+                            }
+                        });
                     });
                     ui.separator();
                     if ui.button("Exit").clicked() {
