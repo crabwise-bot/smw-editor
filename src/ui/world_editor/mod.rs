@@ -380,6 +380,10 @@ pub struct UiWorldEditor {
     ow_extra_hex:          String,
     /// Last validation error from a sprite field edit, if any.
     ow_sprite_error:       Option<String>,
+    /// "Custom Sprite List Sizes" dialog (LM v3.51 parity): open flag plus
+    /// the draft per-submap capacities, synced from the table on open.
+    ow_list_sizes_open:    bool,
+    ow_list_sizes_draft:   [u8; 7],
     /// Sprite state as parsed at ROM load; compared on save so untouched
     /// sprite data is never rewritten (avoids orphaning RATS blocks).
     sprites_at_load:       (ow_sprites::VanillaOwSprites, ow_sprites::CustomSpriteTable),
@@ -529,6 +533,8 @@ impl UiWorldEditor {
             ow_sprite_drag: None,
             ow_extra_hex: String::new(),
             ow_sprite_error: None,
+            ow_list_sizes_open: false,
+            ow_list_sizes_draft: [ow_sprites::DEFAULT_CUSTOM_LIST_SIZE; 7],
             sprites_at_load,
             vanilla_level_names,
             custom_level_names: HashMap::new(),

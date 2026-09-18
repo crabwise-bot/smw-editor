@@ -53,6 +53,21 @@
 //! 0x80-entry per-sprite count table whose 3-byte pointer lives at `$0DE18C`
 //! with marker byte `$42` at `$0DE18F`).
 //!
+//! ## Custom sprite list sizes (LM v3.51)
+//!
+//! Lunar Magic 3.51 (2024-12-25) added support for *custom overworld sprite
+//! list sizes*: each submap's custom sprite list has a configurable capacity
+//! (how many custom sprites that submap may hold), instead of one fixed cap
+//! for every submap. The documented native maximum is 24 per submap
+//! ([Overworld Data Format](https://smwspeedruns.com/Overworld_Data_Format),
+//! accurate as of LM 3.51).
+//!
+//! smw-editor models this as `CustomSpriteTable::list_sizes` — one capacity
+//! per submap, default 24, hard-capped at 24 — persisted in the `OWSPRITE`
+//! RATS payload (format version 2). Version-1 payloads (written before this
+//! feature) decode with all sizes defaulted to 24, so old saves load
+//! unchanged.
+//!
 //! **Important:** Lunar Magic only *authors* this table. Custom sprites do
 //! nothing in-game unless a third-party runtime patch (e.g. a custom-sprite
 //! engine) is also installed — vanilla SMW has no code that reads the table.
@@ -60,7 +75,7 @@
 //!
 //! LM's exact on-disk layout for the table is not publicly documented, so
 //! smw-editor uses its own clearly-marked RATS-tagged format (magic
-//! `OWSPRITE`, version 1): the 3-byte pointer at `$0EF55D` aims at the `STAR`
+//! `OWSPRITE`, version 2): the 3-byte pointer at `$0EF55D` aims at the `STAR`
 //! tag, and the seven submap offsets are byte offsets from the start of the
 //! RATS payload (`0xFFFF` = submap has no custom sprites).
 
@@ -96,8 +111,14 @@ pub const EXTRA_BYTE_COUNT_MARKER_SNES: AddrSnes = AddrSnes(0x0DE18F);
 pub const EXTRA_BYTE_COUNT_MARKER: u8 = 0x42;
 /// Default extra bytes per custom sprite when no count table is present.
 pub const DEFAULT_EXTRA_BYTES: usize = 1;
-/// Maximum custom sprites per submap.
+/// Maximum custom sprites per submap: the documented native LM limit
+/// (smwspeedruns "Overworld Data Format", accurate as of LM 3.51). Per-submap
+/// list sizes ([`CustomSpriteTable::list_sizes`]) may be set lower, never
+/// higher.
 pub const MAX_CUSTOM_SPRITES_PER_SUBMAP: usize = 24;
+/// Default per-submap custom sprite list size (LM v3.51 "custom overworld
+/// sprite list sizes" — each submap's list capacity, configurable 0..=24).
+pub const DEFAULT_CUSTOM_LIST_SIZE: u8 = MAX_CUSTOM_SPRITES_PER_SUBMAP as u8;
 
 /// Visibility bit per submap index 0..=6: bit set = sprite is INACTIVE there.
 /// Matches `DATA_04F875` (`db $80,$40,$20,$10,$08,$04,$02`) in `bank_04.asm`.
@@ -160,6 +181,8 @@ pub enum SpriteError {
     NoVisibilityByte(u8),
     #[error("refusing to overwrite a custom sprite table not authored by smw-editor")]
     ForeignTable,
+    #[error("cannot shrink submap {submap}'s custom sprite list to {size}: it holds {count} sprites")]
+    ListSizeTooSmall { submap: usize, size: u8, count: usize },
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -334,9 +357,22 @@ impl CustomOwSprite {
 }
 
 /// Custom overworld sprites, one list per submap (index 0..=6).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `list_sizes` is the LM v3.51 "custom overworld sprite list sizes" feature:
+/// the configured capacity (maximum custom sprite count) of each submap's
+/// list, 0..=[`MAX_CUSTOM_SPRITES_PER_SUBMAP`]. The editor refuses to insert
+/// past a submap's configured size, mirroring LM's "not enough room" save
+/// rejection. Defaults to 24 per submap (the documented native maximum).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSpriteTable {
-    pub submaps: [Vec<CustomOwSprite>; 7],
+    pub submaps:    [Vec<CustomOwSprite>; 7],
+    pub list_sizes: [u8; 7],
+}
+
+impl Default for CustomSpriteTable {
+    fn default() -> Self {
+        Self { submaps: Default::default(), list_sizes: [DEFAULT_CUSTOM_LIST_SIZE; 7] }
+    }
 }
 
 impl CustomSpriteTable {
@@ -347,6 +383,33 @@ impl CustomSpriteTable {
     pub fn total_count(&self) -> usize {
         self.submaps.iter().map(Vec::len).sum()
     }
+
+    /// Configured list size (capacity) for `submap` (0..=6), clamped to the
+    /// valid range. Out-of-range submaps read as 0.
+    pub fn list_size(&self, submap: usize) -> u8 {
+        self.list_sizes.get(submap).copied().unwrap_or(0).min(MAX_CUSTOM_SPRITES_PER_SUBMAP as u8)
+    }
+
+    /// Free slots left on `submap`'s custom sprite list.
+    pub fn room_for(&self, submap: usize) -> usize {
+        (self.list_size(submap) as usize).saturating_sub(self.submaps.get(submap).map(Vec::len).unwrap_or(0))
+    }
+
+    /// Set submap `submap`'s list size. Sizes above
+    /// [`MAX_CUSTOM_SPRITES_PER_SUBMAP`] are clamped to it; shrinking below
+    /// the number of sprites the list currently holds is refused with
+    /// [`SpriteError::ListSizeTooSmall`].
+    pub fn set_list_size(&mut self, submap: usize, size: u8) -> Result<(), SpriteError> {
+        let size = size.min(MAX_CUSTOM_SPRITES_PER_SUBMAP as u8);
+        let count = self.submaps.get(submap).map(Vec::len).unwrap_or(0);
+        if (size as usize) < count {
+            return Err(SpriteError::ListSizeTooSmall { submap, size, count });
+        }
+        if let Some(slot) = self.list_sizes.get_mut(submap) {
+            *slot = size;
+        }
+        Ok(())
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -355,9 +418,14 @@ impl CustomSpriteTable {
 
 /// Magic at the start of our custom-sprite RATS payload.
 const CUSTOM_MAGIC: &[u8; 8] = b"OWSPRITE";
-const CUSTOM_VERSION: u8 = 1;
-/// Payload header: magic + version + 7 submap offsets.
-const CUSTOM_HEADER_LEN: usize = 8 + 1 + 7 * 2;
+/// Version 2 adds the 7 per-submap list sizes (LM v3.51 parity) after the
+/// submap offsets. Version-1 payloads (written before this feature) decode
+/// with every list size defaulted to [`DEFAULT_CUSTOM_LIST_SIZE`].
+const CUSTOM_VERSION: u8 = 2;
+/// Payload header: magic + version + 7 submap offsets + 7 list sizes.
+const CUSTOM_HEADER_LEN: usize = 8 + 1 + 7 * 2 + 7;
+/// Header length of version-1 payloads (no list sizes).
+const CUSTOM_HEADER_LEN_V1: usize = 8 + 1 + 7 * 2;
 /// Submap offset value meaning "this submap has no custom sprites".
 const NO_SPRITES_OFFSET: u16 = 0xFFFF;
 
@@ -420,13 +488,16 @@ fn erase_rats_block(rom_bytes: &mut [u8], file_off: usize) {
 }
 
 impl CustomSpriteTable {
-    /// Encode to the RATS payload format (without the `STAR` tag).
+    /// Encode to the RATS payload format (without the `STAR` tag), version 2.
+    /// Each submap's list is truncated to its configured list size.
     pub fn encode_payload(&self, extra_counts: &[u8; 128]) -> Vec<u8> {
         let mut lists: Vec<Vec<u8>> = Vec::with_capacity(7);
-        for sprites in &self.submaps {
-            let mut list = Vec::with_capacity(1 + sprites.len() * 4);
-            list.push(sprites.len().min(MAX_CUSTOM_SPRITES_PER_SUBMAP) as u8);
-            for sprite in sprites.iter().take(MAX_CUSTOM_SPRITES_PER_SUBMAP) {
+        for (submap, sprites) in self.submaps.iter().enumerate() {
+            let cap = self.list_size(submap) as usize;
+            let mut list = Vec::with_capacity(1 + sprites.len().min(cap) * 4);
+            let stored = sprites.len().min(cap);
+            list.push(stored as u8);
+            for sprite in sprites.iter().take(cap) {
                 let n = extra_counts[(sprite.number & 0x7F) as usize] as usize;
                 list.extend_from_slice(&sprite.encode(n));
             }
@@ -445,6 +516,7 @@ impl CustomSpriteTable {
                 offset += list.len();
             }
         }
+        out.extend_from_slice(&self.list_sizes);
         for list in &lists {
             if list.len() > 1 {
                 out.extend_from_slice(list);
@@ -453,19 +525,36 @@ impl CustomSpriteTable {
         out
     }
 
-    /// Decode a RATS payload produced by [`Self::encode_payload`].
+    /// Decode a RATS payload produced by [`Self::encode_payload`]. Accepts
+    /// version 1 (no list sizes — every size defaults to
+    /// [`DEFAULT_CUSTOM_LIST_SIZE`]) and version 2.
     pub fn decode_payload(payload: &[u8], extra_counts: &[u8; 128]) -> Result<Self, SpriteError> {
         let corrupt = |msg: &str| SpriteError::Corrupt(msg.to_string());
-        if payload.len() < CUSTOM_HEADER_LEN {
+        if payload.len() < CUSTOM_HEADER_LEN_V1 {
             return Err(corrupt("payload shorter than header"));
         }
         if &payload[..8] != CUSTOM_MAGIC {
             return Err(corrupt("bad magic"));
         }
-        if payload[8] != CUSTOM_VERSION {
-            return Err(SpriteError::Corrupt(format!("unsupported version {}", payload[8])));
-        }
+        let version = payload[8];
+        let sizes: [u8; 7] = match version {
+            1 => [DEFAULT_CUSTOM_LIST_SIZE; 7],
+            CUSTOM_VERSION => {
+                if payload.len() < CUSTOM_HEADER_LEN {
+                    return Err(corrupt("payload shorter than v2 header"));
+                }
+                let mut s = [0u8; 7];
+                s.copy_from_slice(&payload[23..30]);
+                if s.iter().any(|&n| n as usize > MAX_CUSTOM_SPRITES_PER_SUBMAP) {
+                    return Err(corrupt("list size exceeds 24"));
+                }
+                s
+            }
+            v => return Err(SpriteError::Corrupt(format!("unsupported version {v}"))),
+        };
+        // Submap offsets live at bytes 9..23 in both versions.
         let mut table = CustomSpriteTable::default();
+        table.list_sizes = sizes;
         for (submap, sprites) in table.submaps.iter_mut().enumerate() {
             let off = u16::from_le_bytes([payload[9 + submap * 2], payload[9 + submap * 2 + 1]]);
             if off == NO_SPRITES_OFFSET {
@@ -473,8 +562,8 @@ impl CustomSpriteTable {
             }
             let off = off as usize;
             let count = *payload.get(off).ok_or_else(|| corrupt("submap offset out of range"))? as usize;
-            if count > MAX_CUSTOM_SPRITES_PER_SUBMAP {
-                return Err(corrupt("submap sprite count exceeds 24"));
+            if count > sizes[submap] as usize {
+                return Err(corrupt("submap sprite count exceeds its list size"));
             }
             let mut pos = off + 1;
             for _ in 0..count {
@@ -727,6 +816,98 @@ mod tests {
         assert_eq!(parse_custom_table(&rom, 0).unwrap(), None);
         assert_eq!(&rom[ptr_pc..ptr_pc + 3], &[0xFF, 0xFF, 0xFF]);
         assert_eq!(&rom[tag_pc..tag_pc + 4], &[0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn list_sizes_encode_decode_round_trip() {
+        let mut table = CustomSpriteTable::default();
+        table.set_list_size(0, 8).unwrap();
+        table.set_list_size(4, 0).unwrap();
+        table.submaps[0].push(CustomOwSprite { number: 1, x: 10, y: 20, height: 3, extra: vec![0xAA] });
+        table.submaps[0].push(CustomOwSprite { number: 2, x: 11, y: 21, height: 0, extra: vec![0xBB] });
+        let counts = [1u8; 128];
+        let payload = table.encode_payload(&counts);
+        assert_eq!(payload[8], CUSTOM_VERSION);
+        let decoded = CustomSpriteTable::decode_payload(&payload, &counts).unwrap();
+        assert_eq!(decoded, table);
+        assert_eq!(decoded.list_size(0), 8);
+        assert_eq!(decoded.list_size(4), 0);
+        assert_eq!(decoded.list_size(1), DEFAULT_CUSTOM_LIST_SIZE);
+        assert_eq!(decoded.room_for(0), 6);
+    }
+
+    #[test]
+    fn v1_payload_decodes_with_default_list_sizes() {
+        // Version-1 payload: 23-byte header, no size bytes. Must load with
+        // every submap defaulted to 24 (backward compat with older saves).
+        let counts = [1u8; 128];
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(b"OWSPRITE");
+        v1.push(1u8);
+        let list_off: u16 = 23;
+        v1.extend_from_slice(&list_off.to_le_bytes());
+        for _ in 0..6 {
+            v1.extend_from_slice(&NO_SPRITES_OFFSET.to_le_bytes());
+        }
+        let sprite = CustomOwSprite { number: 5, x: 1, y: 2, height: 1, extra: vec![0x00] };
+        v1.push(1u8);
+        v1.extend_from_slice(&sprite.encode(1));
+        let decoded = CustomSpriteTable::decode_payload(&v1, &counts).unwrap();
+        assert_eq!(decoded.list_sizes, [DEFAULT_CUSTOM_LIST_SIZE; 7]);
+        assert_eq!(decoded.submaps[0].len(), 1);
+        assert_eq!(decoded.submaps[0][0].number, 5);
+    }
+
+    #[test]
+    fn set_list_size_validation() {
+        let mut table = CustomSpriteTable::default();
+        table.submaps[2].push(CustomOwSprite { number: 5, x: 1, y: 2, height: 1, extra: vec![0x00] });
+        table.submaps[2].push(CustomOwSprite { number: 6, x: 2, y: 3, height: 1, extra: vec![0x00] });
+        // Cannot shrink below the current sprite count.
+        assert!(matches!(
+            table.set_list_size(2, 1),
+            Err(SpriteError::ListSizeTooSmall { submap: 2, size: 1, count: 2 })
+        ));
+        assert_eq!(table.list_size(2), DEFAULT_CUSTOM_LIST_SIZE);
+        // Exactly the count is fine.
+        table.set_list_size(2, 2).unwrap();
+        assert_eq!(table.list_size(2), 2);
+        assert_eq!(table.room_for(2), 0);
+        // Sizes clamp to the native maximum of 24.
+        table.set_list_size(3, 255).unwrap();
+        assert_eq!(table.list_size(3), MAX_CUSTOM_SPRITES_PER_SUBMAP as u8);
+        // Out-of-range submaps are inert.
+        assert!(table.set_list_size(7, 5).is_ok());
+        assert_eq!(table.list_size(7), 0);
+    }
+
+    #[test]
+    fn encode_truncates_lists_to_configured_size() {
+        let mut table = CustomSpriteTable::default();
+        table.set_list_size(1, 3).unwrap();
+        for i in 0..5u8 {
+            table.submaps[1].push(CustomOwSprite { number: i, x: i, y: 1, height: 1, extra: vec![0x00] });
+        }
+        let counts = [1u8; 128];
+        let payload = table.encode_payload(&counts);
+        let decoded = CustomSpriteTable::decode_payload(&payload, &counts).unwrap();
+        // Only the first 3 survive the round trip; the rest were truncated.
+        assert_eq!(decoded.submaps[1].len(), 3);
+        assert_eq!(decoded.submaps[1][2].number, 2);
+        assert_eq!(decoded.list_size(1), 3);
+    }
+
+    #[test]
+    fn decode_rejects_count_above_list_size() {
+        let counts = [1u8; 128];
+        let mut table = CustomSpriteTable::default();
+        table.set_list_size(0, 1).unwrap();
+        table.submaps[0].push(CustomOwSprite { number: 1, x: 1, y: 1, height: 1, extra: vec![0x00] });
+        let mut payload = table.encode_payload(&counts);
+        // Corrupt the count byte of submap 0's list to exceed its size.
+        let off = u16::from_le_bytes([payload[9], payload[10]]) as usize;
+        payload[off] = 5;
+        assert!(matches!(CustomSpriteTable::decode_payload(&payload, &counts), Err(SpriteError::Corrupt(_))));
     }
 
     #[test]

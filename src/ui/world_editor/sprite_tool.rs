@@ -129,14 +129,16 @@ impl UiWorldEditor {
     }
 
     /// Insert a custom sprite on the current submap at map center. Selects
-    /// the new sprite.
+    /// the new sprite. Respects the submap's configured custom sprite list
+    /// size (LM v3.51 parity).
     fn ow_insert_custom_sprite(&mut self) {
         let submap = self.submap as usize;
         let counts = self.edit_state.read(|s| s.custom_extra_counts);
         let number = 0x10u8;
         let inserted = self.edit_state.write(|s| {
+            let cap = s.custom_sprites.list_size(submap) as usize;
             let list = &mut s.custom_sprites.submaps[submap];
-            if list.len() >= ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP {
+            if list.len() >= cap {
                 return None;
             }
             list.push(ow_sprites::CustomOwSprite {
@@ -156,8 +158,8 @@ impl UiWorldEditor {
                 self.ow_sprite_error = None;
             }
             None => {
-                self.ow_sprite_error =
-                    Some(format!("Submap is full ({} custom sprites max)", ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP));
+                let size = self.edit_state.read(|s| s.custom_sprites.list_size(submap));
+                self.ow_sprite_error = Some(format!("Submap is full ({size} custom sprites max — see List Sizes)"));
             }
         }
     }
@@ -424,18 +426,34 @@ impl UiWorldEditor {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let custom_count = entries.iter().filter(|(r, _, _)| matches!(r, OwSpriteRef::Custom { .. })).count();
-            let can_insert = !foreign && custom_count < ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP;
+            let list_size = self.edit_state.read(|s| s.custom_sprites.list_size(self.submap as usize)) as usize;
+            let can_insert = !foreign && custom_count < list_size;
             if ui.add_enabled(can_insert, egui::Button::new("Insert custom sprite")).clicked() {
                 self.ow_insert_custom_sprite();
             }
             if foreign {
                 ui.small("disabled: foreign table");
-            } else if custom_count >= ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP {
-                ui.small(format!("max {} per submap", ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP));
+            } else if custom_count >= list_size {
+                ui.small(format!("max {list_size} per submap"));
             } else {
                 ui.small("adds at map center — drag it into place");
             }
         });
+        ui.horizontal(|ui| {
+            let custom_count = entries.iter().filter(|(r, _, _)| matches!(r, OwSpriteRef::Custom { .. })).count();
+            let list_size = self.edit_state.read(|s| s.custom_sprites.list_size(self.submap as usize)) as usize;
+            ui.small(format!("Custom sprites: {custom_count}/{list_size} on this submap"));
+            let btn = ui.add_enabled(!foreign, egui::Button::new("List Sizes…"));
+            if btn.clicked() {
+                // Sync the draft from the current table, then show the dialog.
+                self.ow_list_sizes_draft = self.edit_state.read(|s| s.custom_sprites.list_sizes);
+                self.ow_list_sizes_open = true;
+            }
+            if foreign {
+                ui.small("disabled: foreign table");
+            }
+        });
+        self.ow_list_sizes_dialog(ui.ctx());
 
         // ── Selected sprite editor ────────────────────────────────────
         let selection = self.ow_sprite_selection;
@@ -596,6 +614,102 @@ impl UiWorldEditor {
         ui.add_space(4.0);
         if ui.button("Delete sprite").clicked() {
             self.ow_delete_selected();
+        }
+    }
+
+    /// "Custom Sprite List Sizes" dialog (LM v3.51 parity): one configurable
+    /// capacity per submap, 0..=24. Apply is a single undo step; shrinking a
+    /// list below its current sprite count is refused.
+    fn ow_list_sizes_dialog(&mut self, ctx: &egui::Context) {
+        if !self.ow_list_sizes_open {
+            return;
+        }
+        let counts = self.edit_state.read(|s| {
+            let mut c = [0usize; 7];
+            for (i, list) in s.custom_sprites.submaps.iter().enumerate() {
+                c[i] = list.len();
+            }
+            c
+        });
+        let mut open = self.ow_list_sizes_open;
+        let mut apply: Option<[u8; 7]> = None;
+        let mut close = false;
+        egui::Window::new("Custom Sprite List Sizes").open(&mut open).resizable(false).collapsible(false).show(
+            ctx,
+            |ui| {
+                ui.small(
+                    "How many custom sprites each submap's list may hold, like Lunar Magic v3.51. \
+                    0–24 per submap; cannot go below the sprites already placed.",
+                );
+                ui.add_space(4.0);
+                let mut any_too_small = false;
+                for submap in 0..7usize {
+                    ui.horizontal(|ui| {
+                        ui.label(smwe_rom::overworld::SUBMAP_NAMES[submap]);
+                        let mut size = self.ow_list_sizes_draft[submap] as i32;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut size)
+                                    .range(0..=ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP as i32),
+                            )
+                            .changed()
+                        {
+                            self.ow_list_sizes_draft[submap] =
+                                size.clamp(0, ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP as i32) as u8;
+                        }
+                        ui.small(format!("{}/{} used", counts[submap], self.ow_list_sizes_draft[submap]));
+                    });
+                    if (self.ow_list_sizes_draft[submap] as usize) < counts[submap] {
+                        any_too_small = true;
+                        ui.colored_label(
+                            Color32::from_rgb(255, 120, 120),
+                            format!(
+                                "{} already holds {} sprites — raise the size or delete sprites first",
+                                smwe_rom::overworld::SUBMAP_NAMES[submap],
+                                counts[submap]
+                            ),
+                        );
+                    }
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let resp = ui.add_enabled(!any_too_small, egui::Button::new("Apply"));
+                    if resp.clicked() {
+                        apply = Some(self.ow_list_sizes_draft);
+                    }
+                    if ui.button("Reset to 24").clicked() {
+                        self.ow_list_sizes_draft = [ow_sprites::DEFAULT_CUSTOM_LIST_SIZE; 7];
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            },
+        );
+        self.ow_list_sizes_open = open && !close;
+        if let Some(sizes) = apply {
+            match self.edit_state.write(|s| {
+                // Two passes so a refusal never leaves sizes half-applied.
+                for (submap, &size) in sizes.iter().enumerate() {
+                    let count = s.custom_sprites.submaps.get(submap).map(Vec::len).unwrap_or(0);
+                    if (size.min(ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP as u8) as usize) < count {
+                        return Err(ow_sprites::SpriteError::ListSizeTooSmall { submap, size, count });
+                    }
+                }
+                for (submap, &size) in sizes.iter().enumerate() {
+                    s.custom_sprites.set_list_size(submap, size)?;
+                }
+                Ok::<(), ow_sprites::SpriteError>(())
+            }) {
+                Ok(()) => {
+                    self.has_edits = true;
+                    self.ow_list_sizes_open = false;
+                    self.ow_sprite_error = None;
+                }
+                Err(e) => {
+                    self.ow_sprite_error = Some(format!("Cannot apply list sizes: {e}"));
+                }
+            }
         }
     }
 }
