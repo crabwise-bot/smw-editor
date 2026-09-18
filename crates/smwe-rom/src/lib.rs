@@ -33,6 +33,7 @@ use crate::{
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
     level::{
         secondary_entrance::{SecondaryEntrance, SecondaryExitExtData, SECONDARY_ENTRANCE_TABLE},
+        sprite_header_ext::{SpriteHeaderExtData, SpriteHeaderExtError},
         Level,
         LEVEL_COUNT,
     },
@@ -67,6 +68,7 @@ pub struct SmwRom {
     pub title_credits:       TitleCreditsData,
     pub exanimation:         ExAnimationData,
     pub secondary_exit_ext:  SecondaryExitExtData,
+    pub sprite_header_ext:   SpriteHeaderExtData,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -175,6 +177,16 @@ impl SmwRom {
             SecondaryExitExtData::default()
         });
 
+        log::info!("Parsing sprite-header-ext data");
+        let sprite_header_ext = SpriteHeaderExtData::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has set LM 3.00
+            // sprite-header options on yet simply has no block.
+            if !matches!(e, SpriteHeaderExtError::NotFound) {
+                log::warn!("Could not parse sprite-header-ext data: {e}");
+            }
+            SpriteHeaderExtData::default()
+        });
+
         Ok(Self {
             rom,
             internal_header,
@@ -191,6 +203,7 @@ impl SmwRom {
             title_credits,
             exanimation,
             secondary_exit_ext,
+            sprite_header_ext,
         })
     }
 
