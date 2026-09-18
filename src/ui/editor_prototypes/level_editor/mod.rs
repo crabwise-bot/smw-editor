@@ -59,8 +59,52 @@ use self::{
 use crate::{
     rom_freespace::{find_free_space, find_free_space_in},
     ui::{editing_mode::EditingMode, tool::DockableEditorTool},
-    undo::UndoableData,
+    undo::{Undo, UndoableData},
 };
+
+/// Main-entrance ("M" marker) position in absolute tile coordinates.
+///
+/// Lunar Magic v2.20 made the level entrance selectable/draggable/copyable in
+/// sprite editing mode; the position lives here as its own undoable value so
+/// entrance edits (drag, cut, paste-move, delete-reset) each undo in one
+/// step. Undo ordering across the sprite/object stacks is kept LIFO by the
+/// `spawn_undo_pending` / `spawn_redo_pending` flags on [`UiLevelEditor`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct SpawnPos {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Undo for SpawnPos {
+    fn from_bytes(bytes: Vec<u8>) -> Self {
+        // Guarded per-field decode: short or truncated buffers decode as 0
+        // instead of panicking (undo snapshots are always 8 bytes; this is
+        // belt-and-braces for hand-fed data).
+        let x = bytes.get(0..4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).unwrap_or(0);
+        let y = bytes.get(4..8).map(|s| u32::from_le_bytes(s.try_into().unwrap())).unwrap_or(0);
+        Self { x, y }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8);
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out
+    }
+
+    fn size_bytes(&self) -> usize {
+        8
+    }
+}
+
+/// Vanilla default main-entrance position (absolute full-res tile coords).
+/// Verified against the real ROM: 374 of 512 levels carry half-res (0, 11) on
+/// screen 0 in the secondary-header entrance bytes — Nintendo's factory
+/// default for unused levels, and Lunar Magic's delete-reset target. With
+/// screen 0 this maps to absolute tile (0, 22) for both horizontal and
+/// vertical layouts.
+pub(super) const DEFAULT_SPAWN_X: u32 = 0;
+pub(super) const DEFAULT_SPAWN_Y: u32 = 22;
 
 pub struct UiLevelEditor {
     gl:             Arc<glow::Context>,
@@ -123,12 +167,22 @@ pub struct UiLevelEditor {
     edit_layer:                 u8, // 1 or 2
     edit_sprites:               bool,
 
-    // Spawn point marker
-    mario_spawn_x:   u32,
-    mario_spawn_y:   u32,
-    initial_spawn_x: u32,
-    initial_spawn_y: u32,
-    dragging_spawn:  bool,
+    // Spawn point marker ("M"): the level's main entrance, selectable and
+    // draggable in sprite editing mode (Lunar Magic v2.20).
+    spawn:              UndoableData<SpawnPos>,
+    initial_spawn_x:    u32,
+    initial_spawn_y:    u32,
+    dragging_spawn:     bool,
+    /// The M marker is selected (exclusive with sprite selection).
+    entrance_selected:  bool,
+    /// LIFO cross-stack undo: true while the spawn stack's head step is the
+    /// most recent undoable mutation overall. Every non-spawn mutation clears
+    /// these via [`Self::mark_edited`]; spawn mutations set them.
+    spawn_undo_pending: bool,
+    spawn_redo_pending: bool,
+    /// Pre-drag snapshot for gesture-style entrance drags (one undo step per
+    /// drag, committed on release).
+    spawn_drag_before:  Option<SpawnPos>,
 
     // Unsaved changes tracking
     show_unsaved_dialog: bool,
@@ -392,11 +446,14 @@ impl UiLevelEditor {
             draw_sprite_extra_bits: 0x00,
             edit_layer: 1,
             edit_sprites: false,
-            mario_spawn_x: 0,
-            mario_spawn_y: 0,
+            spawn: UndoableData::new(SpawnPos::default()),
             initial_spawn_x: 0,
             initial_spawn_y: 0,
             dragging_spawn: false,
+            entrance_selected: false,
+            spawn_undo_pending: false,
+            spawn_redo_pending: false,
+            spawn_drag_before: None,
             show_unsaved_dialog: false,
             pending_level_num: None,
             has_edits: false,
@@ -750,17 +807,18 @@ impl DockableEditorTool for UiLevelEditor {
         // Fully reconstruct all four bytes from level_properties + spawn position.
         {
             let p = &self.level_properties;
+            let (spawn_x, spawn_y) = self.spawn_pos();
             let (entrance_screen, local_x, local_y) = if p.is_vertical {
-                let sx = self.mario_spawn_x / 16;
-                let sy = self.mario_spawn_y / 32;
+                let sx = spawn_x / 16;
+                let sy = spawn_y / 32;
                 let screen = ((sy * 2 + sx) as u8).min(31);
-                let x = (self.mario_spawn_x % 16) as u8;
-                let y = (self.mario_spawn_y % 32) as u8;
+                let x = (spawn_x % 16) as u8;
+                let y = (spawn_y % 32) as u8;
                 (screen, x, y)
             } else {
-                let screen = ((self.mario_spawn_x / 16) as u8).min(31);
-                let x = (self.mario_spawn_x % 16) as u8;
-                let y = self.mario_spawn_y as u8;
+                let screen = ((spawn_x / 16) as u8).min(31);
+                let x = (spawn_x % 16) as u8;
+                let y = spawn_y as u8;
                 (screen, x, y)
             };
             let entrance_x_half = (local_x / 2).min(7);
@@ -1086,8 +1144,9 @@ impl DockableEditorTool for UiLevelEditor {
         self.title_credits_dirty = false;
         self.exanimation_dirty = false;
         self.secondary_exit_ext_dirty = false;
-        self.initial_spawn_x = self.mario_spawn_x;
-        self.initial_spawn_y = self.mario_spawn_y;
+        let (spawn_x, spawn_y) = self.spawn_pos();
+        self.initial_spawn_x = spawn_x;
+        self.initial_spawn_y = spawn_y;
     }
 }
 
@@ -1485,15 +1544,87 @@ impl UiLevelEditor {
         let _entrance_x = (_entrance_x / 2).min(7);
         let _entrance_y = (_entrance_y / 2).min(15);
 
-        // Update the local spawn position
-        self.mario_spawn_x = abs_x;
-        self.mario_spawn_y = abs_y;
+        // Update the local spawn position (transient mid-drag write; the
+        // drag start/end sites own the undo step)
+        let pos = self.spawn.data_mut();
+        pos.x = abs_x;
+        pos.y = abs_y;
         self.mark_edited();
     }
 
-    /// Mark the level as having edits
+    /// Mark the level as having edits.
+    ///
+    /// This is the choke point every undoable mutation funnels through, so
+    /// it also clears the spawn cross-stack undo priority: any non-spawn
+    /// mutation makes the spawn stack's head no longer the newest undoable
+    /// action. Spawn mutations set the flags back afterwards (see
+    /// [`Self::set_spawn`] / [`Self::end_spawn_drag`]).
     pub(super) fn mark_edited(&mut self) {
         self.has_edits = true;
+        self.spawn_undo_pending = false;
+        self.spawn_redo_pending = false;
+    }
+
+    /// Main-entrance position in absolute tile coordinates.
+    pub(super) fn spawn_pos(&self) -> (u32, u32) {
+        self.spawn.read(|s| (s.x, s.y))
+    }
+
+    /// Set the main-entrance position as one undoable step (no-op when
+    /// unchanged). Restores spawn-stack undo priority afterwards.
+    pub(super) fn set_spawn(&mut self, x: u32, y: u32) {
+        if self.spawn_pos() == (x, y) {
+            return;
+        }
+        self.spawn.write(|s| {
+            s.x = x;
+            s.y = y;
+        });
+        self.mark_edited();
+        self.spawn_undo_pending = true;
+        self.spawn_redo_pending = false;
+    }
+
+    /// Lunar Magic delete behavior for the entrance: reset to the vanilla
+    /// default position instead of removing it (a level always has one).
+    pub(super) fn reset_spawn_to_default(&mut self) {
+        self.set_spawn(DEFAULT_SPAWN_X, DEFAULT_SPAWN_Y);
+    }
+
+    /// Begin a gesture-style entrance drag: snapshot so the whole drag
+    /// commits as one undo step on release.
+    pub(super) fn begin_spawn_drag(&mut self) {
+        self.spawn_drag_before = Some(self.spawn.read(|s| s.clone()));
+    }
+
+    /// Move the entrance mid-drag (transient: no undo step per frame).
+    pub(super) fn drag_spawn_to(&mut self, x: u32, y: u32) {
+        let pos = self.spawn.data_mut();
+        pos.x = x;
+        pos.y = y;
+        self.mark_edited();
+    }
+
+    /// End a gesture-style entrance drag: commit one undo step, unless the
+    /// pointer never actually moved (a click, not a drag).
+    pub(super) fn end_spawn_drag(&mut self) {
+        if let Some(before) = self.spawn_drag_before.take() {
+            let after = self.spawn.read(|s| s.clone());
+            if before != after {
+                self.spawn.commit_change(&before);
+                self.mark_edited();
+                self.spawn_undo_pending = true;
+                self.spawn_redo_pending = false;
+            }
+        }
+    }
+
+    /// Screen rect of the red "M" entrance marker (shared by the overlay
+    /// draw code and hit-testing).
+    pub(super) fn entrance_rect(&self, origin: Pos2, tile_sz: f32) -> Rect {
+        let (sx, sy) = self.spawn_pos();
+        let spawn_pos = origin + vec2(sx as f32 * tile_sz, sy as f32 * tile_sz);
+        Rect::from_center_size(spawn_pos + vec2(tile_sz / 2.0, tile_sz / 2.0), Vec2::splat(tile_sz))
     }
 
     /// Check if there are unsaved changes
@@ -1526,13 +1657,42 @@ impl UiLevelEditor {
             entrance_y
         };
 
-        // Store spawn coordinates for rendering the "M" marker
-        self.mario_spawn_x = abs_x;
-        self.mario_spawn_y = abs_y;
+        // Store spawn coordinates for rendering the "M" marker; a fresh
+        // undo stack per level load so undo never crosses level switches.
+        self.spawn = UndoableData::new(SpawnPos { x: abs_x, y: abs_y });
+        self.spawn_undo_pending = false;
+        self.spawn_redo_pending = false;
+        self.spawn_drag_before = None;
+        self.entrance_selected = false;
         // Store initial state for unsaved changes tracking
         self.initial_spawn_x = abs_x;
         self.initial_spawn_y = abs_y;
 
         // Spawn coordinates stored for rendering as "M" text overlay
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::undo::Undo;
+
+    #[test]
+    fn spawn_pos_bytes_round_trip() {
+        let p = SpawnPos { x: 5, y: 18 };
+        let q = SpawnPos::from_bytes(p.to_bytes());
+        assert_eq!((q.x, q.y), (5, 18));
+    }
+
+    #[test]
+    fn spawn_pos_from_bytes_short_or_empty_decodes_zero() {
+        // Empty / field-truncated buffers decode missing fields as 0
+        // instead of panicking; a complete 4-byte field still decodes.
+        let q = SpawnPos::from_bytes(vec![]);
+        assert_eq!((q.x, q.y), (0, 0));
+        let q = SpawnPos::from_bytes(vec![1, 2, 3]);
+        assert_eq!((q.x, q.y), (0, 0));
+        let q = SpawnPos::from_bytes(vec![9; 7]);
+        assert_eq!((q.x, q.y), (0x0909_0909, 0));
     }
 }

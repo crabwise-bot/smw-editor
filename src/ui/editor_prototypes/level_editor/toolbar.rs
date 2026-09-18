@@ -106,7 +106,7 @@ impl UiLevelEditor {
             // Clipboard — Lunar Magic-style cut/copy/paste through the system
             // clipboard (Ctrl+X / Ctrl+C / Ctrl+V).
             let can_copy = if self.edit_sprites {
-                !self.selected_sprite_indices.is_empty()
+                !self.selected_sprite_indices.is_empty() || self.entrance_selected
             } else {
                 !self.selected_object_indices.is_empty()
             };
@@ -266,6 +266,7 @@ impl UiLevelEditor {
         self.edit_layer = layer;
         self.selected_object_indices.clear();
         self.selected_sprite_indices.clear();
+        self.entrance_selected = false;
         self.preview_for = None;
     }
 

@@ -17,6 +17,8 @@
 //! - `objects` — level objects + sprites, positions relative to the
 //!   selection's top-left, each object carrying its rendered footprint
 //!   blocks so a paste stamps identical tiles.
+//! - `entrance` — level main-entrance ("M" marker) position in absolute
+//!   tile coords (Lunar Magic v2.20: copy = copy position, paste = move).
 //! - `map16` — rectangular region of Map16 block IDs (row-major hex).
 //! - `map16words` — one Map16 block's four tile words (Block Editor).
 //! - `tile8x8` — one 8x8 tile's 64 color indices + source GFX file.
@@ -57,6 +59,10 @@ pub struct ClipSprite {
 pub enum ClipboardPayload {
     /// Level editor: objects + sprites.
     LevelObjects { objects: Vec<ClipObject>, sprites: Vec<ClipSprite> },
+    /// Level editor: main-entrance ("M" marker) position, absolute tile
+    /// coords. Lunar Magic v2.20: copying the entrance copies its position;
+    /// pasting moves the entrance to the paste anchor.
+    Entrance { x: u32, y: u32 },
     /// Map16 grid: rectangular region of block IDs, row-major.
     Map16Blocks { cols: u32, rows: u32, ids: Vec<u16> },
     /// Map16 Block Editor: one block's four tile words.
@@ -109,6 +115,9 @@ impl ClipboardPayload {
                     .join(";");
                 format!("{MAGIC}:{VERSION}:objects:{objs}|{sprs}")
             }
+            ClipboardPayload::Entrance { x, y } => {
+                format!("{MAGIC}:{VERSION}:entrance:{x},{y}")
+            }
             ClipboardPayload::Map16Blocks { cols, rows, ids } => {
                 let list = ids.iter().map(|id| hex_u16(*id)).collect::<Vec<_>>().join(",");
                 format!("{MAGIC}:{VERSION}:map16:{cols},{rows}:{list}")
@@ -140,6 +149,7 @@ impl ClipboardPayload {
         let rest = parts.next().unwrap_or("");
         match kind {
             "objects" => decode_objects(rest),
+            "entrance" => decode_entrance(rest),
             "map16" => decode_map16(rest),
             "map16words" => decode_map16words(rest),
             "tile8x8" => decode_tile8x8(rest),
@@ -201,6 +211,11 @@ fn decode_objects(rest: &str) -> Option<ClipboardPayload> {
         return None;
     }
     Some(ClipboardPayload::LevelObjects { objects, sprites })
+}
+
+fn decode_entrance(rest: &str) -> Option<ClipboardPayload> {
+    let (x, y) = rest.split_once(',')?;
+    Some(ClipboardPayload::Entrance { x: parse_dec::<u32>(x)?, y: parse_dec::<u32>(y)? })
 }
 
 fn decode_map16(rest: &str) -> Option<ClipboardPayload> {
@@ -326,6 +341,23 @@ mod tests {
         let text = p.encode();
         assert!(text.starts_with("smwclip:1:objects:"));
         assert_eq!(ClipboardPayload::decode(&text), Some(p));
+    }
+
+    #[test]
+    fn entrance_roundtrip() {
+        let p = ClipboardPayload::Entrance { x: 5, y: 18 };
+        let text = p.encode();
+        assert_eq!(text, "smwclip:1:entrance:5,18");
+        assert_eq!(ClipboardPayload::decode(&text), Some(p));
+    }
+
+    #[test]
+    fn entrance_decode_rejects_garbage() {
+        assert_eq!(ClipboardPayload::decode("smwclip:1:entrance:5"), None);
+        assert_eq!(ClipboardPayload::decode("smwclip:1:entrance:x,y"), None);
+        assert_eq!(ClipboardPayload::decode("smwclip:1:entrance:5,6,7"), None);
+        // Unknown kinds still decode to None (forward compatibility).
+        assert_eq!(ClipboardPayload::decode("smwclip:1:portals:1,2"), None);
     }
 
     #[test]

@@ -212,11 +212,9 @@ impl UiLevelEditor {
 
         // ── Mario spawn point marker ───────────────────────────
         {
-            let spawn_x = self.mario_spawn_x as f32 * tile_sz;
-            let spawn_y = self.mario_spawn_y as f32 * tile_sz;
-            let spawn_pos = origin + vec2(spawn_x, spawn_y);
-            let spawn_rect =
-                Rect::from_center_size(spawn_pos + vec2(tile_sz / 2.0, tile_sz / 2.0), Vec2::splat(tile_sz));
+            let (spawn_x, spawn_y) = self.spawn_pos();
+            let spawn_pos = origin + vec2(spawn_x as f32 * tile_sz, spawn_y as f32 * tile_sz);
+            let spawn_rect = self.entrance_rect(origin, tile_sz);
 
             let is_hovering = resp.hover_pos().is_some_and(|p| spawn_rect.contains(p));
             let spawn_color = if self.dragging_spawn || is_hovering {
@@ -224,6 +222,22 @@ impl UiLevelEditor {
             } else {
                 Color32::from_rgba_unmultiplied(255, 100, 100, 255)
             };
+
+            // Selected entrance (sprite editing mode, LM v2.20) gets the
+            // same orange selection treatment as selected sprites.
+            if self.entrance_selected {
+                painter.rect_filled(
+                    spawn_rect,
+                    CornerRadius::same(2),
+                    Color32::from_rgba_unmultiplied(255, 120, 0, 50),
+                );
+                painter.rect_stroke(
+                    spawn_rect,
+                    CornerRadius::same(2),
+                    Stroke::new(2.0_f32, Color32::from_rgb(255, 120, 0)),
+                    StrokeKind::Outside,
+                );
+            }
 
             painter.text(
                 spawn_pos + vec2(tile_sz / 2.0, tile_sz / 2.0),
@@ -233,27 +247,54 @@ impl UiLevelEditor {
                 spawn_color,
             );
 
-            // Handle dragging the spawn point (Shift+click+drag on M)
-            let shift_held = ui.input(|i| i.modifiers.shift);
-            let primary_down = ui.input(|i| i.pointer.primary_down());
+            // Handle dragging the spawn point (Shift+click+drag on M).
+            // Sprite editing mode has its own plain-drag path (LM v2.20,
+            // no Shift needed) in editing.rs, so this stays off there.
+            if !self.edit_sprites {
+                let shift_held = ui.input(|i| i.modifiers.shift);
+                let primary_down = ui.input(|i| i.pointer.primary_down());
 
-            // Start drag when shift+click on M
-            if is_hovering && shift_held && ui.input(|i| i.pointer.primary_pressed()) {
-                self.dragging_spawn = true;
+                // Start drag when shift+click on M
+                if is_hovering && shift_held && ui.input(|i| i.pointer.primary_pressed()) {
+                    self.dragging_spawn = true;
+                    self.begin_spawn_drag();
+                }
+
+                // Continue dragging while shift+primary held, update from pointer
+                if self.dragging_spawn && shift_held && primary_down {
+                    if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        let local_pos = pointer_pos - origin;
+                        let tile_x = (local_pos.x / tile_sz).max(0.0) as u32;
+                        let tile_y = (local_pos.y / tile_sz).max(0.0) as u32;
+                        let is_vertical = self.level_properties.is_vertical;
+                        self.update_spawn_from_tiles(tile_x, tile_y, is_vertical);
+                    }
+                } else if !primary_down {
+                    // End drag when mouse released (one undo step for the
+                    // whole drag)
+                    if self.dragging_spawn {
+                        self.end_spawn_drag();
+                    }
+                    self.dragging_spawn = false;
+                }
             }
 
-            // Continue dragging while shift+primary held, update from pointer
-            if self.dragging_spawn && shift_held && primary_down {
-                if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
-                    let local_pos = pointer_pos - origin;
-                    let tile_x = (local_pos.x / tile_sz).max(0.0) as u32;
-                    let tile_y = (local_pos.y / tile_sz).max(0.0) as u32;
-                    let is_vertical = self.level_properties.is_vertical;
-                    self.update_spawn_from_tiles(tile_x, tile_y, is_vertical);
+            // Lunar Magic v2.20: Alt+Right-click the red M entrance marker
+            // opens the Level Header (its properties). The marker region
+            // rarely overlaps an object/sprite, but when it does the Edit
+            // Manual dialog takes precedence there (handled in
+            // handle_editing_interaction, which runs after this).
+            if is_hovering && ui.input(|i| i.modifiers.alt) && resp.clicked_by(egui::PointerButton::Secondary) {
+                if let Some(pos) = resp.hover_pos() {
+                    let hit = if self.edit_sprites {
+                        self.sprite_at(pos, origin, tile_sz).is_some()
+                    } else {
+                        self.object_at(pos, origin, tile_sz).is_some()
+                    };
+                    if !hit {
+                        self.show_level_header = true;
+                    }
                 }
-            } else if !primary_down {
-                // End drag when mouse released
-                self.dragging_spawn = false;
             }
         }
 

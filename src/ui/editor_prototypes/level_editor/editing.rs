@@ -18,6 +18,15 @@ impl UiLevelEditor {
     /// footprint blocks so the paste stamps identical tiles.
     pub(super) fn clipboard_copy_selection(&mut self, ctx: &egui::Context) -> bool {
         if self.edit_sprites {
+            if self.entrance_selected && self.selected_sprite_indices.is_empty() {
+                // Lunar Magic v2.20: copy the entrance = copy its position.
+                // Paste moves the entrance there (see clipboard_paste_at).
+                let (x, y) = self.spawn_pos();
+                self.clipboard_copy_origin = Some((x, y));
+                copy_payload(ctx, &ClipboardPayload::Entrance { x, y });
+                self.mwl_status = Some(format!("Copied entrance position ({x}, {y}) to clipboard"));
+                return true;
+            }
             let selected: Vec<super::sprite_layer::EditableSprite> = self.sprites.read(|sprites| {
                 self.selected_sprite_indices.iter().filter_map(|&i| sprites.sprites.get(i).copied()).collect()
             });
@@ -102,6 +111,22 @@ impl UiLevelEditor {
     pub(super) fn clipboard_paste_at(
         &mut self, payload: &ClipboardPayload, anchor: (u32, u32), level_w: u32, level_h: u32,
     ) -> bool {
+        // Lunar Magic v2.20: pasting a copied entrance moves it to the
+        // paste anchor (copy = copy position, paste = move). The payload's
+        // stored position is informational (visible as text on the
+        // clipboard, LM-style); the anchor decides the new spot.
+        if let ClipboardPayload::Entrance { .. } = payload {
+            let nx = anchor.0.min(level_w.saturating_sub(1));
+            let ny = anchor.1.min(level_h.saturating_sub(1));
+            self.selected_sprite_indices.clear();
+            self.entrance_selected = true;
+            self.set_spawn(nx, ny);
+            // Cascade no-cursor pastes so repeated Ctrl+V walks the entrance
+            // instead of stacking no-ops on one tile.
+            self.clipboard_copy_origin = Some((nx + 1, ny + 1));
+            self.mwl_status = Some(format!("Moved entrance to ({nx}, {ny})"));
+            return true;
+        }
         let ClipboardPayload::LevelObjects { objects, sprites } = payload else {
             // Map16 tiles paste into the level through Direct Map16 access
             // objects (LM v2.30 flow) — smw-editor has no DM16 support yet
@@ -218,14 +243,58 @@ impl UiLevelEditor {
                 EditingMode::Select | EditingMode::Probe => {
                     if resp.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = resp.hover_pos() {
-                            self.select_sprite_at(pos, origin, tile_sz);
+                            if self.sprite_at(pos, origin, tile_sz).is_some() {
+                                self.select_sprite_at(pos, origin, tile_sz);
+                                self.entrance_selected = false;
+                            } else if self.entrance_rect(origin, tile_sz).contains(pos) {
+                                // Lunar Magic v2.20: the level entrance is
+                                // selectable in sprite editing mode.
+                                self.selected_sprite_indices.clear();
+                                self.entrance_selected = true;
+                            } else {
+                                self.selected_sprite_indices.clear();
+                                self.entrance_selected = false;
+                            }
                         }
+                    }
+                    // Lunar Magic v2.20: drag the entrance in sprite editing
+                    // mode without Shift. Press on the M marker selects it
+                    // and starts a gesture drag; release commits one undo
+                    // step (a click without movement commits nothing).
+                    let m_rect = self.entrance_rect(origin, tile_sz);
+                    let hovering_m = resp.hover_pos().is_some_and(|p| m_rect.contains(p));
+                    if hovering_m && resp.ctx.input(|i| i.pointer.primary_pressed()) {
+                        self.selected_sprite_indices.clear();
+                        self.entrance_selected = true;
+                        self.begin_spawn_drag();
+                    }
+                    if self.spawn_drag_before.is_some() && resp.ctx.input(|i| i.pointer.primary_down()) {
+                        if let Some(pointer_pos) = resp.ctx.input(|i| i.pointer.latest_pos()) {
+                            let local_pos = pointer_pos - origin;
+                            let tile_x = (local_pos.x / tile_sz).max(0.0) as u32;
+                            let tile_y = (local_pos.y / tile_sz).max(0.0) as u32;
+                            self.drag_spawn_to(tile_x, tile_y);
+                        }
+                    }
+                    if self.spawn_drag_before.is_some() && !resp.ctx.input(|i| i.pointer.primary_down()) {
+                        self.end_spawn_drag();
                     }
                 }
                 EditingMode::Erase => {
                     if resp.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = resp.hover_pos() {
-                            self.erase_sprite_at(pos, origin, tile_sz);
+                            if self.sprite_at(pos, origin, tile_sz).is_none()
+                                && self.entrance_rect(origin, tile_sz).contains(pos)
+                            {
+                                // Erasing the entrance resets it to the
+                                // vanilla default (LM delete behavior).
+                                self.selected_sprite_indices.clear();
+                                self.entrance_selected = true;
+                                self.reset_spawn_to_default();
+                                self.mwl_status = Some("Entrance reset to default position".to_string());
+                            } else {
+                                self.erase_sprite_at(pos, origin, tile_sz);
+                            }
                         }
                     }
                 }
@@ -268,7 +337,7 @@ impl UiLevelEditor {
         }
     }
 
-    fn sprite_at(&mut self, pos: Pos2, origin: Pos2, _tile_sz: f32) -> Option<usize> {
+    pub(super) fn sprite_at(&mut self, pos: Pos2, origin: Pos2, _tile_sz: f32) -> Option<usize> {
         let rel_px = (pos - origin) / self.zoom;
         let sprite_entries = self.sprites.read(|sprites| sprites.sprites.clone());
         for (i, spr) in sprite_entries.iter().enumerate().rev() {
@@ -325,7 +394,7 @@ impl UiLevelEditor {
         self.rebuild_sprite_tiles();
     }
 
-    fn object_at(&self, pos: Pos2, origin: Pos2, tile_sz: f32) -> Option<usize> {
+    pub(super) fn object_at(&self, pos: Pos2, origin: Pos2, tile_sz: f32) -> Option<usize> {
         let rel = (pos - origin) / tile_sz;
         let tx = rel.x.floor();
         let ty = rel.y.floor();
@@ -452,6 +521,12 @@ impl UiLevelEditor {
 
     pub(super) fn delete_selected_objects(&mut self) {
         if self.edit_sprites {
+            if self.entrance_selected {
+                // Lunar Magic v2.20: deleting the entrance resets it to the
+                // vanilla default position (a level always has one).
+                self.reset_spawn_to_default();
+                self.mwl_status = Some("Entrance reset to default position".to_string());
+            }
             if self.selected_sprite_indices.is_empty() {
                 return;
             }
@@ -516,6 +591,25 @@ impl UiLevelEditor {
     }
 
     pub(super) fn handle_undo(&mut self) {
+        // Spawn-stack priority (Lunar Magic v2.20 entrance edits undo like
+        // any other edit): the entrance has its own undo stack, separate
+        // from the sprite/object stacks, so `spawn_undo_pending` gives it
+        // priority for Ctrl+Z right after an entrance edit (the common case:
+        // drag the M marker, hit Ctrl+Z). Any non-spawn mutation clears the
+        // flag via mark_edited, so a sprite/object edit made after an
+        // entrance drag is undone first (LIFO). After popping a spawn step
+        // the flag re-arms while older spawn steps remain, which can swap
+        // the order of two undos in the rare
+        // entrance -> sprite/object -> entrance -> undo -> undo interleaving;
+        // every step stays undoable, just not always in perfect LIFO order.
+        // (mark_edited clears the flags, so set them after it.)
+        if self.spawn_undo_pending {
+            self.spawn.undo();
+            self.mark_edited();
+            self.spawn_undo_pending = self.spawn.can_undo();
+            self.spawn_redo_pending = self.spawn.can_redo();
+            return;
+        }
         if self.edit_sprites {
             self.sprites.undo();
             self.selected_sprite_indices.clear();
@@ -531,6 +625,14 @@ impl UiLevelEditor {
     }
 
     pub(super) fn handle_redo(&mut self) {
+        // Mirror of the undo priority above.
+        if self.spawn_redo_pending {
+            self.spawn.redo();
+            self.mark_edited();
+            self.spawn_undo_pending = self.spawn.can_undo();
+            self.spawn_redo_pending = self.spawn.can_redo();
+            return;
+        }
         if self.edit_sprites {
             self.sprites.redo();
             self.selected_sprite_indices.clear();
