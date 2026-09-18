@@ -206,14 +206,20 @@ pub(super) struct OverworldEditState {
     /// The ROM's custom-sprite pointer aimed at a table smw-editor did not
     /// author (e.g. LM's). Custom sprites then can't be saved safely.
     pub foreign_custom_table: bool,
-    /// Extra-byte counts in force for this ROM (constant for the session;
-    /// needed to decode the custom payload in `from_bytes`).
+    /// Extra-byte counts in force (derived from the sprite record-size
+    /// table when one exists, otherwise [`DEFAULT_EXTRA_BYTES`]).
     ///
     /// Invariant (maintained by the sprite tool): every custom sprite's
     /// `extra.len()` equals `custom_extra_counts[number]`. The undo payload
     /// encodes/decodes extra bytes with these counts, so violating it would
-    /// corrupt extra bytes across undo/redo.
+    /// corrupt extra bytes across undo/redo. Changing the size table (via
+    /// the size-table dialog) recomputes the counts and resizes every
+    /// sprite's extra bytes to match, as one undo step.
     pub custom_extra_counts:  [u8; 128],
+    /// The ROM's custom overworld sprite record-size table (LM v3.51+),
+    /// `None` when the ROM has none. Edited via the size-table dialog;
+    /// created on save when the user applies sizes to a ROM without one.
+    pub sprite_size_table:    Option<ow_sprites::SpriteSizeTable>,
 }
 
 impl Undo for OverworldEditState {
@@ -255,6 +261,17 @@ impl Undo for OverworldEditState {
         }
         let custom_sprites =
             ow_sprites::CustomSpriteTable::decode_payload(&payload, &custom_extra_counts).unwrap_or_default();
+        let size_flag = take(&mut pos, 1).first().copied().unwrap_or(0);
+        let sprite_size_table = if size_flag != 0 {
+            let size_bytes = take(&mut pos, ow_sprites::SIZE_TABLE_LEN);
+            let mut sizes = [ow_sprites::DEFAULT_SPRITE_RECORD_SIZE; ow_sprites::SIZE_TABLE_LEN];
+            for (i, b) in sizes.iter_mut().enumerate() {
+                *b = size_bytes.get(i).copied().unwrap_or(ow_sprites::DEFAULT_SPRITE_RECORD_SIZE);
+            }
+            Some(ow_sprites::SpriteSizeTable { sizes })
+        } else {
+            None
+        };
         Self {
             layer1_tiles: l1,
             layer2_words,
@@ -262,6 +279,7 @@ impl Undo for OverworldEditState {
             custom_sprites,
             foreign_custom_table,
             custom_extra_counts,
+            sprite_size_table,
         }
     }
 
@@ -283,6 +301,13 @@ impl Undo for OverworldEditState {
         out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         out.extend_from_slice(&payload);
         out.extend_from_slice(&self.custom_extra_counts);
+        match &self.sprite_size_table {
+            Some(table) => {
+                out.push(1);
+                out.extend_from_slice(&table.sizes);
+            }
+            None => out.push(0),
+        }
         out
     }
 
@@ -296,6 +321,8 @@ impl Undo for OverworldEditState {
             + 4
             + self.custom_sprites.encode_payload(&self.custom_extra_counts).len()
             + 128
+            + 1
+            + self.sprite_size_table.map(|_| ow_sprites::SIZE_TABLE_LEN).unwrap_or(0)
     }
 }
 
@@ -380,9 +407,16 @@ pub struct UiWorldEditor {
     ow_extra_hex:          String,
     /// Last validation error from a sprite field edit, if any.
     ow_sprite_error:       Option<String>,
+    /// "Custom Overworld Sprite Record Sizes" dialog (LM v3.51 parity):
+    /// open flag plus the draft per-sprite record sizes (127 entries for
+    /// sprites 01..7F), synced from the ROM's table on open (defaults when
+    /// the ROM has none).
+    ow_size_table_open:    bool,
+    ow_size_table_draft:   [u8; ow_sprites::SIZE_TABLE_LEN],
     /// Sprite state as parsed at ROM load; compared on save so untouched
-    /// sprite data is never rewritten (avoids orphaning RATS blocks).
-    sprites_at_load:       (ow_sprites::VanillaOwSprites, ow_sprites::CustomSpriteTable),
+    /// sprite data is never rewritten (avoids orphaning RATS blocks). The
+    /// third element is the size table as parsed at load.
+    sprites_at_load: (ow_sprites::VanillaOwSprites, ow_sprites::CustomSpriteTable, Option<ow_sprites::SpriteSizeTable>),
     /// Vanilla level names decoded from the ROM (93 entries, index =
     /// translevel). Used as the base for custom name edits.
     vanilla_level_names:   Vec<String>,
@@ -466,7 +500,14 @@ impl UiWorldEditor {
             }
         };
         let custom_extra_counts = ow_sprites::extra_byte_counts(rom.rom_bytes(), 0);
-        let sprites_at_load = (vanilla_sprites.clone(), custom_sprites.clone());
+        let sprite_size_table = match ow_sprites::parse_size_table(rom.rom_bytes(), 0) {
+            Ok(table) => table,
+            Err(e) => {
+                log::warn!("Could not parse custom overworld sprite size table: {e}");
+                None
+            }
+        };
+        let sprites_at_load = (vanilla_sprites.clone(), custom_sprites.clone(), sprite_size_table);
         let edit_state = UndoableData::new(OverworldEditState {
             layer1_tiles: source_layer1_tiles,
             layer2_words: Vec::new(),
@@ -474,6 +515,7 @@ impl UiWorldEditor {
             custom_sprites,
             foreign_custom_table,
             custom_extra_counts,
+            sprite_size_table,
         });
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
@@ -529,6 +571,8 @@ impl UiWorldEditor {
             ow_sprite_drag: None,
             ow_extra_hex: String::new(),
             ow_sprite_error: None,
+            ow_size_table_open: false,
+            ow_size_table_draft: [ow_sprites::DEFAULT_SPRITE_RECORD_SIZE; ow_sprites::SIZE_TABLE_LEN],
             sprites_at_load,
             vanilla_level_names,
             custom_level_names: HashMap::new(),
@@ -639,7 +683,8 @@ impl DockableEditorTool for UiWorldEditor {
         self.exanimation_dirty = false;
         self.se_teleports_dirty = false;
         // The ROM now matches the edit state; future saves skip rewrites.
-        self.sprites_at_load = self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone()));
+        self.sprites_at_load =
+            self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone(), s.sprite_size_table));
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -790,11 +835,31 @@ impl DockableEditorTool for UiWorldEditor {
         // writes; the custom table is a RATS-tagged free-space block behind
         // the `$0EF55D` pointer. Untouched sprite data is never rewritten, so
         // repeated saves don't orphan RATS blocks.
-        let (vanilla, custom) = self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone()));
+        let (vanilla, custom, size_table) =
+            self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone(), s.sprite_size_table));
         if vanilla != self.sprites_at_load.0 {
             vanilla
                 .write(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Cannot write overworld sprites: {e}"))?;
+        }
+        // The size table goes first: `write_custom_table` re-derives the
+        // extra-byte counts from the ROM, so the on-disk table must already
+        // reflect the edit state's sizes before the custom records are
+        // re-encoded.
+        if size_table != self.sprites_at_load.2 {
+            match size_table {
+                Some(table) => match ow_sprites::write_size_table(&table, rom_bytes, header_offset) {
+                    Ok(()) => {}
+                    Err(ow_sprites::SpriteError::NoSizeTable) => {
+                        // New table: allocate a RATS-tagged block, point
+                        // $0DE18C at it, set the $42 marker.
+                        ow_sprites::create_size_table(&table, rom_bytes, header_offset)
+                            .map_err(|e| anyhow::anyhow!("Cannot create sprite size table: {e}"))?;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("Cannot write sprite size table: {e}")),
+                },
+                None => {}
+            }
         }
         if custom != self.sprites_at_load.1 {
             ow_sprites::write_custom_table(&custom, rom_bytes, header_offset)
@@ -2114,6 +2179,8 @@ mod tests {
             height: 3,
             extra:  vec![0x2A, 0x00, 0x01],
         });
+        let mut size_table = ow_sprites::SpriteSizeTable::default();
+        size_table.set_size(0x10, 6).unwrap();
         let state = OverworldEditState {
             layer1_tiles:         vec![0x12; OWL1_TILE_DATA_SIZE],
             layer2_words:         vec![0x1234, 0xABCD],
@@ -2125,6 +2192,7 @@ mod tests {
             custom_sprites:       custom,
             foreign_custom_table: true,
             custom_extra_counts:  counts,
+            sprite_size_table:    Some(size_table),
         };
         let back = OverworldEditState::from_bytes(state.to_bytes());
         assert_eq!(back.layer1_tiles, state.layer1_tiles);
@@ -2133,6 +2201,7 @@ mod tests {
         assert_eq!(back.custom_sprites, state.custom_sprites);
         assert_eq!(back.foreign_custom_table, state.foreign_custom_table);
         assert_eq!(back.custom_extra_counts, state.custom_extra_counts);
+        assert_eq!(back.sprite_size_table, state.sprite_size_table);
     }
 
     /// Truncated buffers must not panic — `from_bytes` degrades gracefully.

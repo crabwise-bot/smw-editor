@@ -129,7 +129,9 @@ impl UiWorldEditor {
     }
 
     /// Insert a custom sprite on the current submap at map center. Selects
-    /// the new sprite.
+    /// the new sprite. Capped at the native 24-sprite container limit
+    /// ([`MAX_CUSTOM_SPRITES_PER_SUBMAP`]); the LM v3.51 sprite record-size
+    /// table configures per-sprite *record sizes*, not per-submap capacity.
     fn ow_insert_custom_sprite(&mut self) {
         let submap = self.submap as usize;
         let counts = self.edit_state.read(|s| s.custom_extra_counts);
@@ -424,18 +426,43 @@ impl UiWorldEditor {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let custom_count = entries.iter().filter(|(r, _, _)| matches!(r, OwSpriteRef::Custom { .. })).count();
-            let can_insert = !foreign && custom_count < ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP;
+            let cap = ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP;
+            let can_insert = !foreign && custom_count < cap;
             if ui.add_enabled(can_insert, egui::Button::new("Insert custom sprite")).clicked() {
                 self.ow_insert_custom_sprite();
             }
             if foreign {
                 ui.small("disabled: foreign table");
-            } else if custom_count >= ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP {
-                ui.small(format!("max {} per submap", ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP));
+            } else if custom_count >= cap {
+                ui.small(format!("max {cap} per submap"));
             } else {
                 ui.small("adds at map center — drag it into place");
             }
         });
+        ui.horizontal(|ui| {
+            let custom_count = entries.iter().filter(|(r, _, _)| matches!(r, OwSpriteRef::Custom { .. })).count();
+            ui.small(format!(
+                "Custom sprites: {custom_count}/{} on this submap",
+                ow_sprites::MAX_CUSTOM_SPRITES_PER_SUBMAP
+            ));
+            let btn = ui.add_enabled(!foreign, egui::Button::new("Sprite Sizes…"));
+            if btn.clicked() {
+                // Sync the draft from the ROM's size table (defaults when
+                // the ROM has none), then show the dialog.
+                self.ow_size_table_draft = self.edit_state.read(|s| {
+                    s.sprite_size_table
+                        .map(|t| t.sizes)
+                        .unwrap_or([ow_sprites::DEFAULT_SPRITE_RECORD_SIZE; ow_sprites::SIZE_TABLE_LEN])
+                });
+                self.ow_size_table_open = true;
+            }
+            if foreign {
+                ui.small("disabled: foreign table");
+            } else {
+                ui.small("record sizes (LM v3.51)");
+            }
+        });
+        self.ow_sprite_size_table_dialog(ui.ctx());
 
         // ── Selected sprite editor ────────────────────────────────────
         let selection = self.ow_sprite_selection;
@@ -596,6 +623,112 @@ impl UiWorldEditor {
         ui.add_space(4.0);
         if ui.button("Delete sprite").clicked() {
             self.ow_delete_selected();
+        }
+    }
+
+    /// "Custom Overworld Sprite Record Sizes" dialog (LM v3.51 parity): one
+    /// total record size per custom sprite number `01..=7F`, each `3..=15`
+    /// (3 = the 3 fixed bytes only, no extra bytes; 15 = max; LM's default
+    /// 4). Shows the derived extra-byte count next to each size.
+    ///
+    /// Apply is a single undo step: it stores the table, recomputes the
+    /// extra-byte counts, and resizes every placed custom sprite's extra
+    /// bytes to match (existing bytes are preserved). On a ROM without a
+    /// size table, applying creates one (RATS-tagged free-space block,
+    /// `$0DE18C` pointed at it, `$42` marker set).
+    fn ow_sprite_size_table_dialog(&mut self, ctx: &egui::Context) {
+        if !self.ow_size_table_open {
+            return;
+        }
+        let has_table = self.edit_state.read(|s| s.sprite_size_table.is_some());
+        let mut open = self.ow_size_table_open;
+        let mut apply: Option<[u8; ow_sprites::SIZE_TABLE_LEN]> = None;
+        let mut close = false;
+        egui::Window::new("Custom Overworld Sprite Record Sizes")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_size([420.0, 480.0])
+            .show(ctx, |ui| {
+                ui.small(
+                    "Total record size per custom sprite, like Lunar Magic v3.51. \
+                    3 = fixed bytes only (no extra bytes), 15 = max, default 4. \
+                    Entry N is sprite N (01–7F).",
+                );
+                ui.small(
+                    "Lunar Magic only uses this table to parse the custom sprite list — \
+                    like custom sprites themselves, the sizes do nothing in-game without \
+                    a runtime patch.",
+                );
+                if !has_table {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 200, 120),
+                        "This ROM has no size table yet — Apply will create one.",
+                    );
+                }
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for (i, size) in self.ow_size_table_draft.iter_mut().enumerate() {
+                        let number = (i + 1) as u8;
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("Sprite {number:02X}"));
+                            let mut v = *size as i32;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut v)
+                                        .range(
+                                            ow_sprites::MIN_SPRITE_RECORD_SIZE as i32
+                                                ..=ow_sprites::MAX_SPRITE_RECORD_SIZE as i32,
+                                        )
+                                        .prefix("total bytes: "),
+                                )
+                                .changed()
+                            {
+                                *size = (v as u8)
+                                    .clamp(ow_sprites::MIN_SPRITE_RECORD_SIZE, ow_sprites::MAX_SPRITE_RECORD_SIZE);
+                            }
+                            let extra = size.saturating_sub(ow_sprites::MIN_SPRITE_RECORD_SIZE);
+                            ui.small(format!("= {extra} extra {}", if extra == 1 { "byte" } else { "bytes" }));
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = Some(self.ow_size_table_draft);
+                    }
+                    if ui.button("Reset all to 4").clicked() {
+                        self.ow_size_table_draft = [ow_sprites::DEFAULT_SPRITE_RECORD_SIZE; ow_sprites::SIZE_TABLE_LEN];
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        self.ow_size_table_open = open && !close;
+        if let Some(sizes) = apply {
+            let table = ow_sprites::SpriteSizeTable { sizes };
+            self.edit_state.write(|s| {
+                s.sprite_size_table = Some(table);
+                // Table entries are TOTAL record sizes; extra = size - 3.
+                // Sprite 0 has no table entry and keeps the default.
+                let mut counts = [ow_sprites::DEFAULT_EXTRA_BYTES as u8; 128];
+                for (i, size) in sizes.iter().enumerate() {
+                    counts[i + 1] = size.saturating_sub(ow_sprites::MIN_SPRITE_RECORD_SIZE);
+                }
+                s.custom_extra_counts = counts;
+                // Resize every placed custom sprite's extra bytes to the new
+                // counts, preserving existing bytes (pad with zero).
+                for list in s.custom_sprites.submaps.iter_mut() {
+                    for sprite in list.iter_mut() {
+                        sprite.extra.resize(counts[(sprite.number & 0x7F) as usize] as usize, 0);
+                    }
+                }
+            });
+            self.has_edits = true;
+            self.ow_size_table_open = false;
+            self.ow_sprite_error = None;
+            self.ow_sync_extra_hex();
         }
     }
 }
