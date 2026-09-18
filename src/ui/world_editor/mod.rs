@@ -12,6 +12,7 @@
 mod editing;
 mod ow_tile_picker;
 mod se_teleport_editor;
+mod secret_exits;
 mod sprite_tool;
 
 use std::{
@@ -47,6 +48,7 @@ use smwe_render::{
 use smwe_rom::{
     compression::lc_rle2,
     overworld::{
+        secret_exits as ow_secret_exits,
         sprites as ow_sprites,
         L2EventEntry,
         L2EventKind,
@@ -194,6 +196,7 @@ impl OverworldRenderer {
 /// `[u8 foreign-custom-table flag]`
 /// `[u32 LE custom payload length][custom sprite RATS payload]`
 /// `[128 extra-byte counts]`
+/// `[u32 LE secret-exit entry count][entries × 4 bytes: level u16 LE, exit2, exit3]`
 ///
 /// L1 is always exactly OWL1_TILE_DATA_SIZE bytes so `from_bytes` can split
 /// correctly; everything after it is length-prefixed.
@@ -220,6 +223,9 @@ pub(super) struct OverworldEditState {
     /// `None` when the ROM has none. Edited via the size-table dialog;
     /// created on save when the user applies sizes to a ROM without one.
     pub sprite_size_table:    Option<ow_sprites::SpriteSizeTable>,
+    /// LM v3.00 Secret Exit 2/3 direction-to-enable settings (editor-owned
+    /// `SMWSEXIT` RATS block; see `smwe_rom::overworld::secret_exits`).
+    pub secret_exits:         smwe_rom::overworld::secret_exits::SecretExitSettings,
 }
 
 impl Undo for OverworldEditState {
@@ -272,6 +278,19 @@ impl Undo for OverworldEditState {
         } else {
             None
         };
+        let se_count = u32::from_le_bytes(take(&mut pos, 4).try_into().unwrap_or([0; 4])) as usize;
+        let mut secret_exits = ow_secret_exits::SecretExitSettings::default();
+        for _ in 0..se_count {
+            if let Some(rec) = take(&mut pos, 4).get(..4) {
+                secret_exits.set(ow_secret_exits::SecretExitEntry {
+                    level: u16::from_le_bytes([rec[0], rec[1]]),
+                    exit2: rec[2],
+                    exit3: rec[3],
+                });
+            } else {
+                break;
+            }
+        }
         Self {
             layer1_tiles: l1,
             layer2_words,
@@ -280,6 +299,7 @@ impl Undo for OverworldEditState {
             foreign_custom_table,
             custom_extra_counts,
             sprite_size_table,
+            secret_exits,
         }
     }
 
@@ -308,6 +328,12 @@ impl Undo for OverworldEditState {
             }
             None => out.push(0),
         }
+        out.extend_from_slice(&(self.secret_exits.entries.len() as u32).to_le_bytes());
+        for e in &self.secret_exits.entries {
+            out.extend_from_slice(&e.level.to_le_bytes());
+            out.push(e.exit2);
+            out.push(e.exit3);
+        }
         out
     }
 
@@ -323,6 +349,8 @@ impl Undo for OverworldEditState {
             + 128
             + 1
             + self.sprite_size_table.map(|_| ow_sprites::SIZE_TABLE_LEN).unwrap_or(0)
+            + 4
+            + self.secret_exits.entries.len() * 4
     }
 }
 
@@ -417,6 +445,13 @@ pub struct UiWorldEditor {
     /// sprite data is never rewritten (avoids orphaning RATS blocks). The
     /// third element is the size table as parsed at load.
     sprites_at_load: (ow_sprites::VanillaOwSprites, ow_sprites::CustomSpriteTable, Option<ow_sprites::SpriteSizeTable>),
+    /// Whether the Secret Exits 2/3 window is open.
+    show_secret_exits:     bool,
+    /// Level number selected in the Secret Exits 2/3 window.
+    secret_exit_level:     u16,
+    /// Secret-exit settings as parsed at ROM load; compared on save so an
+    /// untouched ROM keeps no `SMWSEXIT` block.
+    secret_exits_at_load:  ow_secret_exits::SecretExitSettings,
     /// Vanilla level names decoded from the ROM (93 entries, index =
     /// translevel). Used as the base for custom name edits.
     vanilla_level_names:   Vec<String>,
@@ -508,6 +543,10 @@ impl UiWorldEditor {
             }
         };
         let sprites_at_load = (vanilla_sprites.clone(), custom_sprites.clone(), sprite_size_table);
+        // LM v3.00 Secret Exit 2/3 direction settings live in our own RATS
+        // block; absence is the normal case (vanilla ROMs have none).
+        let secret_exits = ow_secret_exits::parse_secret_exits(rom.rom_bytes(), 0);
+        let secret_exits_at_load = secret_exits.clone();
         let edit_state = UndoableData::new(OverworldEditState {
             layer1_tiles: source_layer1_tiles,
             layer2_words: Vec::new(),
@@ -516,6 +555,7 @@ impl UiWorldEditor {
             foreign_custom_table,
             custom_extra_counts,
             sprite_size_table,
+            secret_exits,
         });
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
@@ -574,6 +614,9 @@ impl UiWorldEditor {
             ow_size_table_open: false,
             ow_size_table_draft: [ow_sprites::DEFAULT_SPRITE_RECORD_SIZE; ow_sprites::SIZE_TABLE_LEN],
             sprites_at_load,
+            show_secret_exits: false,
+            secret_exit_level: 0,
+            secret_exits_at_load,
             vanilla_level_names,
             custom_level_names: HashMap::new(),
             level_names_dirty: false,
@@ -667,6 +710,7 @@ impl DockableEditorTool for UiWorldEditor {
             }
         }
         self.se_teleport_editor_window(ui.ctx());
+        self.secret_exits_window(ui.ctx());
     }
 
     fn on_closed(&mut self) {
@@ -685,6 +729,7 @@ impl DockableEditorTool for UiWorldEditor {
         // The ROM now matches the edit state; future saves skip rewrites.
         self.sprites_at_load =
             self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone(), s.sprite_size_table));
+        self.secret_exits_at_load = self.edit_state.read(|s| s.secret_exits.clone());
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -864,6 +909,14 @@ impl DockableEditorTool for UiWorldEditor {
         if custom != self.sprites_at_load.1 {
             ow_sprites::write_custom_table(&custom, rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Cannot write custom overworld sprites: {e}"))?;
+        }
+
+        // ── LM v3.00 Secret Exit 2/3 direction settings ──────────────────
+        // Editor-owned `SMWSEXIT` RATS block; untouched ROMs keep no block.
+        let secret_exits = self.edit_state.read(|s| s.secret_exits.clone());
+        if secret_exits != self.secret_exits_at_load {
+            ow_secret_exits::write_secret_exits(&secret_exits, rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot write secret-exit settings: {e}"))?;
         }
 
         Ok(())
@@ -1103,6 +1156,13 @@ impl UiWorldEditor {
                 self.show_se_teleport_editor = true;
             }
             ui.small("Star/Pipe table: where exit-to-overworld secondary exits place the player.");
+
+            // ── Secret Exits 2/3 (LM v3.00 parity) ───────────────────────
+            ui.separator();
+            if ui.button("Secret Exits 2/3…").clicked() {
+                self.show_secret_exits = true;
+            }
+            ui.small("Per-level direction-to-enable settings for LM v3.00's Secret Exits 2/3.");
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();
@@ -2193,6 +2253,13 @@ mod tests {
             foreign_custom_table: true,
             custom_extra_counts:  counts,
             sprite_size_table:    Some(size_table),
+            secret_exits:         ow_secret_exits::SecretExitSettings {
+                entries: vec![ow_secret_exits::SecretExitEntry {
+                    level: 0x101,
+                    exit2: ow_secret_exits::DIR_UP,
+                    exit3: ow_secret_exits::DIR_LEFT,
+                }],
+            },
         };
         let back = OverworldEditState::from_bytes(state.to_bytes());
         assert_eq!(back.layer1_tiles, state.layer1_tiles);
@@ -2202,6 +2269,7 @@ mod tests {
         assert_eq!(back.foreign_custom_table, state.foreign_custom_table);
         assert_eq!(back.custom_extra_counts, state.custom_extra_counts);
         assert_eq!(back.sprite_size_table, state.sprite_size_table);
+        assert_eq!(back.secret_exits, state.secret_exits);
     }
 
     /// Truncated buffers must not panic — `from_bytes` degrades gracefully.

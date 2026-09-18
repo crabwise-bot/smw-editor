@@ -27,7 +27,7 @@ impl UiLevelEditor {
                 ui.label(format!(
                     "Sprite: {:#04X} {}",
                     self.draw_sprite_id,
-                    super::sprite_catalog::sprite_name(self.draw_sprite_id)
+                    super::sprite_catalog::sprite_display_name(self.draw_sprite_id, self.draw_sprite_extra_bits)
                 ));
                 let mut sid = self.draw_sprite_id as u16;
                 if ui.add(Slider::new(&mut sid, 0..=0xFF).hexadecimal(2, false, false).show_value(false)).changed() {
@@ -210,7 +210,11 @@ impl UiLevelEditor {
             });
             if selected.len() == 1 {
                 let spr = selected[0];
-                ui.label(format!("  ID: {:02X} {}", spr.sprite_id, super::sprite_catalog::sprite_name(spr.sprite_id)));
+                ui.label(format!(
+                    "  ID: {:02X} {}",
+                    spr.sprite_id,
+                    super::sprite_catalog::sprite_display_name(spr.sprite_id, spr.extra_bits)
+                ));
                 ui.label(format!("  Pos: ({}, {})", spr.x, spr.y));
                 ui.label(format!("  Extra bits: {}", spr.extra_bits));
 
