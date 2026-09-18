@@ -4,6 +4,8 @@ pub mod block_behavior;
 pub mod boss_text;
 pub mod compression;
 pub mod exanimation;
+pub mod exgfx;
+
 pub mod font_map;
 pub mod freespace;
 pub mod graphics;
@@ -70,6 +72,8 @@ pub struct SmwRom {
     pub exanimation:         ExAnimationData,
     pub secondary_exit_ext:  SecondaryExitExtData,
     pub sprite_header_ext:   SpriteHeaderExtData,
+    pub exgfx:               exgfx::ExGfxData,
+    pub gfx_bypass:          exgfx::BypassData,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -188,6 +192,10 @@ impl SmwRom {
             SpriteHeaderExtData::default()
         });
 
+        log::info!("Parsing ExGFX files and Super GFX Bypass table");
+        let exgfx = exgfx::ExGfxData::parse(rom.bytes());
+        let gfx_bypass = exgfx::BypassData::parse(rom.bytes()).unwrap_or_default();
+
         Ok(Self {
             rom,
             internal_header,
@@ -205,6 +213,8 @@ impl SmwRom {
             exanimation,
             secondary_exit_ext,
             sprite_header_ext,
+            exgfx,
+            gfx_bypass,
         })
     }
 

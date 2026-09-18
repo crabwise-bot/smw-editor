@@ -22,7 +22,10 @@
 //!   0x00-0x7F, FG2 → 0x80-0xFF, FG3 → 0x100-0x17F, BG1 → 0x180-0x1FF.
 
 use egui::{pos2, vec2, Color32, Context, Rect, Sense, Slider};
-use smwe_rom::graphics::gfx_file::{self, GfxFile, Tile, TileFormat};
+use smwe_rom::{
+    exgfx::{BYPASS_DEFAULT, EXGFX_FIRST_INDEX},
+    graphics::gfx_file::{self, GfxFile, Tile, TileFormat},
+};
 
 use super::UiLevelEditor;
 
@@ -116,6 +119,31 @@ impl UiLevelEditor {
                         self.tile_editor_selected = 0;
                         self.sync_tile_editor_pixels();
                     }
+                    // Inserted ExGFX files (0x80+) are picked from a combo —
+                    // a slider over the whole 0x80..=0xFFF range would be
+                    // unusable.
+                    if !self.exgfx_data.files.is_empty() {
+                        ui.label("ExGFX:");
+                        let mut indices: Vec<u16> = self.exgfx_data.files.keys().copied().collect();
+                        indices.sort_unstable();
+                        let current = self.tile_editor_file_num;
+                        egui::ComboBox::from_id_salt("tile_editor_exgfx_file")
+                            .selected_text(if current >= EXGFX_FIRST_INDEX as usize {
+                                format!("ExGFX{current:03X}")
+                            } else {
+                                "—".to_owned()
+                            })
+                            .show_ui(ui, |ui| {
+                                for &idx in &indices {
+                                    if ui.selectable_label(current == idx as usize, format!("ExGFX{idx:03X}")).clicked()
+                                    {
+                                        self.tile_editor_file_num = idx as usize;
+                                        self.tile_editor_selected = 0;
+                                        self.sync_tile_editor_pixels();
+                                    }
+                                }
+                            });
+                    }
                     ui.label("Palette:");
                     let mut pal = self.tile_editor_palette as i32;
                     if ui.add(Slider::new(&mut pal, 0..=7)).changed() {
@@ -124,10 +152,14 @@ impl UiLevelEditor {
                 });
 
                 let file_num = self.tile_editor_file_num;
-                let format = gfx_file::tile_format_of(file_num);
+                let format = self.tile_editor_format(file_num);
                 let n_tiles = self.tile_editor_tiles(file_num).len();
                 ui.horizontal(|ui| {
-                    ui.label(format!("Format: {format}  •  {n_tiles} tiles"));
+                    if file_num >= EXGFX_FIRST_INDEX as usize {
+                        ui.label(format!("ExGFX{file_num:03X}  •  Format: {format}  •  {n_tiles} tiles"));
+                    } else {
+                        ui.label(format!("Format: {format}  •  {n_tiles} tiles"));
+                    }
                     if self.tile_editor_staged.contains_key(&file_num) || self.gfx_edits.contains_key(&file_num) {
                         ui.colored_label(egui::Color32::from_rgb(220, 160, 60), "Unsaved edits staged for this file.");
                     }
@@ -204,13 +236,30 @@ impl UiLevelEditor {
     }
 
     /// Tiles currently displayed for a file: the staged working copy when the
-    /// user has applied pixel edits, otherwise the ROM-decoded tiles.
+    /// user has applied pixel edits, otherwise the ROM-decoded tiles
+    /// (vanilla GFX files from `rom.gfx`, ExGFX 0x80+ from `exgfx_data`).
     fn tile_editor_tiles(&self, file_num: usize) -> &[Tile] {
         self.tile_editor_staged
             .get(&file_num)
             .map(Vec::as_slice)
-            .or_else(|| self.rom.gfx.files.get(file_num).map(|f| f.tiles.as_slice()))
+            .or_else(|| {
+                if file_num >= EXGFX_FIRST_INDEX as usize {
+                    self.exgfx_data.files.get(&(file_num as u16)).map(|f| f.tiles.as_slice())
+                } else {
+                    self.rom.gfx.files.get(file_num).map(|f| f.tiles.as_slice())
+                }
+            })
             .unwrap_or(&[])
+    }
+
+    /// Native tile format for the 8x8 editor: the vanilla per-file format,
+    /// or 4bpp for ExGFX files (always 4bpp, like LM's ExGFXnn.bin).
+    fn tile_editor_format(&self, file_num: usize) -> TileFormat {
+        if file_num >= EXGFX_FIRST_INDEX as usize {
+            TileFormat::Tile4bpp
+        } else {
+            gfx_file::tile_format_of(file_num)
+        }
     }
 
     /// (Re)load the pixel editor's working buffer from the selected tile.
@@ -240,9 +289,22 @@ impl UiLevelEditor {
     /// and tile index it was uploaded from, or `None` when the tile has no
     /// GFX-file source in the current level (tiles 0x200-0x3FF, special
     /// tilesets, or a tile index past the end of the file).
+    ///
+    /// The Super GFX Bypass is honored: a bypassed slot resolves to its
+    /// override file (vanilla or ExGFX) instead of the tileset-table file.
     pub(super) fn vram_tile_to_gfx_source(&self, tile_num: u16) -> Option<(usize, usize)> {
         use smwe_rom::objects::map16::Tile8x8;
         let slot = gfx_slot_for_tile(tile_num)?;
+        let tile_in_file = (tile_num % 0x80) as usize;
+        let bypass = self.bypass_data.slot(self.level_num, slot).unwrap_or(BYPASS_DEFAULT);
+        if bypass != BYPASS_DEFAULT {
+            let (file_num, n) = if (bypass as usize) < EXGFX_FIRST_INDEX as usize {
+                (bypass as usize, self.rom.gfx.files.get(bypass as usize)?.tiles.len())
+            } else {
+                (bypass as usize, self.exgfx_data.files.get(&bypass)?.tiles.len())
+            };
+            return (tile_in_file < n).then_some((file_num, tile_in_file));
+        }
         // ObjectTileset ($7E1931): row index into OBJECTGFXLIST, set by the
         // game's level init (runs inside decompress_sublevel).
         let tileset = *self.cpu.mem.wram.get(0x1931)? as usize;
@@ -254,7 +316,6 @@ impl UiLevelEditor {
         debug_assert_eq!(slot, (tile_num / 0x80) as usize);
         let tile = Tile8x8(tile_num);
         let file_num = self.rom.gfx.object_gfx_list.gfx_file_for_object_tile(tile, tileset);
-        let tile_in_file = (tile_num % 0x80) as usize;
         let n = self.rom.gfx.files.get(file_num)?.tiles.len();
         (tile_in_file < n).then_some((file_num, tile_in_file))
     }
@@ -282,12 +343,14 @@ impl UiLevelEditor {
         }
     }
 
-    /// Stage the pixel editor's working buffer: update the staged tile copy
-    /// and re-encode the whole file into `gfx_edits` for `save_to_rom`.
+    /// Stage the pixel editor's working buffer: update the staged tile copy.
+    /// Vanilla files are additionally re-encoded into `gfx_edits` for the
+    /// existing LC_LZ2 compress + repoint path in `save_to_rom`; ExGFX files
+    /// are folded into the ExGFX store there from `tile_editor_staged`.
     fn apply_tile_editor_pixels(&mut self) {
         let file_num = self.tile_editor_file_num;
         let sel = self.tile_editor_selected;
-        let format = gfx_file::tile_format_of(file_num);
+        let format = self.tile_editor_format(file_num);
         let max_c = max_color_index(format);
         let mut tiles: Vec<Tile> = self.tile_editor_tiles(file_num).to_vec();
         let Some(tile) = tiles.get_mut(sel) else { return };
@@ -296,9 +359,11 @@ impl UiLevelEditor {
             *v = (*v).min(max_c);
         }
         tile.color_indices = Box::new(clamped);
-        let raw = GfxFile { tile_format: format, tiles: tiles.clone() }.to_raw_bytes();
         self.tile_editor_staged.insert(file_num, tiles);
-        self.gfx_edits.insert(file_num, raw);
+        if file_num < EXGFX_FIRST_INDEX as usize {
+            let raw = GfxFile { tile_format: format, tiles: self.tile_editor_staged[&file_num].clone() }.to_raw_bytes();
+            self.gfx_edits.insert(file_num, raw);
+        }
         self.tile_editor_revision += 1;
         self.sync_tile_editor_pixels();
         self.mark_edited();

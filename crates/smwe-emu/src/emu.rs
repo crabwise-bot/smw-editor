@@ -453,6 +453,71 @@ pub fn upload_sprite_tileset(cpu: &mut Cpu<CheckedMem>, sprite_tileset: u8) -> u
     run_routines(cpu, &["UploadSpriteGFX"], 20_000_000)
 }
 
+/// Upload one vanilla GFX file to a VRAM word address using the game's own
+/// `UploadGFXFile` routine (`bank_00.asm`).
+///
+/// This is bit-exact where a manual reimplementation would be fragile: the
+/// routine expands 3bpp files to 4bpp VRAM with Nintendo's tile-dependent
+/// bitplane-3 mask, takes the `FilterSomeRAM` path for files $08/$1E, skips
+/// conversion for files $01/$17, and applies the post-Special-World koopa
+/// palette swap. The Super GFX Bypass preview uses this for vanilla-file
+/// slots so bypassed graphics match the real game (and Lunar Magic).
+///
+/// `vram_word_addr` is the SNES VRAM *word* address (byte address / 2):
+/// 0x0000/0x0800/0x1000/0x1800 for FG1/FG2/FG3/BG1, 0x7800/0x7000/0x6800/0x6000
+/// for SP1-SP4 — see `smwe_rom::exgfx::bypass_slot_vram_span`.
+///
+/// `UploadGFXFile` ends in `RTS` (not `RTL`), so this uses a `JSR`
+/// trampoline rather than `run_routines`' JSL one. Entry state mirrors the
+/// game's callers: 8-bit index registers (via a real `SEP #$30`, since
+/// `Cpu.p` isn't public), Y = file number, `HW_VMADD` = target.
+///
+/// Clobbers: A/X/Y/P, direct page $00-$02/$0A/$0C, $1BB2-$1BC1
+/// (`GfxBppConvertBuffer`), and the $7EAD00 decompression buffer — the same
+/// scratch the game's own level load uses.
+pub fn upload_gfx_file_to_vram(cpu: &mut Cpu<CheckedMem>, file: u8, vram_word_addr: u16) -> u64 {
+    cpu.emulation = false;
+    cpu.ill = false;
+    cpu.s = 0x1FF;
+    cpu.pbr = 0x00;
+    cpu.dbr = 0x00;
+    cpu.d = 0x0000;
+    cpu.trace = false;
+
+    cpu.y = u16::from(file);
+    cpu.mem.store(0x2116, (vram_word_addr & 0xFF) as u8); // HW_VMADD
+    cpu.mem.store(0x2117, (vram_word_addr >> 8) as u8);
+
+    let target = cpu.mem.cart.resolve("UploadGFXFile").expect("no symbol: UploadGFXFile");
+    assert!(target >> 16 == 0, "UploadGFXFile must live in bank 0 for the JSR trampoline");
+    // $2000: SEP #$30 | JSR UploadGFXFile | (end marker at $2005)
+    cpu.mem.store(0x2000, 0xE2); // SEP
+    cpu.mem.store(0x2001, 0x30);
+    cpu.mem.store(0x2002, 0x20); // JSR
+    cpu.mem.store_u16(0x2003, (target & 0xFFFF) as u16);
+    cpu.mem.store(0x2005, 0xEA); // NOP (never executed; end marker)
+    cpu.pc = 0x2000;
+
+    let end = 0x2005u16;
+    let mut cy = 0u64;
+    loop {
+        cy += cpu.dispatch() as u64;
+        if cpu.ill {
+            log_illegal_instruction(cpu.pbr, cpu.pc);
+            break;
+        }
+        if cpu.pbr == 0 && cpu.pc == end {
+            break;
+        }
+        if cy > 20_000_000 {
+            log::debug!("upload_gfx_file_to_vram exceeded cycle limit");
+            break;
+        }
+        cpu.mem.process_dma();
+    }
+    cy
+}
+
 fn clear_sprite_preview_state(cpu: &mut Cpu<CheckedMem>) {
     const SLOT_COUNT: u32 = 12;
     const SPRITE_TABLE_BASES: &[u32] = &[

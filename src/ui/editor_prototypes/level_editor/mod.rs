@@ -4,6 +4,8 @@ mod boss_text_editor;
 mod central_panel;
 mod edit_manual_dialog;
 mod editing;
+mod exgfx_manager;
+mod gfx_bypass;
 mod gfx_editor;
 mod gfx_slot_browser;
 mod layer3_settings;
@@ -35,6 +37,7 @@ use std::{
     time::Instant,
 };
 
+use anyhow::Context;
 use egui::{CentralPanel, Frame, SidePanel, Ui, WidgetText, *};
 use smwe_emu::{
     emu::{CheckedMem, SpriteOamTile},
@@ -287,6 +290,25 @@ pub struct UiLevelEditor {
     layer3_dialog:        Option<layer3_settings::Layer3SettingsDialog>,
     layer3_bypass:        smwe_rom::layer3::Layer3GfxBypass,
 
+    // True ExGFX support (LM v1.10/v1.60 parity): extra graphics files
+    // (0x80+) plus the per-level Super GFX Bypass table. The in-memory
+    // copies are authoritative during the session and are written back to
+    // ROM by `save_to_rom` when dirty.
+    exgfx_data:           smwe_rom::exgfx::ExGfxData,
+    bypass_data:          smwe_rom::exgfx::BypassData,
+    exgfx_dirty:          bool,
+    bypass_dirty:         bool,
+    show_exgfx_manager:   bool,
+    show_gfx_bypass:      bool,
+    /// Super GFX Bypass dialog working copy for the current level
+    /// (FG1/FG2/FG3/BG1/SP1/SP2/SP3/SP4 slot values).
+    bypass_edit_slots:    [u16; smwe_rom::exgfx::BYPASS_SLOT_COUNT],
+    /// Level `bypass_edit_slots` was synced from; resync when it differs.
+    bypass_edit_level:    u16,
+    /// Pending ExGFX insert: raw .bin bytes + chosen file index.
+    exgfx_insert_pending: Option<(Vec<u8>, u16)>,
+    exgfx_manager_status: Option<String>,
+
     // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
     // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
     // editor's working state.
@@ -444,6 +466,9 @@ impl UiLevelEditor {
         let boss_text = rom.boss_text.clone();
         let exanimation = rom.exanimation.clone();
         let sprite_header_ext = rom.sprite_header_ext.clone();
+        // Clone before `rom` moves into the struct literal below.
+        let exgfx_data = rom.exgfx.clone();
+        let bypass_data = rom.gfx_bypass.clone();
 
         let mut editor = Self {
             gl,
@@ -549,6 +574,16 @@ impl UiLevelEditor {
             layer3_dialog: None,
             layer3_bypass,
             gfx_editor_file_num: 0,
+            exgfx_data,
+            bypass_data,
+            exgfx_dirty: false,
+            bypass_dirty: false,
+            show_exgfx_manager: false,
+            show_gfx_bypass: false,
+            bypass_edit_slots: [smwe_rom::exgfx::BYPASS_DEFAULT; smwe_rom::exgfx::BYPASS_SLOT_COUNT],
+            bypass_edit_level: 0xFFFF,
+            exgfx_insert_pending: None,
+            exgfx_manager_status: None,
             show_tile_editor: false,
             tile_editor_file_num: 0,
             tile_editor_palette: 0,
@@ -648,6 +683,8 @@ impl DockableEditorTool for UiLevelEditor {
         self.gfx_slot_browser_window(&ctx);
         self.layer3_settings_window(&ctx);
         self.tile_editor_window(&ctx);
+        self.exgfx_manager_window(&ctx);
+        self.gfx_bypass_window(&ctx);
         self.message_editor_window(&ctx);
         self.boss_text_editor_window(&ctx);
         if self.show_exanimation_editor {
@@ -1078,6 +1115,32 @@ impl DockableEditorTool for UiLevelEditor {
             }
         }
 
+        // ── ExGFX files (LM v1.10/v1.60 parity): staged 8x8-tile pixel edits
+        // (via `tile_editor_staged`) plus manager insert/delete. Applied onto
+        // a clone so the in-memory `exgfx_data` keeps the authoritative tiles.
+        // The tile editor stages ExGFX edits without setting `exgfx_dirty`
+        // (so Revert naturally un-dirties them); check both.
+        let exgfx_tiles_staged =
+            self.tile_editor_staged.keys().any(|&f| f >= smwe_rom::exgfx::EXGFX_FIRST_INDEX as usize);
+        if self.exgfx_dirty || exgfx_tiles_staged {
+            let mut data = self.exgfx_data.clone();
+            for (&file_num, tiles) in &self.tile_editor_staged {
+                if file_num >= smwe_rom::exgfx::EXGFX_FIRST_INDEX as usize {
+                    if let Some(f) = data.get_mut(file_num as u16) {
+                        f.set_tiles(tiles.clone())
+                            .with_context(|| format!("ExGFX {file_num:03X}: bad staged tiles"))?;
+                    }
+                }
+            }
+            data.write_to_rom(rom_bytes, header_offset).context("ExGFX save")?;
+        }
+
+        // ── Super GFX Bypass table (LM v1.60 parity): per-level slot
+        // assignments, one RATS block.
+        if self.bypass_dirty {
+            self.bypass_data.write_to_rom(rom_bytes, header_offset).context("Super GFX Bypass save")?;
+        }
+
         // ── Message box text (global, $05A5D9 blob + $05A5A7 pointer table) ──
         if self.message_boxes_dirty {
             let (blob, pointers) = self.message_boxes.to_blob_and_pointers()?;
@@ -1443,6 +1506,12 @@ impl UiLevelEditor {
         // populated with their correct graphics instead of whatever the initial
         // GFX load left behind.
         smwe_emu::emu::fetch_anim_frame(&mut self.cpu);
+        // Super GFX Bypass (LM v1.60 parity): overwrite explicitly-assigned
+        // slots' VRAM ranges, mirroring what LM's ExGFX ASM hack does at
+        // level load. Vanilla files go through the game's own UploadGFXFile
+        // (bit-exact); ExGFX files are memcpied. Everything downstream
+        // (renderer upload, tile picker rebuild) then sees the bypassed GFX.
+        self.apply_bypass_to_vram();
 
         // Snapshot clean VRAM for the ExAnimation tile browser (it decodes
         // source tiles from the pre-animation graphics), and restart the
@@ -1598,6 +1667,9 @@ impl UiLevelEditor {
 
     pub(super) fn refresh_sprite_gfx(&mut self) {
         smwe_emu::emu::upload_sprite_tileset(&mut self.cpu, self.level_properties.sprite_gfx);
+        // Re-apply the bypass: upload_sprite_tileset just overwrote the
+        // sprite slots with the tileset tables' files.
+        self.apply_bypass_to_vram();
         self.sprite_preview_textures.clear();
         self.sprite_oam_cache.clear();
         {

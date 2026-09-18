@@ -13,9 +13,12 @@
 //! those tiles.
 
 use egui::Context;
-use smwe_rom::objects::{
-    object_gfx_list::{OBJECT_SLOT_NAMES, OBJECT_SLOT_VRAM_RANGES},
-    sprite_gfx_list::{SPRITE_SLOT_NAMES, SPRITE_SLOT_VRAM_BASES},
+use smwe_rom::{
+    exgfx::{slot_source_label, BYPASS_DEFAULT},
+    objects::{
+        object_gfx_list::{OBJECT_SLOT_NAMES, OBJECT_SLOT_VRAM_RANGES},
+        sprite_gfx_list::{SPRITE_SLOT_NAMES, SPRITE_SLOT_VRAM_BASES},
+    },
 };
 
 use super::UiLevelEditor;
@@ -38,16 +41,33 @@ impl UiLevelEditor {
                 ui.strong(format!("FG/BG GFX — tileset ${fg_tileset:01X} (OBJECTGFXLIST)"));
                 let fg_files = self.rom.gfx.object_gfx_list.files_for_object_tileset(fg_tileset);
                 let palette_fg = self.level_properties.palette_fg as usize;
+                let level_num = self.level_num;
                 egui::Grid::new("gfx_slots_fg_grid").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
                     for (i, &file_num) in fg_files.iter().enumerate() {
                         let (lo, hi) = OBJECT_SLOT_VRAM_RANGES[i];
+                        // Super GFX Bypass overrides the tileset-table file.
+                        let bypass = self.bypass_data.slot(level_num, i).unwrap_or(BYPASS_DEFAULT);
+                        let (file_num, bypassed) = if bypass == BYPASS_DEFAULT {
+                            (file_num, false)
+                        } else {
+                            (bypass as usize, true)
+                        };
                         ui.label(OBJECT_SLOT_NAMES[i]);
-                        ui.monospace(format!("GFX file {file_num:02X}"));
+                        if bypassed {
+                            ui.monospace(format!("{} (bypassed)", slot_source_label(bypass)));
+                        } else {
+                            ui.monospace(format!("GFX file {file_num:02X}"));
+                        }
                         ui.monospace(format!("VRAM {lo:#05X}–{hi:#05X}"));
                         let label = format!("Edit {}", OBJECT_SLOT_NAMES[i]);
                         if ui.small_button(&label).clicked() {
+                            let source = if bypassed {
+                                slot_source_label(bypass)
+                            } else {
+                                format!("GFX file {file_num:02X}")
+                            };
                             self.tile_editor_handoff_note = Some(format!(
-                                "From Level GFX Slots: {} (FG/BG tileset ${fg_tileset:01X}) → GFX file {file_num:02X}, palette row {palette_fg}",
+                                "From Level GFX Slots: {} (FG/BG tileset ${fg_tileset:01X}) → {source}, palette row {palette_fg}",
                                 OBJECT_SLOT_NAMES[i],
                             ));
                             self.open_tile_editor_at(file_num, 0, palette_fg);
@@ -65,13 +85,28 @@ impl UiLevelEditor {
                 egui::Grid::new("gfx_slots_sp_grid").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
                     for (i, &file_num) in sp_files.iter().enumerate() {
                         let base = SPRITE_SLOT_VRAM_BASES[i];
+                        let bypass = self.bypass_data.slot(level_num, 4 + i).unwrap_or(BYPASS_DEFAULT);
+                        let (file_num, bypassed) = if bypass == BYPASS_DEFAULT {
+                            (file_num, false)
+                        } else {
+                            (bypass as usize, true)
+                        };
                         ui.label(SPRITE_SLOT_NAMES[i]);
-                        ui.monospace(format!("GFX file {file_num:02X}"));
+                        if bypassed {
+                            ui.monospace(format!("{} (bypassed)", slot_source_label(bypass)));
+                        } else {
+                            ui.monospace(format!("GFX file {file_num:02X}"));
+                        }
                         ui.monospace(format!("VRAM {base:#05X}–{:#05X}", base + 0x7F));
                         let label = format!("Edit {}", SPRITE_SLOT_NAMES[i]);
                         if ui.small_button(&label).clicked() {
+                            let source = if bypassed {
+                                slot_source_label(bypass)
+                            } else {
+                                format!("GFX file {file_num:02X}")
+                            };
                             self.tile_editor_handoff_note = Some(format!(
-                                "From Level GFX Slots: {} (sprite tileset ${sp_tileset:01X}) → GFX file {file_num:02X}, palette row {palette_sprite}",
+                                "From Level GFX Slots: {} (sprite tileset ${sp_tileset:01X}) → {source}, palette row {palette_sprite}",
                                 SPRITE_SLOT_NAMES[i],
                             ));
                             self.open_tile_editor_at(file_num, 0, palette_sprite);

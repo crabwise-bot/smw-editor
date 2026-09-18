@@ -34,9 +34,13 @@
 //! # Scope of this module (v1)
 //!
 //! Vanilla levels only: legacy Layer 2 backgrounds and object layers,
-//! sprites, primary/secondary headers, and this editor's native ExAnimation
-//! section. Palette, secondary entrances and ExGFX/bypass sections are
-//! exported empty and rejected on import when non-empty. RATS-tagged and
+//! sprites, primary/secondary headers, this editor's native ExAnimation
+//! section, and the ExGFX/bypass section (file references + bypass
+//! overrides in Lunar Magic's section-7 format: import inserts the
+//! referenced files into free space and re-homes the bypass record to the
+//! target level). Palette and secondary entrances sections are exported
+//! empty and rejected on import when non-empty. RATS-tagged and
+
 //! LC_LZ2/LC_LZ3-compressed streams are not produced (LC-RLE1 is what the
 //! vanilla ROM uses).
 
@@ -45,6 +49,7 @@ use thiserror::Error;
 use crate::{
     compression::lc_rle1,
     exanimation::{self, ExAnimationData},
+    exgfx,
     freespace,
     level::{
         headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
@@ -158,6 +163,9 @@ pub enum MwlError {
     BadAddress(u32),
     #[error("Bad ExAnimation section: {0}")]
     BadExAnimation(#[from] exanimation::ExAnimError),
+    #[error("ExGFX/bypass section: {0}")]
+    ExGfx(#[from] crate::exgfx::ExGfxError),
+
     #[error("ROM error: {0}")]
     Rom(#[from] RomError),
 }
@@ -425,6 +433,11 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
     spr_payload.extend_from_slice(level.sprite_layer.as_bytes());
     let section3 = encode_section(0, 0, &spr_payload);
 
+    // --- Section 7: ExGFX/bypass ---
+    // The level's Super GFX Bypass record plus every ExGFX file the record
+    // references (empty when the level has no bypass record).
+    let section7 = encode_section(0, 0, &exgfx::encode_mwl_section(&rom.gfx_bypass, &rom.exgfx, level_num as u16));
+
     Ok(MwlFile {
         version:     MWL_VERSION,
         flags:       0,
@@ -437,7 +450,7 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
             Vec::new(), // palette: not supported in v1
             Vec::new(), // secondary entrances: not supported in v1
             exanimation_section(rom, level_num as u16),
-            Vec::new(), // ExGFX/bypass: not supported in v1
+            section7,
         ],
     })
 }
@@ -590,12 +603,34 @@ pub fn import_level(
         }
     }
 
-    // --- Sections 4, 5, 7: unsupported in v1 ---
-    for (i, name) in [
-        (SECTION_PALETTE, "palette"),
-        (SECTION_SECONDARY_ENTRANCES, "secondary entrances"),
-        (SECTION_EXGFX_BYPASS, "ExGFX/bypass"),
-    ] {
+    // --- Section 7: ExGFX/bypass ---
+    // Insert the referenced ExGFX files and install the bypass record for
+    // the target level. An empty section (old .mwl files) means "no data".
+    {
+        let section = &mwl.sections[SECTION_EXGFX_BYPASS];
+        if !section.is_empty() {
+            let (_, _, payload) = decode_section(SECTION_EXGFX_BYPASS, section)?;
+            let (bypass, files) = exgfx::decode_mwl_section(payload)?;
+            if !files.is_empty() {
+                let mut data = exgfx::ExGfxData::parse(rom_bytes);
+                for (index, raw) in files {
+                    data.insert_raw(index, raw)?;
+                }
+                data.write_to_rom(rom_bytes, header_offset)?;
+            }
+            if let Some((src_level, slots)) = bypass {
+                let _ = src_level; // the record is re-homed to the target level
+                let mut table = exgfx::BypassData::parse(rom_bytes).unwrap_or_default();
+                for (slot, &value) in slots.iter().enumerate() {
+                    table.set_slot(target_level as u16, slot, value)?;
+                }
+                table.write_to_rom(rom_bytes, header_offset)?;
+            }
+        }
+    }
+
+    // --- Sections 4, 5: unsupported in v1 ---
+    for (i, name) in [(SECTION_PALETTE, "palette"), (SECTION_SECONDARY_ENTRANCES, "secondary entrances")] {
         if !mwl.sections[i].is_empty() {
             let _ = name;
             return Err(MwlError::UnsupportedSection(i));
@@ -829,10 +864,55 @@ mod tests {
         assert_eq!(p3[0], rom.levels[0x105].sprite_header.0);
         assert_eq!(&p3[1..], rom.levels[0x105].sprite_layer.as_bytes());
 
-        // Unsupported sections stay empty.
-        for i in 4..SECTION_COUNT {
+        // Unsupported sections stay empty; section 7 (ExGFX/bypass) encodes
+        // to its minimal "no bypass record" form on a vanilla level.
+        for i in [4, 5, 6] {
             assert!(back.sections[i].is_empty(), "section {i} should be empty");
         }
+        let (_, _, p7) = decode_section(SECTION_EXGFX_BYPASS, &back.sections[SECTION_EXGFX_BYPASS]).unwrap();
+        let (b7, f7) = exgfx::decode_mwl_section(p7).unwrap();
+        assert!(b7.is_none(), "vanilla level 105 has no bypass record");
+        assert!(f7.is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn exgfx_bypass_mwl_export_import_round_trip() {
+        // Section 7 end-to-end on a scratch copy of the real ROM: stage an
+        // ExGFX file + bypass record, export the level, then import into a
+        // fresh scratch ROM as a different level and verify the bypass
+        // re-homes and the file is inserted. Level 0x9 uses Layer 2 objects
+        // (not a background) so the import fits the scratch ROM's free space.
+        let path = std::env::var("ROM_PATH").expect("ROM_PATH must point at a real SMW ROM");
+        let rom_bytes = std::fs::read(&path).expect("read ROM");
+        let header_offset = if rom_bytes.len() % 0x400 == 0x200 { 0x200 } else { 0 };
+        let (smc_header, body) = rom_bytes.split_at(header_offset);
+        let expanded = crate::rom_expansion::expand_rom(&crate::Rom::new(body.to_vec()).unwrap(), 0x40_0000)
+            .expect("expand scratch ROM");
+        let mut rom_bytes = smc_header.to_vec();
+        rom_bytes.extend_from_slice(expanded.bytes());
+
+        let raw: Vec<u8> = (0..exgfx::EXGFX_FILE_BYTES).map(|i| (i & 0xFF) as u8).collect();
+        let mut data = exgfx::ExGfxData::parse(&rom_bytes);
+        data.insert_raw(0x80, raw.clone()).unwrap();
+        data.write_to_rom(&mut rom_bytes, header_offset).unwrap();
+        let mut bypass = exgfx::BypassData::parse(&rom_bytes).unwrap_or_default();
+        bypass.set_slot(0x9, 0, 0x80).unwrap(); // FG1 <- ExGFX80
+        bypass.set_slot(0x9, 5, 0x0D).unwrap(); // SP2 <- vanilla GFX0D
+        bypass.write_to_rom(&mut rom_bytes, header_offset).unwrap();
+
+        let rom = crate::SmwRom::from_rom(crate::Rom::new(rom_bytes.clone()).unwrap()).unwrap();
+        let mwl = export_level(&rom, 0x9).unwrap();
+        assert!(!mwl.sections[SECTION_EXGFX_BYPASS].is_empty(), "section 7 should carry the bypass + file reference");
+
+        let mut rom2 = rom_bytes.clone();
+        import_level(&mut rom2, &mwl, 0x107, header_offset).unwrap();
+        let b2 = exgfx::BypassData::parse(&rom2).unwrap();
+        assert_eq!(b2.slot(0x107, 0), Some(0x80));
+        assert_eq!(b2.slot(0x107, 5), Some(0x0D));
+        assert_eq!(b2.slot(0x107, 1), Some(exgfx::BYPASS_DEFAULT));
+        let d2 = exgfx::ExGfxData::parse(&rom2);
+        assert_eq!(d2.files.get(&0x80).unwrap().raw_bytes(), raw.as_slice());
     }
 
     #[test]
