@@ -14,6 +14,7 @@ pub mod internal_header;
 pub mod layer3;
 pub mod level;
 pub mod level_deletion;
+pub mod level_sharing;
 pub mod map16_expanded;
 pub mod map16_file;
 pub mod message_boxes;
