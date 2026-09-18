@@ -124,6 +124,22 @@ impl UiLevelEditor {
             }
             ui.separator();
 
+            // Edit Manual — Lunar Magic v1.91: edit the selected object or
+            // sprite's raw bytes (also Alt+Right-click on the canvas).
+            let can_edit_manual = if self.edit_sprites {
+                self.selected_sprite_indices.len() == 1
+            } else {
+                self.selected_object_indices.len() == 1
+            };
+            if ui
+                .add_enabled(can_edit_manual, cbtn(icon::PENCIL_LINE))
+                .on_hover_text("Edit Manual — edit the selected object/sprite's raw bytes (LM v1.91; Alt+Right-click)")
+                .clicked()
+            {
+                self.open_edit_manual();
+            }
+            ui.separator();
+
             // Layer / overlay visibility toggles.
             if tbtn(ui, icon::GRID_FOUR, "Always show grid (F8)", self.always_show_grid) {
                 self.always_show_grid = !self.always_show_grid;

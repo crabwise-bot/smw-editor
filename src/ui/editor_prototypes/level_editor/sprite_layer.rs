@@ -40,20 +40,35 @@ impl EditableSpriteLayer {
         Self { sprites }
     }
 
+    /// The 3 raw stream bytes for the sprite at `index`, computed exactly the
+    /// way `serialize_bytes` lays them out, so the Edit Manual dialog shows
+    /// the bytes as they exist in the level data.
+    pub fn stream_bytes_for_index(&self, index: usize, vertical_level: bool) -> Option<[u8; 3]> {
+        let spr = self.sprites.get(index)?;
+        let (screen, x_tile, y_tile) = sprite_screen_and_local(*spr, vertical_level).ok()?;
+        Some(sprite_stream_bytes(*spr, screen, x_tile, y_tile))
+    }
+
     pub fn serialize_bytes(&self, vertical_level: bool) -> anyhow::Result<Vec<u8>> {
         let mut out = Vec::with_capacity(self.sprites.len() * 3 + 1);
         for spr in &self.sprites {
             let (screen, x_tile, y_tile) = sprite_screen_and_local(*spr, vertical_level)?;
-            let y_low = (y_tile & 0x0F) << 4;
-            let y_high = (y_tile >> 4) & 0x01;
-            let screen_high = ((screen >> 4) & 0x01) << 1;
-            let b0 = y_low | screen_high | ((spr.extra_bits & 0x03) << 2) | y_high;
-            let b1 = ((x_tile & 0x0F) << 4) | (screen & 0x0F);
-            out.extend_from_slice(&[b0, b1, spr.sprite_id]);
+            out.extend_from_slice(&sprite_stream_bytes(*spr, screen, x_tile, y_tile));
         }
         out.push(0xFF);
         Ok(out)
     }
+}
+
+/// The 3 stream bytes of one sprite entry: `b0 = yyyyEEeY`, `b1 = XXXXssss`,
+/// `b2 = sprite ID` — the inverse of `EditableSpriteLayer::from_rom_sprite_layer`.
+fn sprite_stream_bytes(spr: EditableSprite, screen: u8, x_tile: u8, y_tile: u8) -> [u8; 3] {
+    let y_low = (y_tile & 0x0F) << 4;
+    let y_high = (y_tile >> 4) & 0x01;
+    let screen_high = ((screen >> 4) & 0x01) << 1;
+    let b0 = y_low | screen_high | ((spr.extra_bits & 0x03) << 2) | y_high;
+    let b1 = ((x_tile & 0x0F) << 4) | (screen & 0x0F);
+    [b0, b1, spr.sprite_id]
 }
 
 fn sprite_screen_and_local(spr: EditableSprite, vertical_level: bool) -> anyhow::Result<(u8, u8, u8)> {
@@ -113,6 +128,24 @@ impl Undo for EditableSpriteLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_bytes_for_index_matches_serialized_stream() {
+        let layer = EditableSpriteLayer {
+            sprites: vec![EditableSprite { x: 37, y: 20, sprite_id: 0x35, extra_bits: 2 }, EditableSprite {
+                x:          5,
+                y:          4,
+                sprite_id:  0x01,
+                extra_bits: 0,
+            }],
+        };
+        // spr0: screen 2, x_tile 5, y_tile 20 (0x14):
+        // b0 = 0x40(y_low) | 0x08(extra=2) | 0x01(y_high) = 0x49, b1 = 0x52.
+        assert_eq!(layer.stream_bytes_for_index(0, false), Some([0x49, 0x52, 0x35]));
+        assert_eq!(layer.stream_bytes_for_index(1, false), Some([0x40, 0x50, 0x01]));
+        assert_eq!(layer.stream_bytes_for_index(2, false), None);
+        assert_eq!(layer.serialize_bytes(false).unwrap(), vec![0x49, 0x52, 0x35, 0x40, 0x50, 0x01, 0xFF]);
+    }
 
     #[test]
     fn undo_snapshot_round_trips_vertical_sprite_coordinates() {
