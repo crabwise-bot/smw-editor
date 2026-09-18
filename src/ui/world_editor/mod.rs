@@ -12,6 +12,7 @@
 mod editing;
 mod ow_tile_picker;
 mod se_teleport_editor;
+mod sprite_tool;
 
 use std::{
     collections::HashMap,
@@ -45,7 +46,15 @@ use smwe_render::{
 };
 use smwe_rom::{
     compression::lc_rle2,
-    overworld::{L2EventEntry, L2EventKind, OWL1_TILE_DATA_SIZE, OWL1_TILE_DATA_SNES, OW_EVENT_COUNT, SUBMAP_NAMES},
+    overworld::{
+        sprites as ow_sprites,
+        L2EventEntry,
+        L2EventKind,
+        OWL1_TILE_DATA_SIZE,
+        OWL1_TILE_DATA_SNES,
+        OW_EVENT_COUNT,
+        SUBMAP_NAMES,
+    },
     snes_utils::addr::{AddrPc, AddrSnes},
     SmwRom,
 };
@@ -178,35 +187,126 @@ impl OverworldRenderer {
 
 // ── Undoable overworld edit state ─────────────────────────────────────────────
 
-/// The serialization layout is: [L1 tiles (OWL1_TILE_DATA_SIZE bytes)][L2 words as LE u16 pairs].
-/// L1 is always exactly OWL1_TILE_DATA_SIZE bytes so `from_bytes` can split correctly.
+/// The serialization layout is:
+/// `[L1 tiles (OWL1_TILE_DATA_SIZE bytes)]`
+/// `[u32 LE layer-2 word count][L2 words as LE u16 pairs]`
+/// `[13 vanilla sprite records × 5 bytes][11 visibility bytes]`
+/// `[u8 foreign-custom-table flag]`
+/// `[u32 LE custom payload length][custom sprite RATS payload]`
+/// `[128 extra-byte counts]`
+///
+/// L1 is always exactly OWL1_TILE_DATA_SIZE bytes so `from_bytes` can split
+/// correctly; everything after it is length-prefixed.
 #[derive(Clone)]
 pub(super) struct OverworldEditState {
-    pub layer1_tiles: Vec<u8>,
-    pub layer2_words: Vec<u16>,
+    pub layer1_tiles:         Vec<u8>,
+    pub layer2_words:         Vec<u16>,
+    pub vanilla_sprites:      smwe_rom::overworld::sprites::VanillaOwSprites,
+    pub custom_sprites:       smwe_rom::overworld::sprites::CustomSpriteTable,
+    /// The ROM's custom-sprite pointer aimed at a table smw-editor did not
+    /// author (e.g. LM's). Custom sprites then can't be saved safely.
+    pub foreign_custom_table: bool,
+    /// Extra-byte counts in force for this ROM (constant for the session;
+    /// needed to decode the custom payload in `from_bytes`).
+    ///
+    /// Invariant (maintained by the sprite tool): every custom sprite's
+    /// `extra.len()` equals `custom_extra_counts[number]`. The undo payload
+    /// encodes/decodes extra bytes with these counts, so violating it would
+    /// corrupt extra bytes across undo/redo.
+    pub custom_extra_counts:  [u8; 128],
 }
 
 impl Undo for OverworldEditState {
     fn from_bytes(bytes: Vec<u8>) -> Self {
-        let l1_end = OWL1_TILE_DATA_SIZE.min(bytes.len());
-        let l1 = bytes[..l1_end].to_vec();
-        let l2_bytes = &bytes[l1_end..];
+        let mut pos = 0usize;
+        let take = |pos: &mut usize, n: usize| -> Vec<u8> {
+            let end = (*pos + n).min(bytes.len());
+            let chunk = bytes[*pos..end].to_vec();
+            *pos = end;
+            chunk
+        };
+        let l1 = take(&mut pos, OWL1_TILE_DATA_SIZE);
+        let l2_count = u32::from_le_bytes(take(&mut pos, 4).try_into().unwrap_or([0; 4])) as usize;
+        let l2_bytes = take(&mut pos, l2_count * 2);
         let layer2_words = l2_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        Self { layer1_tiles: l1, layer2_words }
+
+        let sprite_bytes = take(&mut pos, ow_sprites::VANILLA_SPRITE_COUNT * ow_sprites::VANILLA_SPRITE_RECORD_LEN);
+        let mut sprites = [ow_sprites::VanillaOwSprite { number: 0, x: 0, y: 0 }; ow_sprites::VANILLA_SPRITE_COUNT];
+        for (i, slot) in sprites.iter_mut().enumerate() {
+            let off = i * ow_sprites::VANILLA_SPRITE_RECORD_LEN;
+            if let Some(rec) = sprite_bytes.get(off..off + ow_sprites::VANILLA_SPRITE_RECORD_LEN) {
+                slot.number = rec[0];
+                slot.x = u16::from_le_bytes([rec[1], rec[2]]);
+                slot.y = u16::from_le_bytes([rec[3], rec[4]]);
+            }
+        }
+        let vis_bytes = take(&mut pos, ow_sprites::VISIBILITY_COUNT);
+        let mut visibility = [0u8; ow_sprites::VISIBILITY_COUNT];
+        for (i, b) in visibility.iter_mut().enumerate() {
+            *b = vis_bytes.get(i).copied().unwrap_or(0);
+        }
+        let foreign_custom_table = take(&mut pos, 1).first().copied().unwrap_or(0) != 0;
+        let payload_len = u32::from_le_bytes(take(&mut pos, 4).try_into().unwrap_or([0; 4])) as usize;
+        let payload = take(&mut pos, payload_len);
+        let counts_bytes = take(&mut pos, 128);
+        let mut custom_extra_counts = [ow_sprites::DEFAULT_EXTRA_BYTES as u8; 128];
+        for (i, b) in custom_extra_counts.iter_mut().enumerate() {
+            *b = counts_bytes.get(i).copied().unwrap_or(ow_sprites::DEFAULT_EXTRA_BYTES as u8);
+        }
+        let custom_sprites =
+            ow_sprites::CustomSpriteTable::decode_payload(&payload, &custom_extra_counts).unwrap_or_default();
+        Self {
+            layer1_tiles: l1,
+            layer2_words,
+            vanilla_sprites: ow_sprites::VanillaOwSprites { sprites, visibility },
+            custom_sprites,
+            foreign_custom_table,
+            custom_extra_counts,
+        }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.layer1_tiles.len() + self.layer2_words.len() * 2);
+        let mut out = Vec::with_capacity(self.size_bytes());
         out.extend_from_slice(&self.layer1_tiles);
+        out.extend_from_slice(&(self.layer2_words.len() as u32).to_le_bytes());
         for &w in &self.layer2_words {
             out.extend_from_slice(&w.to_le_bytes());
         }
+        for sprite in &self.vanilla_sprites.sprites {
+            out.push(sprite.number);
+            out.extend_from_slice(&sprite.x.to_le_bytes());
+            out.extend_from_slice(&sprite.y.to_le_bytes());
+        }
+        out.extend_from_slice(&self.vanilla_sprites.visibility);
+        out.push(u8::from(self.foreign_custom_table));
+        let payload = self.custom_sprites.encode_payload(&self.custom_extra_counts);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&self.custom_extra_counts);
         out
     }
 
     fn size_bytes(&self) -> usize {
-        self.layer1_tiles.len() + self.layer2_words.len() * 2
+        self.layer1_tiles.len()
+            + 4
+            + self.layer2_words.len() * 2
+            + ow_sprites::VANILLA_SPRITE_COUNT * ow_sprites::VANILLA_SPRITE_RECORD_LEN
+            + ow_sprites::VISIBILITY_COUNT
+            + 1
+            + 4
+            + self.custom_sprites.encode_payload(&self.custom_extra_counts).len()
+            + 128
     }
+}
+
+// ── Overworld sprite tool ─────────────────────────────────────────────────────
+
+/// Reference to a sprite editable in the overworld sprite tool: either a
+/// fixed vanilla table slot or a custom sprite on a submap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwSpriteRef {
+    Vanilla(usize),
+    Custom { submap: usize, index: usize },
 }
 
 // ── Editor ────────────────────────────────────────────────────────────────────
@@ -266,6 +366,23 @@ pub struct UiWorldEditor {
     /// doesn't need new ASM code, just different data.
     custom_level_numbers:  HashMap<usize, u8>,
     level_numbers_dirty:   bool,
+    /// Overworld sprite editing tool (LM overworld sprite mode parity):
+    /// when true, the canvas shows sprite markers and click/drag edits
+    /// sprites instead of tiles.
+    ow_sprite_tool:        bool,
+    /// Currently selected sprite in the sprite tool.
+    ow_sprite_selection:   Option<OwSpriteRef>,
+    /// Active sprite drag: the grabbed sprite plus the grab offset in map
+    /// pixels (pointer pos minus sprite pos at grab time).
+    ow_sprite_drag:        Option<(OwSpriteRef, Vec2)>,
+    /// Hex text buffer for the selected custom sprite's extra bytes, synced
+    /// on selection change.
+    ow_extra_hex:          String,
+    /// Last validation error from a sprite field edit, if any.
+    ow_sprite_error:       Option<String>,
+    /// Sprite state as parsed at ROM load; compared on save so untouched
+    /// sprite data is never rewritten (avoids orphaning RATS blocks).
+    sprites_at_load:       (ow_sprites::VanillaOwSprites, ow_sprites::CustomSpriteTable),
     /// Vanilla level names decoded from the ROM (93 entries, index =
     /// translevel). Used as the base for custom name edits.
     vanilla_level_names:   Vec<String>,
@@ -324,8 +441,40 @@ impl UiWorldEditor {
         let cpu = Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
 
         let source_layer1_tiles = rom.overworld.layer1_tiles.clone();
-        let edit_state =
-            UndoableData::new(OverworldEditState { layer1_tiles: source_layer1_tiles, layer2_words: Vec::new() });
+        // Decode the vanilla overworld sprite table ($04F625) and the custom
+        // sprite table ($0EF55D pointer) before `rom` is moved into the struct.
+        let (vanilla_sprites, custom_sprites, foreign_custom_table) = {
+            let bytes = rom.rom_bytes();
+            let vanilla = ow_sprites::VanillaOwSprites::parse(bytes, 0).unwrap_or_else(|e| {
+                log::warn!("Could not parse overworld sprites: {e}");
+                ow_sprites::VanillaOwSprites {
+                    sprites:    [ow_sprites::VanillaOwSprite { number: 0, x: 0, y: 0 };
+                        ow_sprites::VANILLA_SPRITE_COUNT],
+                    visibility: [0; ow_sprites::VISIBILITY_COUNT],
+                }
+            });
+            match ow_sprites::parse_custom_table(bytes, 0) {
+                Ok(table) => (vanilla, table.unwrap_or_default(), false),
+                Err(ow_sprites::SpriteError::ForeignTable) => {
+                    log::warn!("ROM has a custom overworld sprite table not authored by smw-editor; leaving it alone");
+                    (vanilla, ow_sprites::CustomSpriteTable::default(), true)
+                }
+                Err(e) => {
+                    log::warn!("Could not parse custom overworld sprites: {e}");
+                    (vanilla, ow_sprites::CustomSpriteTable::default(), false)
+                }
+            }
+        };
+        let custom_extra_counts = ow_sprites::extra_byte_counts(rom.rom_bytes(), 0);
+        let sprites_at_load = (vanilla_sprites.clone(), custom_sprites.clone());
+        let edit_state = UndoableData::new(OverworldEditState {
+            layer1_tiles: source_layer1_tiles,
+            layer2_words: Vec::new(),
+            vanilla_sprites,
+            custom_sprites,
+            foreign_custom_table,
+            custom_extra_counts,
+        });
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
             smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false).unwrap_or_default();
@@ -375,6 +524,12 @@ impl UiWorldEditor {
             show_l2_event_markers: true,
             custom_level_numbers: HashMap::new(),
             level_numbers_dirty: false,
+            ow_sprite_tool: false,
+            ow_sprite_selection: None,
+            ow_sprite_drag: None,
+            ow_extra_hex: String::new(),
+            ow_sprite_error: None,
+            sprites_at_load,
             vanilla_level_names,
             custom_level_names: HashMap::new(),
             level_names_dirty: false,
@@ -483,6 +638,8 @@ impl DockableEditorTool for UiWorldEditor {
         self.event_ownership_dirty = false;
         self.exanimation_dirty = false;
         self.se_teleports_dirty = false;
+        // The ROM now matches the edit state; future saves skip rewrites.
+        self.sprites_at_load = self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone()));
     }
 
     fn save_to_rom(&self, rom_bytes: &mut [u8], has_smc_header: bool) -> anyhow::Result<()> {
@@ -626,6 +783,22 @@ impl DockableEditorTool for UiWorldEditor {
             merged
                 .write_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Secondary-exit teleport-table write failed: {e}"))?;
+        }
+
+        // ── Overworld sprites (vanilla + custom) ──────────────────────────────
+        // Vanilla records and visibility bytes are fixed-location in-place
+        // writes; the custom table is a RATS-tagged free-space block behind
+        // the `$0EF55D` pointer. Untouched sprite data is never rewritten, so
+        // repeated saves don't orphan RATS blocks.
+        let (vanilla, custom) = self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone()));
+        if vanilla != self.sprites_at_load.0 {
+            vanilla
+                .write(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot write overworld sprites: {e}"))?;
+        }
+        if custom != self.sprites_at_load.1 {
+            ow_sprites::write_custom_table(&custom, rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot write custom overworld sprites: {e}"))?;
         }
 
         Ok(())
@@ -880,7 +1053,14 @@ impl UiWorldEditor {
                         self.editing_mode = mode;
                     }
                 }
+                self.ow_sprite_tool_toggle(ui);
             });
+
+            // ── Overworld sprite tool (LM overworld sprite mode parity) ──
+            if self.ow_sprite_tool {
+                ui.separator();
+                self.ow_sprite_panel(ui);
+            }
 
             // ── Layer selector ────────────────────────────────────────
             ui.horizontal(|ui| {
@@ -1268,7 +1448,7 @@ impl UiWorldEditor {
             && matches!(self.editing_mode, EditingMode::Select | EditingMode::Probe)
             && resp.dragged_by(egui::PointerButton::Primary);
         let is_pan = resp.dragged_by(egui::PointerButton::Middle)
-            || (resp.dragged_by(egui::PointerButton::Primary) && !region_dragging);
+            || (resp.dragged_by(egui::PointerButton::Primary) && !region_dragging && !self.ow_sprite_tool);
         if is_pan {
             self.offset += resp.drag_delta() / self.zoom;
         }
@@ -1406,50 +1586,71 @@ impl UiWorldEditor {
             }
         }
 
+        // ── Overworld sprite markers ──────────────────────────────────────────
+        // Drawn above the event markers, using the same canvas basis
+        // (`origin`, `z`, `visible_map_crop`) as the GL render.
+        if self.ow_sprite_tool {
+            self.ow_draw_markers(&painter, &resp, origin, z, view_rect);
+        }
+
         // ── Hover / click (Map16 block granularity) ───────────────────────────
-        if let Some(cursor) = resp.hover_pos() {
-            let rel = (cursor - origin) / map16_sz;
-            let tx = rel.x.floor() as i32;
-            let ty = rel.y.floor() as i32;
-            if (0..map16_cols as i32).contains(&tx) && (0..map16_rows as i32).contains(&ty) {
-                let x = tx as u32;
-                let y = ty as u32;
-                let addr = l1_vram_addr_for_map16(self.submap, x, y);
-                let tile_id = u16::from_le_bytes([self.cpu.mem.vram[addr], self.cpu.mem.vram[addr + 1]]) & 0x03FF;
-                let tile_rect =
-                    Rect::from_min_size(origin + vec2(x as f32 * map16_sz, y as f32 * map16_sz), Vec2::splat(map16_sz));
-                painter.rect_stroke(
-                    tile_rect,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0_f32, Color32::WHITE),
-                    StrokeKind::Outside,
-                );
+        // Inactive while the sprite tool owns the canvas.
+        if !self.ow_sprite_tool {
+            if let Some(cursor) = resp.hover_pos() {
+                let rel = (cursor - origin) / map16_sz;
+                let tx = rel.x.floor() as i32;
+                let ty = rel.y.floor() as i32;
+                if (0..map16_cols as i32).contains(&tx) && (0..map16_rows as i32).contains(&ty) {
+                    let x = tx as u32;
+                    let y = ty as u32;
+                    let addr = l1_vram_addr_for_map16(self.submap, x, y);
+                    let tile_id = u16::from_le_bytes([self.cpu.mem.vram[addr], self.cpu.mem.vram[addr + 1]]) & 0x03FF;
+                    let tile_rect = Rect::from_min_size(
+                        origin + vec2(x as f32 * map16_sz, y as f32 * map16_sz),
+                        Vec2::splat(map16_sz),
+                    );
+                    painter.rect_stroke(
+                        tile_rect,
+                        CornerRadius::ZERO,
+                        Stroke::new(1.0_f32, Color32::WHITE),
+                        StrokeKind::Outside,
+                    );
 
-                if resp.clicked_by(egui::PointerButton::Primary)
-                    && (self.editing_mode == EditingMode::Select || ui.input(|i| i.modifiers.alt))
-                    && !ui.input(|i| i.modifiers.shift)
-                {
-                    self.selected_tile = Some((x, y));
-                    // A plain click replaces the clipboard region selection.
-                    self.ow_sel_rect = None;
+                    if resp.clicked_by(egui::PointerButton::Primary)
+                        && (self.editing_mode == EditingMode::Select || ui.input(|i| i.modifiers.alt))
+                        && !ui.input(|i| i.modifiers.shift)
+                    {
+                        self.selected_tile = Some((x, y));
+                        // A plain click replaces the clipboard region selection.
+                        self.ow_sel_rect = None;
+                    }
+
+                    painter.text(
+                        view_rect.right_bottom() - vec2(6.0, 6.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        format!("({tx},{ty})  L1={tile_id:#05x}  {:.0}%", z * 100.0),
+                        egui::FontId::monospace(10.0),
+                        Color32::from_white_alpha(170),
+                    );
                 }
-
-                painter.text(
-                    view_rect.right_bottom() - vec2(6.0, 6.0),
-                    egui::Align2::RIGHT_BOTTOM,
-                    format!("({tx},{ty})  L1={tile_id:#05x}  {:.0}%", z * 100.0),
-                    egui::FontId::monospace(10.0),
-                    Color32::from_white_alpha(170),
-                );
             }
         }
 
         // ── Editing interaction ─────────────────────────────────────
-        // Shift suppresses plain-click selection while a clipboard region
-        // is being drawn (see the region-select block above).
-        self.handle_editing_interaction(&resp, origin, map16_sz, shift);
+        // The sprite tool owns the canvas while active; otherwise the tile
+        // editing path handles the pointer.
+        if self.ow_sprite_tool {
+            self.ow_handle_canvas(&resp, origin, z);
+        } else {
+            // Shift suppresses plain-click selection while a clipboard region
+            // is being drawn (see the region-select block above).
+            self.handle_editing_interaction(&resp, origin, map16_sz, shift);
+        }
 
         // ── Keyboard shortcuts ──────────────────────────────────────
+        // Captured before `input_mut`: Delete must not fire while a text
+        // field (e.g. the extra-bytes hex box) has keyboard focus.
+        let kb_focus = ui.ctx().wants_keyboard_input();
         ui.input_mut(|input| {
             if input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z)) {
                 self.handle_undo();
@@ -1465,6 +1666,20 @@ impl UiWorldEditor {
             }
             if input.key_pressed(egui::Key::Num3) {
                 self.editing_mode = EditingMode::Erase;
+            }
+            if input.key_pressed(egui::Key::Num4) {
+                self.ow_sprite_tool = !self.ow_sprite_tool;
+                if !self.ow_sprite_tool {
+                    self.ow_sprite_selection = None;
+                    self.ow_sprite_drag = None;
+                    self.ow_extra_hex.clear();
+                }
+            }
+            // Delete removes the selected custom sprite (vanilla slots are
+            // fixed). Guarded on text focus so typing in the extra-bytes
+            // field doesn't nuke a sprite.
+            if self.ow_sprite_tool && input.key_pressed(egui::Key::Delete) && !kb_focus {
+                self.ow_delete_selected();
             }
         });
 
@@ -1877,4 +2092,55 @@ fn render_single_tile_preview(vram: &[u8], cgram: &[u8], tile_num: u8, pal: u8) 
         }
     }
     egui::ColorImage::from_rgba_unmultiplied([16, 16], &pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The undo serialization must round-trip the sprite tables exactly —
+    /// undo/redo runs through `to_bytes`/`from_bytes` on every step.
+    #[test]
+    fn overworld_edit_state_undo_round_trip() {
+        let mut custom = ow_sprites::CustomSpriteTable::default();
+        // Invariant the UI maintains: extra.len() == counts[number], so the
+        // undo payload (encoded with those counts) round-trips exactly.
+        let mut counts = [7u8; 128];
+        counts[0x10] = 3;
+        custom.submaps[2].push(ow_sprites::CustomOwSprite {
+            number: 0x10,
+            x:      20,
+            y:      44,
+            height: 3,
+            extra:  vec![0x2A, 0x00, 0x01],
+        });
+        let state = OverworldEditState {
+            layer1_tiles:         vec![0x12; OWL1_TILE_DATA_SIZE],
+            layer2_words:         vec![0x1234, 0xABCD],
+            vanilla_sprites:      ow_sprites::VanillaOwSprites {
+                sprites:    [ow_sprites::VanillaOwSprite { number: 0x07, x: 0x38, y: 0x18A };
+                    ow_sprites::VANILLA_SPRITE_COUNT],
+                visibility: [0x3F; ow_sprites::VISIBILITY_COUNT],
+            },
+            custom_sprites:       custom,
+            foreign_custom_table: true,
+            custom_extra_counts:  counts,
+        };
+        let back = OverworldEditState::from_bytes(state.to_bytes());
+        assert_eq!(back.layer1_tiles, state.layer1_tiles);
+        assert_eq!(back.layer2_words, state.layer2_words);
+        assert_eq!(back.vanilla_sprites, state.vanilla_sprites);
+        assert_eq!(back.custom_sprites, state.custom_sprites);
+        assert_eq!(back.foreign_custom_table, state.foreign_custom_table);
+        assert_eq!(back.custom_extra_counts, state.custom_extra_counts);
+    }
+
+    /// Truncated buffers must not panic — `from_bytes` degrades gracefully.
+    #[test]
+    fn overworld_edit_state_from_bytes_truncated() {
+        let back = OverworldEditState::from_bytes(vec![0xAA; 100]);
+        assert_eq!(back.layer1_tiles.len(), 100);
+        assert!(back.layer2_words.is_empty());
+        assert!(back.custom_sprites.submaps.iter().all(|v| v.is_empty()));
+    }
 }
