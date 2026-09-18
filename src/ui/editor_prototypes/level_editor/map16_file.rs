@@ -126,7 +126,7 @@ impl UiLevelEditor {
             // Re-parse so the editor reflects the import; drop stale edits.
             let fresh = SmwRom::from_file(&self.rom_path)?;
             self.rom = Arc::new(fresh);
-            self.map16_edits.clear();
+            self.map16_edits = crate::undo::UndoableData::new(super::map16_editor::EditableMap16Edits::default());
             self.load_level();
             self.has_edits = false;
             Ok(format!("Imported '{file_name}' ({describe})"))

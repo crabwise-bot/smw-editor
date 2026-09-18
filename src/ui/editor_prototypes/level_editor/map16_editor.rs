@@ -1,8 +1,52 @@
+use std::collections::BTreeMap;
+
 use egui::{vec2, Color32, Context, Rect, Sense, Slider, Vec2};
+use egui_phosphor::regular as icon;
 
 use super::{tile_picker::render_sub_tile, UiLevelEditor};
+use crate::undo::Undo;
 
 const PREVIEW_PX: usize = 32; // display size for each 8x8 sub-tile preview
+
+/// The Map16 editor's per-block tile-word edits. Wrapped in
+/// [`UndoableData`] for Lunar Magic v1.91-style Ctrl+Z / Ctrl+Y undo/redo.
+/// Serialized sorted-by-key (`BTreeMap` iteration order) as
+/// `block_id:u16 + 4×tile_word:u16` records (10 bytes each), so undo deltas
+/// are deterministic — a `HashMap`'s order is not.
+#[derive(Clone, Debug, Default)]
+pub(super) struct EditableMap16Edits {
+    pub edits: BTreeMap<u16, [u16; 4]>,
+}
+
+impl Undo for EditableMap16Edits {
+    fn from_bytes(bytes: Vec<u8>) -> Self {
+        let mut edits = BTreeMap::new();
+        for chunk in bytes.chunks_exact(10) {
+            let block_id = u16::from_le_bytes([chunk[0], chunk[1]]);
+            let mut words = [0u16; 4];
+            for (i, w) in words.iter_mut().enumerate() {
+                *w = u16::from_le_bytes([chunk[2 + i * 2], chunk[3 + i * 2]]);
+            }
+            edits.insert(block_id, words);
+        }
+        Self { edits }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.edits.len() * 10);
+        for (&block_id, words) in &self.edits {
+            bytes.extend_from_slice(&block_id.to_le_bytes());
+            for &w in words {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    fn size_bytes(&self) -> usize {
+        self.edits.len() * 10
+    }
+}
 
 impl UiLevelEditor {
     pub(super) fn map16_editor_window(&mut self, ctx: &Context) {
@@ -146,15 +190,46 @@ impl UiLevelEditor {
             }
 
             if changed {
-                self.map16_edits.insert(block_id, tile_words);
+                // Gesture-style edit: snapshot once, mutate directly; a
+                // single undo step is committed when the gesture ends (see
+                // the end of this function), so one slider drag is one undo.
+                if self.map16_gesture_before.is_none() {
+                    self.map16_gesture_before = Some(self.map16_edits.read(|e| e.clone()));
+                }
+                self.map16_edits.data_mut().edits.insert(block_id, tile_words);
                 self.mark_edited();
             }
 
+            // ── Undo/redo (Lunar Magic v1.91 added Ctrl+Z/Ctrl+Y to the ───
+            // Map16 editor).
+            ui.separator();
+            ui.horizontal(|ui| {
+                let can_undo = self.map16_edits.can_undo();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new(format!("{} Undo", icon::ARROW_COUNTER_CLOCKWISE)))
+                    .on_hover_text("Undo Map16 change (Ctrl+Z)")
+                    .clicked()
+                {
+                    self.map16_undo();
+                }
+                let can_redo = self.map16_edits.can_redo();
+                if ui
+                    .add_enabled(can_redo, egui::Button::new(format!("{} Redo", icon::ARROW_CLOCKWISE)))
+                    .on_hover_text("Redo Map16 change (Ctrl+Y)")
+                    .clicked()
+                {
+                    self.map16_redo();
+                }
+            });
+
             // Revert button
-            if self.map16_edits.contains_key(&block_id) {
+            if self.map16_edits.read(|e| e.edits.contains_key(&block_id)) {
                 ui.separator();
                 if ui.button("Revert to ROM").clicked() {
-                    self.map16_edits.remove(&block_id);
+                    self.map16_edits.write(|e| {
+                        e.edits.remove(&block_id);
+                    });
+                    self.mark_edited();
                 }
             }
 
@@ -201,6 +276,59 @@ impl UiLevelEditor {
                 self.map16_apply_pasted_payload(&text);
             }
         }
+
+        // ── Ctrl+Z / Ctrl+Y (Lunar Magic v1.91) while the pointer is over ──
+        // this window (or while a tile-word drag is in flight). The window is
+        // drawn before the central panel, so consuming here wins over the
+        // level-canvas undo.
+        let map16_active = self.map16_window_hovered || self.map16_gesture_before.is_some();
+        if map16_active {
+            if ctx
+                .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z)))
+            {
+                self.map16_undo();
+            }
+            if ctx
+                .input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Y)))
+            {
+                self.map16_redo();
+            }
+        }
+
+        // ── Commit the undo step when a slider-drag gesture ends ──────────
+        // (snapshot taken on the first change; sliders fire changed() on
+        // every drag frame, so committing per-frame would make undo walk
+        // back through every intermediate value).
+        if self.map16_gesture_before.is_some() && ctx.input(|i| i.pointer.any_released()) {
+            self.commit_map16_gesture();
+        }
+    }
+
+    /// Undo one Map16 edit (Lunar Magic v1.91 Map16-editor undo).
+    /// An in-flight slider drag is committed first, so Ctrl+Z mid-drag
+    /// undoes the drag rather than the edit before it.
+    fn map16_undo(&mut self) {
+        self.commit_map16_gesture();
+        if self.map16_edits.can_undo() {
+            self.map16_edits.undo();
+            self.mark_edited();
+        }
+    }
+
+    /// Redo one Map16 edit (Lunar Magic v1.91 Map16-editor redo).
+    fn map16_redo(&mut self) {
+        self.commit_map16_gesture();
+        if self.map16_edits.can_redo() {
+            self.map16_edits.redo();
+            self.mark_edited();
+        }
+    }
+
+    /// Commit an in-flight slider-drag gesture as a single undo step, if any.
+    fn commit_map16_gesture(&mut self) {
+        if let Some(before) = self.map16_gesture_before.take() {
+            self.map16_edits.commit_change(&before);
+        }
     }
 
     /// Apply a pasted clipboard payload in the Map16 Block Editor: tile words
@@ -210,7 +338,9 @@ impl UiLevelEditor {
         let block_id = self.selected_map16_block_for_edit.unwrap_or(self.draw_block_id);
         match crate::ui::clipboard::ClipboardPayload::decode(text) {
             Some(crate::ui::clipboard::ClipboardPayload::Map16BlockWords { words }) => {
-                self.map16_edits.insert(block_id, words);
+                self.map16_edits.write(|e| {
+                    e.edits.insert(block_id, words);
+                });
                 self.mark_edited();
                 self.mwl_status = Some(format!("Pasted tile words into Map16 block {block_id:#06X}"));
             }
@@ -231,7 +361,7 @@ impl UiLevelEditor {
     }
 
     pub(super) fn get_block_tile_words(&self, block_id: u16) -> [u16; 4] {
-        if let Some(&words) = self.map16_edits.get(&block_id) {
+        if let Some(words) = self.map16_edits.read(|e| e.edits.get(&block_id).copied()) {
             return words;
         }
         if let Some(&snes_addr) = self.map16_block_ptrs.get(block_id as usize) {
@@ -252,5 +382,68 @@ impl UiLevelEditor {
             }
         }
         [0u16; 4]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::undo::UndoableData;
+
+    #[test]
+    fn map16_undo_redo_round_trip() {
+        let mut edits = UndoableData::new(EditableMap16Edits::default());
+        edits.write(|e| {
+            e.edits.insert(0x101, [0x0123, 0x4567, 0x89AB, 0xCDEF]);
+        });
+        edits.write(|e| {
+            e.edits.insert(0x102, [0x0001, 0x0002, 0x0003, 0x0004]);
+        });
+
+        edits.undo();
+        assert!(edits.read(|e| e.edits.get(&0x102).is_none()));
+        assert_eq!(edits.read(|e| e.edits[&0x101]), [0x0123, 0x4567, 0x89AB, 0xCDEF]);
+
+        // "Revert to ROM" removes the entry; undo restores it.
+        edits.write(|e| {
+            e.edits.remove(&0x101);
+        });
+        assert!(edits.read(|e| e.edits.get(&0x101).is_none()));
+        edits.undo();
+        assert_eq!(edits.read(|e| e.edits[&0x101]), [0x0123, 0x4567, 0x89AB, 0xCDEF]);
+
+        edits.redo();
+        assert!(edits.read(|e| e.edits.get(&0x101).is_none()));
+    }
+
+    #[test]
+    fn map16_serialization_is_deterministic() {
+        // Insertion order must not affect the serialized bytes: the undo
+        // delta XORs byte sequences, so nondeterministic order would corrupt
+        // undo/redo.
+        let mut a = EditableMap16Edits::default();
+        a.edits.insert(0x200, [1, 2, 3, 4]);
+        a.edits.insert(0x101, [5, 6, 7, 8]);
+        let mut b = EditableMap16Edits::default();
+        b.edits.insert(0x101, [5, 6, 7, 8]);
+        b.edits.insert(0x200, [1, 2, 3, 4]);
+        assert_eq!(a.to_bytes(), b.to_bytes());
+        assert_eq!(a.to_bytes().len(), 20);
+        let back = EditableMap16Edits::from_bytes(a.to_bytes());
+        assert_eq!(back.to_bytes(), a.to_bytes());
+    }
+
+    #[test]
+    fn map16_gesture_commit_is_single_step() {
+        let mut edits = UndoableData::new(EditableMap16Edits::default());
+        // Slider-drag path: snapshot, mutate directly across frames, commit.
+        let before = edits.read(|e| e.clone());
+        for tile in [0x0100u16, 0x0101, 0x0102] {
+            edits.data_mut().edits.insert(0x101, [tile, 0, 0, 0]);
+        }
+        edits.commit_change(&before);
+        edits.undo();
+        assert!(edits.read(|e| e.edits.get(&0x101).is_none()));
+        assert!(!edits.can_undo());
     }
 }
