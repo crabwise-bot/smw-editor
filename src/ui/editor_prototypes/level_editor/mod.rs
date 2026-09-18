@@ -2,6 +2,7 @@ mod background_layer;
 mod bg_tilemap_editor;
 mod boss_text_editor;
 mod central_panel;
+mod edit_manual_dialog;
 mod editing;
 mod gfx_editor;
 mod gfx_slot_browser;
@@ -287,6 +288,12 @@ pub struct UiLevelEditor {
     show_xref_search:         bool,
     xref_search:              XrefSearchState,
 
+    // Edit Manual dialog (Lunar Magic v1.91: raw object/sprite byte editing).
+    show_edit_manual:   bool,
+    edit_manual_target: Option<edit_manual_dialog::EditManualTarget>,
+    edit_manual_bytes:  [String; 3],
+    edit_manual_error:  Option<String>,
+
     // ExAnimation (custom per-level tile/palette animation) editor.
     exanimation:             smwe_rom::exanimation::ExAnimationData,
     exanimation_dirty:       bool,
@@ -478,6 +485,10 @@ impl UiLevelEditor {
             boss_text_raster_for: None,
             show_xref_search: false,
             xref_search: XrefSearchState::default(),
+            show_edit_manual: false,
+            edit_manual_target: None,
+            edit_manual_bytes: [String::new(), String::new(), String::new()],
+            edit_manual_error: None,
             exanimation,
             exanimation_dirty: false,
             show_exanimation_editor: false,
@@ -541,6 +552,7 @@ impl DockableEditorTool for UiLevelEditor {
             }
         }
         self.xref_search_window(&ctx);
+        self.edit_manual_window(&ctx);
         self.title_credits_editor_window(&ctx);
         self.bg_tilemap_editor_window(&ctx);
         // Lunar Magic-style top toolbar + bottom status bar wrap the editor.

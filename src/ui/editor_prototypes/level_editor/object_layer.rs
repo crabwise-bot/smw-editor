@@ -157,10 +157,33 @@ impl EditableObjectLayer {
         bytes.push(0xFF);
         Ok(bytes)
     }
+
+    /// The 3 raw stream bytes for the object at `index`, computed exactly the
+    /// way `serialize_layer1_bytes` lays them out (screen tracking + the
+    /// new-screen flag), so the Edit Manual dialog shows the bytes as they
+    /// exist in the level data.
+    pub fn stream_bytes_for_index(&self, index: usize, vertical_level: bool) -> Option<[u8; 3]> {
+        self.objects.get(index)?;
+        let mut current_screen = 0u8;
+        for (i, o) in self.objects.iter().enumerate() {
+            let (target_screen, raw_x, raw_y) = o.screen_and_local_coords(vertical_level).ok()?;
+            if i == index {
+                let new_screen = target_screen == current_screen.saturating_add(1);
+                return Some(o.raw_bytes(new_screen, raw_x, raw_y));
+            }
+            if target_screen != current_screen {
+                current_screen = target_screen;
+            }
+        }
+        None
+    }
 }
 
 impl EditableObject {
-    fn screen_and_local_coords(&self, vertical_level: bool) -> Result<(u8, u8, u8)> {
+    /// (screen, raw local X, raw local Y) of this object for stream encoding.
+    /// Public so the Edit Manual dialog can recover the object's screen when
+    /// applying edited bytes.
+    pub fn screen_and_local_coords(&self, vertical_level: bool) -> Result<(u8, u8, u8)> {
         if vertical_level {
             let screen = u8::try_from(self.y / SCREEN_WIDTH)
                 .map_err(|_| anyhow!("vertical object screen out of range: {}", self.y / SCREEN_WIDTH))?;
@@ -279,6 +302,52 @@ impl Undo for EditableObjectLayer {
 #[cfg(test)]
 mod tests {
     use super::{EditableExit, EditableObject, EditableObjectLayer};
+
+    #[test]
+    fn stream_bytes_for_index_matches_serialized_stream() {
+        let layer = EditableObjectLayer {
+            objects: vec![
+                EditableObject {
+                    x:           0,
+                    y:           0,
+                    id:          0x12,
+                    settings:    0x34,
+                    is_extended: false,
+                    extended_id: 0,
+                },
+                EditableObject {
+                    x:           17,
+                    y:           5,
+                    id:          0x2F,
+                    settings:    0x56,
+                    is_extended: false,
+                    extended_id: 0,
+                },
+                // Extended entry back on screen 0: the serialized stream
+                // inserts a screen jump before it.
+                EditableObject {
+                    x:           3,
+                    y:           2,
+                    id:          0,
+                    settings:    0,
+                    is_extended: true,
+                    extended_id: 0x7F,
+                },
+            ],
+            exits:   vec![],
+        };
+        // Per-entry stream bytes include the new-screen flag exactly as the
+        // serializer lays them out.
+        assert_eq!(layer.stream_bytes_for_index(0, false), Some([0x20, 0x20, 0x34]));
+        assert_eq!(layer.stream_bytes_for_index(1, false), Some([0xC5, 0xF1, 0x56]));
+        assert_eq!(layer.stream_bytes_for_index(2, false), Some([0x02, 0x03, 0x7F]));
+        assert_eq!(layer.stream_bytes_for_index(3, false), None);
+        // And they sit at the same positions in the full serialized stream
+        // (modulo the screen-jump entry before the extended object).
+        assert_eq!(layer.serialize_layer1_bytes(false).unwrap(), vec![
+            0x20, 0x20, 0x34, 0xC5, 0xF1, 0x56, 0x00, 0x00, 0x01, 0x02, 0x03, 0x7F, 0xFF
+        ]);
+    }
 
     #[test]
     fn serializes_horizontal_objects_and_exits() {

@@ -192,6 +192,27 @@ impl UiLevelEditor {
 
 impl UiLevelEditor {
     pub(super) fn handle_editing_interaction(&mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32) {
+        // ── Lunar Magic "Edit Manual": Alt+Right-click an object/sprite ────
+        // Selects the entry under the pointer and opens the raw-byte dialog.
+        if resp.ctx.input(|i| i.modifiers.alt) && resp.clicked_by(egui::PointerButton::Secondary) {
+            if let Some(pos) = resp.hover_pos() {
+                let hit = if self.edit_sprites {
+                    self.sprite_at(pos, origin, tile_sz).is_some()
+                } else {
+                    self.object_at(pos, origin, tile_sz).is_some()
+                };
+                if hit {
+                    if self.edit_sprites {
+                        self.select_sprite_at(pos, origin, tile_sz);
+                    } else {
+                        self.select_object_at(pos, origin, tile_sz);
+                    }
+                    self.open_edit_manual();
+                    return;
+                }
+            }
+        }
+
         if self.edit_sprites {
             match self.editing_mode {
                 EditingMode::Select | EditingMode::Probe => {
