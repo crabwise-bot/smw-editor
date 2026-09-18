@@ -49,35 +49,49 @@
 //! custom sprites per submap. Each entry is
 //! `xnnnnnnn yyyXXXXX hhhhhYYY eeeeeeee…`: 7-bit sprite number, 6-bit X and Y
 //! in 8×8 units (bit 5 of X rides in bit 7 of the first byte), 5-bit height,
-//! then a variable number of extra bytes (default 1; LM v3.51 may provide a
-//! 0x80-entry per-sprite count table whose 3-byte pointer lives at `$0DE18C`
-//! with marker byte `$42` at `$0DE18F`).
+//! then a variable number of extra bytes (default 1; LM v3.51+ may provide a
+//! per-sprite record-size table — see "Custom overworld sprite record sizes"
+//! below — whose 3-byte pointer lives at `$0DE18C` with marker byte `$42` at
+//! `$0DE18F`).
 //!
-//! ## Custom sprite list sizes (LM v3.51)
+//! ## Custom overworld sprite record sizes (LM v3.51)
 //!
-//! Lunar Magic 3.51 (2024-12-25) added support for *custom overworld sprite
-//! list sizes*: each submap's custom sprite list has a configurable capacity
-//! (how many custom sprites that submap may hold), instead of one fixed cap
-//! for every submap. The documented native maximum is 24 per submap
-//! ([Overworld Data Format](https://smwspeedruns.com/Overworld_Data_Format),
-//! accurate as of LM 3.51).
+//! Lunar Magic 3.51 (2024-12-25) added support for a user-defined
+//! *sprite size table* for custom overworld sprites: one byte per sprite
+//! number giving the **total** number of bytes that sprite's records take up
+//! in the custom sprite list (3 = the fixed bytes only, no extra bytes;
+//! `0xF` = maximum; default 4 when no table is defined). Per LM's own help
+//! file ("Custom Overworld Sprite List Sizes", verified against the LM 3.63
+//! download 2026-09-18): the table is `0x7F` bytes with the first entry for
+//! sprite 1 (in 3.51 only it was `0x80` bytes starting at sprite 0; 3.60
+//! changed it and disallowed inserting custom sprite 0), the table's SNES
+//! address goes in the 3 bytes at `$0DE18C` (PC `0x6E38C` in a headered ROM),
+//! and `$0DE18F` (PC `0x6E38F`) must hold `$42` to enable it.
 //!
-//! smw-editor models this as `CustomSpriteTable::list_sizes` — one capacity
-//! per submap, default 24, hard-capped at 24 — persisted in the `OWSPRITE`
-//! RATS payload (format version 2). Version-1 payloads (written before this
-//! feature) decode with all sizes defaulted to 24, so old saves load
-//! unchanged.
+//! smw-editor models this as [`SpriteSizeTable`] — 0x7F total record sizes
+//! for sprites `1..=0x7F`, each `3..=0xF`. The per-sprite *extra*-byte counts
+//! used to encode/decode custom sprite records are derived from it
+//! (`extra = size - 3`; see [`extra_byte_counts`]).
 //!
-//! **Important:** Lunar Magic only *authors* this table. Custom sprites do
-//! nothing in-game unless a third-party runtime patch (e.g. a custom-sprite
-//! engine) is also installed — vanilla SMW has no code that reads the table.
-//! smw-editor stores the table in the same spirit: data, not behavior.
+//! **Ownership:** Lunar Magic itself almost never authors this table —
+//! "typically the sizes would be set by a 3rd party utility" (LM help), the
+//! one exception being overworld transfer to another ROM. So the table is
+//! LM/3rd-party-owned data: if the ROM already has one (marker `$42`
+//! present), the editor edits its bytes in place; if not, the editor can
+//! create one in free space (RATS-tagged so it can be found again), point
+//! `$0DE18C` at it, and set the marker — after which Lunar Magic reads it
+//! like any 3rd-party table.
 //!
-//! LM's exact on-disk layout for the table is not publicly documented, so
-//! smw-editor uses its own clearly-marked RATS-tagged format (magic
-//! `OWSPRITE`, version 2): the 3-byte pointer at `$0EF55D` aims at the `STAR`
-//! tag, and the seven submap offsets are byte offsets from the start of the
-//! RATS payload (`0xFFFF` = submap has no custom sprites).
+//! **Important:** the table only tells *Lunar Magic* how to parse the custom
+//! sprite list. "It's up to you or a 3rd party utility to modify the game
+//! code to take the sizes into account" (LM help) — like custom sprites
+//! themselves, the sizes do nothing in-game without a runtime patch.
+//!
+//! LM's exact on-disk layout for the *custom sprite* table is not publicly
+//! documented, so smw-editor uses its own clearly-marked RATS-tagged format
+//! (magic `OWSPRITE`, version 1): the 3-byte pointer at `$0EF55D` aims at the
+//! `STAR` tag, and the seven submap offsets are byte offsets from the start
+//! of the RATS payload (`0xFFFF` = submap has no custom sprites).
 
 use crate::snes_utils::{
     addr::{AddrPc, AddrSnes},
@@ -103,22 +117,30 @@ pub const VISIBILITY_COUNT: usize = 11;
 /// 3-byte SNES pointer (little-endian) to the custom overworld sprite table.
 /// `FF FF FF` = no custom sprite table.
 pub const CUSTOM_SPRITE_PTR_SNES: AddrSnes = AddrSnes(0x0EF55D);
-/// 3-byte SNES pointer to the 0x80-entry extra-byte-count table (LM v3.51+).
-pub const EXTRA_BYTE_COUNT_PTR_SNES: AddrSnes = AddrSnes(0x0DE18C);
-/// Marker byte address: when this holds [`EXTRA_BYTE_COUNT_MARKER`], the
-/// extra-byte-count table is present.
-pub const EXTRA_BYTE_COUNT_MARKER_SNES: AddrSnes = AddrSnes(0x0DE18F);
-pub const EXTRA_BYTE_COUNT_MARKER: u8 = 0x42;
-/// Default extra bytes per custom sprite when no count table is present.
+/// 3-byte SNES pointer (little-endian) to the 0x7F-entry sprite record-size
+/// table (LM v3.51+). The pointer aims at the first size byte.
+pub const SIZE_TABLE_PTR_SNES: AddrSnes = AddrSnes(0x0DE18C);
+/// Marker byte address: when this holds [`SIZE_TABLE_MARKER`], the
+/// record-size table is present and enabled for Lunar Magic.
+pub const SIZE_TABLE_MARKER_SNES: AddrSnes = AddrSnes(0x0DE18F);
+/// Marker byte value enabling the record-size table.
+pub const SIZE_TABLE_MARKER: u8 = 0x42;
+/// Entries in the record-size table: one per sprite number `1..=0x7F`.
+/// (LM 3.51 used 0x80 entries starting at sprite 0; LM 3.60 changed it to
+/// 0x7F entries starting at sprite 1.)
+pub const SIZE_TABLE_LEN: usize = 0x7F;
+/// Minimum total record size: the 3 fixed bytes, no extra bytes.
+pub const MIN_SPRITE_RECORD_SIZE: u8 = 3;
+/// Maximum total record size: 3 fixed bytes + 12 extra bytes.
+pub const MAX_SPRITE_RECORD_SIZE: u8 = 0xF;
+/// Record size assumed when the ROM has no size table: 3 fixed + 1 extra
+/// byte (matches LM's own default of 4).
+pub const DEFAULT_SPRITE_RECORD_SIZE: u8 = 4;
+/// Default extra bytes per custom sprite when no size table is present.
 pub const DEFAULT_EXTRA_BYTES: usize = 1;
 /// Maximum custom sprites per submap: the documented native LM limit
-/// (smwspeedruns "Overworld Data Format", accurate as of LM 3.51). Per-submap
-/// list sizes ([`CustomSpriteTable::list_sizes`]) may be set lower, never
-/// higher.
+/// (smwspeedruns "Overworld Data Format", accurate as of LM 3.51).
 pub const MAX_CUSTOM_SPRITES_PER_SUBMAP: usize = 24;
-/// Default per-submap custom sprite list size (LM v3.51 "custom overworld
-/// sprite list sizes" — each submap's list capacity, configurable 0..=24).
-pub const DEFAULT_CUSTOM_LIST_SIZE: u8 = MAX_CUSTOM_SPRITES_PER_SUBMAP as u8;
 
 /// Visibility bit per submap index 0..=6: bit set = sprite is INACTIVE there.
 /// Matches `DATA_04F875` (`db $80,$40,$20,$10,$08,$04,$02`) in `bank_04.asm`.
@@ -181,8 +203,14 @@ pub enum SpriteError {
     NoVisibilityByte(u8),
     #[error("refusing to overwrite a custom sprite table not authored by smw-editor")]
     ForeignTable,
-    #[error("cannot shrink submap {submap}'s custom sprite list to {size}: it holds {count} sprites")]
-    ListSizeTooSmall { submap: usize, size: u8, count: usize },
+    #[error("sprite {number:#04X}: record size {size} out of range (3..=0xF)")]
+    BadSpriteSize { number: u8, size: u8 },
+    #[error("this ROM has no custom overworld sprite size table")]
+    NoSizeTable,
+    #[error("this ROM already has a custom overworld sprite size table")]
+    SizeTableExists,
+    #[error("sprite size table overruns ROM")]
+    SizeTableOverrunsRom,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -357,22 +385,9 @@ impl CustomOwSprite {
 }
 
 /// Custom overworld sprites, one list per submap (index 0..=6).
-///
-/// `list_sizes` is the LM v3.51 "custom overworld sprite list sizes" feature:
-/// the configured capacity (maximum custom sprite count) of each submap's
-/// list, 0..=[`MAX_CUSTOM_SPRITES_PER_SUBMAP`]. The editor refuses to insert
-/// past a submap's configured size, mirroring LM's "not enough room" save
-/// rejection. Defaults to 24 per submap (the documented native maximum).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CustomSpriteTable {
-    pub submaps:    [Vec<CustomOwSprite>; 7],
-    pub list_sizes: [u8; 7],
-}
-
-impl Default for CustomSpriteTable {
-    fn default() -> Self {
-        Self { submaps: Default::default(), list_sizes: [DEFAULT_CUSTOM_LIST_SIZE; 7] }
-    }
+    pub submaps: [Vec<CustomOwSprite>; 7],
 }
 
 impl CustomSpriteTable {
@@ -383,33 +398,6 @@ impl CustomSpriteTable {
     pub fn total_count(&self) -> usize {
         self.submaps.iter().map(Vec::len).sum()
     }
-
-    /// Configured list size (capacity) for `submap` (0..=6), clamped to the
-    /// valid range. Out-of-range submaps read as 0.
-    pub fn list_size(&self, submap: usize) -> u8 {
-        self.list_sizes.get(submap).copied().unwrap_or(0).min(MAX_CUSTOM_SPRITES_PER_SUBMAP as u8)
-    }
-
-    /// Free slots left on `submap`'s custom sprite list.
-    pub fn room_for(&self, submap: usize) -> usize {
-        (self.list_size(submap) as usize).saturating_sub(self.submaps.get(submap).map(Vec::len).unwrap_or(0))
-    }
-
-    /// Set submap `submap`'s list size. Sizes above
-    /// [`MAX_CUSTOM_SPRITES_PER_SUBMAP`] are clamped to it; shrinking below
-    /// the number of sprites the list currently holds is refused with
-    /// [`SpriteError::ListSizeTooSmall`].
-    pub fn set_list_size(&mut self, submap: usize, size: u8) -> Result<(), SpriteError> {
-        let size = size.min(MAX_CUSTOM_SPRITES_PER_SUBMAP as u8);
-        let count = self.submaps.get(submap).map(Vec::len).unwrap_or(0);
-        if (size as usize) < count {
-            return Err(SpriteError::ListSizeTooSmall { submap, size, count });
-        }
-        if let Some(slot) = self.list_sizes.get_mut(submap) {
-            *slot = size;
-        }
-        Ok(())
-    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -418,14 +406,9 @@ impl CustomSpriteTable {
 
 /// Magic at the start of our custom-sprite RATS payload.
 const CUSTOM_MAGIC: &[u8; 8] = b"OWSPRITE";
-/// Version 2 adds the 7 per-submap list sizes (LM v3.51 parity) after the
-/// submap offsets. Version-1 payloads (written before this feature) decode
-/// with every list size defaulted to [`DEFAULT_CUSTOM_LIST_SIZE`].
-const CUSTOM_VERSION: u8 = 2;
-/// Payload header: magic + version + 7 submap offsets + 7 list sizes.
-const CUSTOM_HEADER_LEN: usize = 8 + 1 + 7 * 2 + 7;
-/// Header length of version-1 payloads (no list sizes).
-const CUSTOM_HEADER_LEN_V1: usize = 8 + 1 + 7 * 2;
+const CUSTOM_VERSION: u8 = 1;
+/// Payload header: magic + version + 7 submap offsets.
+const CUSTOM_HEADER_LEN: usize = 8 + 1 + 7 * 2;
 /// Submap offset value meaning "this submap has no custom sprites".
 const NO_SPRITES_OFFSET: u16 = 0xFFFF;
 
@@ -438,25 +421,20 @@ fn read_snes3(rom_bytes: &[u8], pc: usize) -> Option<AddrSnes> {
     Some(AddrSnes(u32::from_le_bytes([b[0], b[1], b[2], 0])))
 }
 
-/// Per-sprite extra-byte counts: the 0x80-entry table when LM v3.51's marker
-/// is present, otherwise [`DEFAULT_EXTRA_BYTES`] for every sprite number.
+/// Per-sprite extra-byte counts for custom sprite numbers `0..=0x7F`.
+///
+/// When LM v3.51+'s record-size table is present (marker `$42` at
+/// [`SIZE_TABLE_MARKER_SNES`]), each sprite number `1..=0x7F` gets
+/// `table_size - 3` extra bytes (the table stores *total* record sizes per
+/// LM's help file: 3 = no extra bytes, `0xF` = max). Sprite 0 has no table
+/// entry and always uses the default. Otherwise every sprite number uses
+/// [`DEFAULT_EXTRA_BYTES`] (total record size 4 = LM's default).
 pub fn extra_byte_counts(rom_bytes: &[u8], header_offset: usize) -> [u8; 128] {
     let mut counts = [DEFAULT_EXTRA_BYTES as u8; 128];
-    let (Ok(ptr_pc), Ok(marker_pc)) = (
-        AddrPc::try_from_lorom(EXTRA_BYTE_COUNT_PTR_SNES).map(|p| p.as_index() + header_offset),
-        AddrPc::try_from_lorom(EXTRA_BYTE_COUNT_MARKER_SNES).map(|p| p.as_index() + header_offset),
-    ) else {
-        return counts;
-    };
-    if rom_bytes.get(marker_pc).copied() != Some(EXTRA_BYTE_COUNT_MARKER) {
-        return counts;
-    }
-    let Some(table_snes) = read_snes3(rom_bytes, ptr_pc) else { return counts };
-    let Ok(table_pc) = AddrPc::try_from_lorom(table_snes).map(|p| p.as_index() + header_offset) else {
-        return counts;
-    };
-    if let Some(table) = rom_bytes.get(table_pc..table_pc + 128) {
-        counts.copy_from_slice(table);
+    if let Ok(Some(table)) = parse_size_table(rom_bytes, header_offset) {
+        for (i, size) in table.sizes.iter().enumerate() {
+            counts[i + 1] = size.saturating_sub(MIN_SPRITE_RECORD_SIZE);
+        }
     }
     counts
 }
@@ -488,16 +466,13 @@ fn erase_rats_block(rom_bytes: &mut [u8], file_off: usize) {
 }
 
 impl CustomSpriteTable {
-    /// Encode to the RATS payload format (without the `STAR` tag), version 2.
-    /// Each submap's list is truncated to its configured list size.
+    /// Encode to the RATS payload format (without the `STAR` tag).
     pub fn encode_payload(&self, extra_counts: &[u8; 128]) -> Vec<u8> {
         let mut lists: Vec<Vec<u8>> = Vec::with_capacity(7);
-        for (submap, sprites) in self.submaps.iter().enumerate() {
-            let cap = self.list_size(submap) as usize;
-            let mut list = Vec::with_capacity(1 + sprites.len().min(cap) * 4);
-            let stored = sprites.len().min(cap);
-            list.push(stored as u8);
-            for sprite in sprites.iter().take(cap) {
+        for sprites in &self.submaps {
+            let mut list = Vec::with_capacity(1 + sprites.len() * 4);
+            list.push(sprites.len().min(MAX_CUSTOM_SPRITES_PER_SUBMAP) as u8);
+            for sprite in sprites.iter().take(MAX_CUSTOM_SPRITES_PER_SUBMAP) {
                 let n = extra_counts[(sprite.number & 0x7F) as usize] as usize;
                 list.extend_from_slice(&sprite.encode(n));
             }
@@ -516,7 +491,6 @@ impl CustomSpriteTable {
                 offset += list.len();
             }
         }
-        out.extend_from_slice(&self.list_sizes);
         for list in &lists {
             if list.len() > 1 {
                 out.extend_from_slice(list);
@@ -525,36 +499,19 @@ impl CustomSpriteTable {
         out
     }
 
-    /// Decode a RATS payload produced by [`Self::encode_payload`]. Accepts
-    /// version 1 (no list sizes — every size defaults to
-    /// [`DEFAULT_CUSTOM_LIST_SIZE`]) and version 2.
+    /// Decode a RATS payload produced by [`Self::encode_payload`].
     pub fn decode_payload(payload: &[u8], extra_counts: &[u8; 128]) -> Result<Self, SpriteError> {
         let corrupt = |msg: &str| SpriteError::Corrupt(msg.to_string());
-        if payload.len() < CUSTOM_HEADER_LEN_V1 {
+        if payload.len() < CUSTOM_HEADER_LEN {
             return Err(corrupt("payload shorter than header"));
         }
         if &payload[..8] != CUSTOM_MAGIC {
             return Err(corrupt("bad magic"));
         }
-        let version = payload[8];
-        let sizes: [u8; 7] = match version {
-            1 => [DEFAULT_CUSTOM_LIST_SIZE; 7],
-            CUSTOM_VERSION => {
-                if payload.len() < CUSTOM_HEADER_LEN {
-                    return Err(corrupt("payload shorter than v2 header"));
-                }
-                let mut s = [0u8; 7];
-                s.copy_from_slice(&payload[23..30]);
-                if s.iter().any(|&n| n as usize > MAX_CUSTOM_SPRITES_PER_SUBMAP) {
-                    return Err(corrupt("list size exceeds 24"));
-                }
-                s
-            }
-            v => return Err(SpriteError::Corrupt(format!("unsupported version {v}"))),
-        };
-        // Submap offsets live at bytes 9..23 in both versions.
+        if payload[8] != CUSTOM_VERSION {
+            return Err(SpriteError::Corrupt(format!("unsupported version {}", payload[8])));
+        }
         let mut table = CustomSpriteTable::default();
-        table.list_sizes = sizes;
         for (submap, sprites) in table.submaps.iter_mut().enumerate() {
             let off = u16::from_le_bytes([payload[9 + submap * 2], payload[9 + submap * 2 + 1]]);
             if off == NO_SPRITES_OFFSET {
@@ -562,8 +519,8 @@ impl CustomSpriteTable {
             }
             let off = off as usize;
             let count = *payload.get(off).ok_or_else(|| corrupt("submap offset out of range"))? as usize;
-            if count > sizes[submap] as usize {
-                return Err(corrupt("submap sprite count exceeds its list size"));
+            if count > MAX_CUSTOM_SPRITES_PER_SUBMAP {
+                return Err(corrupt("submap sprite count exceeds 24"));
             }
             let mut pos = off + 1;
             for _ in 0..count {
@@ -581,6 +538,158 @@ impl CustomSpriteTable {
         }
         Ok(table)
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Sprite record-size table (LM v3.51+)
+// -------------------------------------------------------------------------------------------------
+
+/// The LM v3.51+ custom overworld sprite record-size table: one **total**
+/// record size per sprite number `1..=0x7F`, each `3..=0xF` (3 = the fixed
+/// bytes only, no extra bytes; `0xF` = maximum; LM's default when no table
+/// exists is 4).
+///
+/// Table index `i` is the size for sprite number `i + 1` (LM 3.60+ layout;
+/// LM 3.51 used 0x80 entries starting at sprite 0 — see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpriteSizeTable {
+    pub sizes: [u8; SIZE_TABLE_LEN],
+}
+
+impl Default for SpriteSizeTable {
+    fn default() -> Self {
+        Self { sizes: [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN] }
+    }
+}
+
+impl SpriteSizeTable {
+    /// Total record size for sprite `number`: the table entry for
+    /// `1..=0x7F`, [`DEFAULT_SPRITE_RECORD_SIZE`] for anything else
+    /// (sprite 0 has no entry).
+    pub fn size_for(&self, number: u8) -> u8 {
+        if (1..=0x7F).contains(&number) {
+            self.sizes[(number - 1) as usize]
+        } else {
+            DEFAULT_SPRITE_RECORD_SIZE
+        }
+    }
+
+    /// Extra-byte count for sprite `number` (`size - 3`).
+    pub fn extra_for(&self, number: u8) -> u8 {
+        self.size_for(number).saturating_sub(MIN_SPRITE_RECORD_SIZE)
+    }
+
+    /// Set the record size for sprite `number` (`1..=0x7F`). Sizes outside
+    /// `3..=0xF` are refused with [`SpriteError::BadSpriteSize`].
+    pub fn set_size(&mut self, number: u8, size: u8) -> Result<(), SpriteError> {
+        if !(1..=0x7Fu8).contains(&number) {
+            return Err(SpriteError::BadSpriteSize { number, size });
+        }
+        if !(MIN_SPRITE_RECORD_SIZE..=MAX_SPRITE_RECORD_SIZE).contains(&size) {
+            return Err(SpriteError::BadSpriteSize { number, size });
+        }
+        self.sizes[(number - 1) as usize] = size;
+        Ok(())
+    }
+
+    /// Encode the raw 0x7F-byte table (no RATS tag — Lunar Magic reads the
+    /// bytes directly from the `$0DE18C` pointer).
+    pub fn encode_table(&self) -> [u8; SIZE_TABLE_LEN] {
+        self.sizes
+    }
+}
+
+/// Parse the sprite record-size table. Returns `Ok(None)` when the ROM has
+/// no table (marker byte not `$42`, or the pointer is `FF FF FF`).
+///
+/// Out-of-range bytes are clamped to `3..=0xF`: the table is
+/// LM/3rd-party-owned data, and one odd byte should not nuke the overworld
+/// tab. The editor normalizes values on write.
+pub fn parse_size_table(rom_bytes: &[u8], header_offset: usize) -> Result<Option<SpriteSizeTable>, SpriteError> {
+    let ptr_pc = AddrPc::try_from_lorom(SIZE_TABLE_PTR_SNES)
+        .map(|p| p.as_index() + header_offset)
+        .map_err(|_| SpriteError::SizeTableOverrunsRom)?;
+    let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES)
+        .map(|p| p.as_index() + header_offset)
+        .map_err(|_| SpriteError::SizeTableOverrunsRom)?;
+    if ptr_pc + 3 > rom_bytes.len() || marker_pc >= rom_bytes.len() {
+        return Err(SpriteError::SizeTableOverrunsRom);
+    }
+    if rom_bytes[marker_pc] != SIZE_TABLE_MARKER {
+        return Ok(None);
+    }
+    let Some(table_snes) = read_snes3(rom_bytes, ptr_pc) else {
+        return Ok(None);
+    };
+    let table_pc = AddrPc::try_from_lorom(table_snes)
+        .map(|p| p.as_index() + header_offset)
+        .map_err(|_| SpriteError::SizeTableOverrunsRom)?;
+    let raw = rom_bytes.get(table_pc..table_pc + SIZE_TABLE_LEN).ok_or(SpriteError::SizeTableOverrunsRom)?;
+    let mut sizes = [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN];
+    for (i, b) in raw.iter().enumerate() {
+        sizes[i] = (*b).clamp(MIN_SPRITE_RECORD_SIZE, MAX_SPRITE_RECORD_SIZE);
+    }
+    Ok(Some(SpriteSizeTable { sizes }))
+}
+
+/// Overwrite the ROM's existing size table in place. Works for tables
+/// authored by Lunar Magic / 3rd-party utilities (raw 0x7F bytes) and for
+/// tables smw-editor created itself (RATS-tagged; the pointer aims past the
+/// tag at the data). Returns [`SpriteError::NoSizeTable`] when the ROM has
+/// no table — use [`create_size_table`] instead.
+pub fn write_size_table(
+    table: &SpriteSizeTable, rom_bytes: &mut [u8], header_offset: usize,
+) -> Result<(), SpriteError> {
+    let ptr_pc = AddrPc::try_from_lorom(SIZE_TABLE_PTR_SNES)?.as_index() + header_offset;
+    let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES)?.as_index() + header_offset;
+    if ptr_pc + 3 > rom_bytes.len() || marker_pc >= rom_bytes.len() {
+        return Err(SpriteError::SizeTableOverrunsRom);
+    }
+    if rom_bytes[marker_pc] != SIZE_TABLE_MARKER {
+        return Err(SpriteError::NoSizeTable);
+    }
+    let Some(table_snes) = read_snes3(rom_bytes, ptr_pc) else {
+        return Err(SpriteError::NoSizeTable);
+    };
+    let table_pc = AddrPc::try_from_lorom(table_snes)?.as_index() + header_offset;
+    let dst = rom_bytes.get_mut(table_pc..table_pc + SIZE_TABLE_LEN).ok_or(SpriteError::SizeTableOverrunsRom)?;
+    dst.copy_from_slice(&table.encode_table());
+    Ok(())
+}
+
+/// Create a sprite record-size table in free space and enable it: allocate
+/// a RATS-tagged block holding the 0x7F size bytes, point `$0DE18C` at the
+/// data (past the tag), and set the `$42` marker at `$0DE18F`. Lunar Magic
+/// reads the table like any 3rd-party-authored one.
+///
+/// Returns [`SpriteError::SizeTableExists`] when the ROM already has a
+/// table — edit it with [`write_size_table`] instead.
+pub fn create_size_table(
+    table: &SpriteSizeTable, rom_bytes: &mut [u8], header_offset: usize,
+) -> Result<(), SpriteError> {
+    if parse_size_table(rom_bytes, header_offset)?.is_some() {
+        return Err(SpriteError::SizeTableExists);
+    }
+    let total = 8 + SIZE_TABLE_LEN; // RATS tag + 0x7F size bytes
+    let pc = crate::freespace::find_free_space(rom_bytes, total, 0x008000, header_offset)
+        .ok_or(SpriteError::NoFreeSpace(total))?;
+    let file_off = pc + header_offset;
+    let size_field = (SIZE_TABLE_LEN - 1) as u16;
+    rom_bytes[file_off..file_off + 4].copy_from_slice(b"STAR");
+    rom_bytes[file_off + 4..file_off + 6].copy_from_slice(&size_field.to_le_bytes());
+    rom_bytes[file_off + 6..file_off + 8].copy_from_slice(&(!size_field).to_le_bytes());
+    rom_bytes[file_off + 8..file_off + 8 + SIZE_TABLE_LEN].copy_from_slice(&table.encode_table());
+
+    // The pointer aims at the size bytes, past the RATS tag.
+    let snes = AddrSnes::try_from_lorom(AddrPc(pc as u32 + 8))?;
+    let ptr_pc = AddrPc::try_from_lorom(SIZE_TABLE_PTR_SNES)?.as_index() + header_offset;
+    let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES)?.as_index() + header_offset;
+    if ptr_pc + 3 > rom_bytes.len() || marker_pc >= rom_bytes.len() {
+        return Err(SpriteError::SizeTableOverrunsRom);
+    }
+    rom_bytes[ptr_pc..ptr_pc + 3].copy_from_slice(&snes.0.to_le_bytes()[..3]);
+    rom_bytes[marker_pc] = SIZE_TABLE_MARKER;
+    Ok(())
 }
 
 /// Parse the custom sprite table. Returns `Ok(None)` when the pointer is
@@ -819,95 +928,152 @@ mod tests {
     }
 
     #[test]
-    fn list_sizes_encode_decode_round_trip() {
-        let mut table = CustomSpriteTable::default();
-        table.set_list_size(0, 8).unwrap();
-        table.set_list_size(4, 0).unwrap();
-        table.submaps[0].push(CustomOwSprite { number: 1, x: 10, y: 20, height: 3, extra: vec![0xAA] });
-        table.submaps[0].push(CustomOwSprite { number: 2, x: 11, y: 21, height: 0, extra: vec![0xBB] });
-        let counts = [1u8; 128];
-        let payload = table.encode_payload(&counts);
-        assert_eq!(payload[8], CUSTOM_VERSION);
-        let decoded = CustomSpriteTable::decode_payload(&payload, &counts).unwrap();
-        assert_eq!(decoded, table);
-        assert_eq!(decoded.list_size(0), 8);
-        assert_eq!(decoded.list_size(4), 0);
-        assert_eq!(decoded.list_size(1), DEFAULT_CUSTOM_LIST_SIZE);
-        assert_eq!(decoded.room_for(0), 6);
+    fn size_table_default_and_validation() {
+        let table = SpriteSizeTable::default();
+        assert_eq!(table.sizes, [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN]);
+        assert_eq!(table.size_for(1), 4);
+        assert_eq!(table.size_for(0x7F), 4);
+        // Sprite 0 has no entry: always the default.
+        assert_eq!(table.size_for(0), DEFAULT_SPRITE_RECORD_SIZE);
+        assert_eq!(table.extra_for(1), 1);
+
+        let mut table = table;
+        table.set_size(1, 3).unwrap();
+        table.set_size(0x7F, 0xF).unwrap();
+        assert_eq!(table.size_for(1), 3);
+        assert_eq!(table.extra_for(1), 0);
+        assert_eq!(table.size_for(0x7F), 0xF);
+        assert_eq!(table.extra_for(0x7F), 12);
+        // Out-of-range sizes and sprite numbers are refused.
+        assert!(table.set_size(1, 2).is_err());
+        assert!(table.set_size(1, 0x10).is_err());
+        assert!(table.set_size(0, 4).is_err());
+        assert!(table.set_size(0x80, 4).is_err());
+        // Failed sets leave the table unchanged.
+        assert_eq!(table.size_for(1), 3);
+    }
+
+    /// Helper: install a fake "LM-authored" raw 0x7F-byte size table (no
+    /// RATS tag, like a 3rd-party utility would write) and enable it.
+    fn install_raw_size_table(rom: &mut [u8], sizes: &[u8; SIZE_TABLE_LEN]) {
+        let ptr_pc = AddrPc::try_from_lorom(SIZE_TABLE_PTR_SNES).unwrap().as_index();
+        let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES).unwrap().as_index();
+        let table_pc = 0x20000;
+        let snes = AddrSnes::try_from_lorom(AddrPc(table_pc as u32)).unwrap();
+        rom[ptr_pc..ptr_pc + 3].copy_from_slice(&snes.0.to_le_bytes()[..3]);
+        rom[marker_pc] = SIZE_TABLE_MARKER;
+        rom[table_pc..table_pc + SIZE_TABLE_LEN].copy_from_slice(sizes);
     }
 
     #[test]
-    fn v1_payload_decodes_with_default_list_sizes() {
-        // Version-1 payload: 23-byte header, no size bytes. Must load with
-        // every submap defaulted to 24 (backward compat with older saves).
-        let counts = [1u8; 128];
-        let mut v1 = Vec::new();
-        v1.extend_from_slice(b"OWSPRITE");
-        v1.push(1u8);
-        let list_off: u16 = 23;
-        v1.extend_from_slice(&list_off.to_le_bytes());
-        for _ in 0..6 {
-            v1.extend_from_slice(&NO_SPRITES_OFFSET.to_le_bytes());
-        }
-        let sprite = CustomOwSprite { number: 5, x: 1, y: 2, height: 1, extra: vec![0x00] };
-        v1.push(1u8);
-        v1.extend_from_slice(&sprite.encode(1));
-        let decoded = CustomSpriteTable::decode_payload(&v1, &counts).unwrap();
-        assert_eq!(decoded.list_sizes, [DEFAULT_CUSTOM_LIST_SIZE; 7]);
-        assert_eq!(decoded.submaps[0].len(), 1);
-        assert_eq!(decoded.submaps[0][0].number, 5);
+    fn size_table_create_parse_write_round_trip() {
+        let mut rom = test_rom();
+        // Vanilla-ish ROM: no table.
+        assert_eq!(parse_size_table(&rom, 0).unwrap(), None);
+
+        // Create: allocates a RATS-tagged block, points $0DE18C at the data,
+        // sets the $42 marker.
+        let mut table = SpriteSizeTable::default();
+        table.set_size(0x10, 7).unwrap();
+        create_size_table(&table, &mut rom, 0).unwrap();
+
+        let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES).unwrap().as_index();
+        assert_eq!(rom[marker_pc], SIZE_TABLE_MARKER);
+        let ptr_pc = AddrPc::try_from_lorom(SIZE_TABLE_PTR_SNES).unwrap().as_index();
+        let snes = AddrSnes(u32::from_le_bytes([rom[ptr_pc], rom[ptr_pc + 1], rom[ptr_pc + 2], 0]));
+        let data_pc = AddrPc::try_from_lorom(snes).unwrap().as_index();
+        // RATS tag immediately before the data the pointer aims at.
+        assert_eq!(&rom[data_pc - 8..data_pc - 4], b"STAR");
+
+        let parsed = parse_size_table(&rom, 0).unwrap().expect("table should exist");
+        assert_eq!(parsed, table);
+        assert_eq!(parsed.size_for(0x10), 7);
+
+        // Edit in place.
+        let mut edited = parsed;
+        edited.set_size(0x10, 3).unwrap();
+        edited.set_size(0x7F, 0xF).unwrap();
+        write_size_table(&edited, &mut rom, 0).unwrap();
+        let reparsed = parse_size_table(&rom, 0).unwrap().expect("table should exist");
+        assert_eq!(reparsed, edited);
+
+        // Creating again is refused; the existing table is untouched.
+        assert!(matches!(create_size_table(&table, &mut rom, 0), Err(SpriteError::SizeTableExists)));
+        assert_eq!(parse_size_table(&rom, 0).unwrap().unwrap(), edited);
     }
 
     #[test]
-    fn set_list_size_validation() {
-        let mut table = CustomSpriteTable::default();
-        table.submaps[2].push(CustomOwSprite { number: 5, x: 1, y: 2, height: 1, extra: vec![0x00] });
-        table.submaps[2].push(CustomOwSprite { number: 6, x: 2, y: 3, height: 1, extra: vec![0x00] });
-        // Cannot shrink below the current sprite count.
-        assert!(matches!(
-            table.set_list_size(2, 1),
-            Err(SpriteError::ListSizeTooSmall { submap: 2, size: 1, count: 2 })
-        ));
-        assert_eq!(table.list_size(2), DEFAULT_CUSTOM_LIST_SIZE);
-        // Exactly the count is fine.
-        table.set_list_size(2, 2).unwrap();
-        assert_eq!(table.list_size(2), 2);
-        assert_eq!(table.room_for(2), 0);
-        // Sizes clamp to the native maximum of 24.
-        table.set_list_size(3, 255).unwrap();
-        assert_eq!(table.list_size(3), MAX_CUSTOM_SPRITES_PER_SUBMAP as u8);
-        // Out-of-range submaps are inert.
-        assert!(table.set_list_size(7, 5).is_ok());
-        assert_eq!(table.list_size(7), 0);
+    fn write_size_table_without_table_errors() {
+        let mut rom = test_rom();
+        let table = SpriteSizeTable::default();
+        assert!(matches!(write_size_table(&table, &mut rom, 0), Err(SpriteError::NoSizeTable)));
+        // Marker set but pointer FF FF FF: still no table.
+        let marker_pc = AddrPc::try_from_lorom(SIZE_TABLE_MARKER_SNES).unwrap().as_index();
+        rom[marker_pc] = SIZE_TABLE_MARKER;
+        assert!(matches!(write_size_table(&table, &mut rom, 0), Err(SpriteError::NoSizeTable)));
+        assert_eq!(parse_size_table(&rom, 0).unwrap(), None);
     }
 
     #[test]
-    fn encode_truncates_lists_to_configured_size() {
-        let mut table = CustomSpriteTable::default();
-        table.set_list_size(1, 3).unwrap();
-        for i in 0..5u8 {
-            table.submaps[1].push(CustomOwSprite { number: i, x: i, y: 1, height: 1, extra: vec![0x00] });
-        }
-        let counts = [1u8; 128];
-        let payload = table.encode_payload(&counts);
-        let decoded = CustomSpriteTable::decode_payload(&payload, &counts).unwrap();
-        // Only the first 3 survive the round trip; the rest were truncated.
-        assert_eq!(decoded.submaps[1].len(), 3);
-        assert_eq!(decoded.submaps[1][2].number, 2);
-        assert_eq!(decoded.list_size(1), 3);
+    fn size_table_lm_authored_raw_table() {
+        // A 3rd-party utility's raw table (no RATS tag): parse and in-place
+        // write must work on it.
+        let mut rom = test_rom();
+        let mut sizes = [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN];
+        sizes[0] = 5; // sprite 1: 5 total bytes = 2 extra
+        sizes[0x7E] = 0xF; // sprite 0x7F: max
+        install_raw_size_table(&mut rom, &sizes);
+
+        let parsed = parse_size_table(&rom, 0).unwrap().expect("table should exist");
+        assert_eq!(parsed.size_for(1), 5);
+        assert_eq!(parsed.size_for(0x7F), 0xF);
+        assert_eq!(parsed.size_for(2), 4);
+
+        let mut edited = parsed;
+        edited.set_size(1, 3).unwrap();
+        write_size_table(&edited, &mut rom, 0).unwrap();
+        // Still a raw table (no RATS tag introduced), first byte updated.
+        let table_pc = 0x20000;
+        assert_eq!(rom[table_pc], 3);
+        assert_eq!(&rom[table_pc - 8..table_pc - 4], &[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(parse_size_table(&rom, 0).unwrap().unwrap(), edited);
     }
 
     #[test]
-    fn decode_rejects_count_above_list_size() {
-        let counts = [1u8; 128];
+    fn size_table_clamps_out_of_range_bytes_on_read() {
+        let mut rom = test_rom();
+        let mut sizes = [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN];
+        sizes[0] = 0x02; // below min 3
+        sizes[1] = 0x20; // above max 0xF
+        install_raw_size_table(&mut rom, &sizes);
+        let parsed = parse_size_table(&rom, 0).unwrap().expect("table should exist");
+        assert_eq!(parsed.size_for(1), MIN_SPRITE_RECORD_SIZE);
+        assert_eq!(parsed.size_for(2), MAX_SPRITE_RECORD_SIZE);
+    }
+
+    #[test]
+    fn custom_payload_uses_size_table_record_lengths() {
+        // End to end: with a size table giving sprite 5 a 6-byte record
+        // (3 extra), a sprite-5 entry round-trips its 3 extra bytes through
+        // write_custom_table / parse_custom_table.
+        let mut rom = test_rom();
+        let mut sizes = SpriteSizeTable::default();
+        sizes.set_size(5, 6).unwrap();
+        create_size_table(&sizes, &mut rom, 0).unwrap();
+
+        let counts = extra_byte_counts(&rom, 0);
+        assert_eq!(counts[5], 3);
         let mut table = CustomSpriteTable::default();
-        table.set_list_size(0, 1).unwrap();
-        table.submaps[0].push(CustomOwSprite { number: 1, x: 1, y: 1, height: 1, extra: vec![0x00] });
-        let mut payload = table.encode_payload(&counts);
-        // Corrupt the count byte of submap 0's list to exceed its size.
-        let off = u16::from_le_bytes([payload[9], payload[10]]) as usize;
-        payload[off] = 5;
-        assert!(matches!(CustomSpriteTable::decode_payload(&payload, &counts), Err(SpriteError::Corrupt(_))));
+        table.submaps[2].push(CustomOwSprite {
+            number: 5,
+            x:      1,
+            y:      2,
+            height: 1,
+            extra:  vec![0xAA, 0xBB, 0xCC],
+        });
+        write_custom_table(&table, &mut rom, 0).unwrap();
+        let parsed = parse_custom_table(&rom, 0).unwrap().expect("table should exist");
+        assert_eq!(parsed.submaps[2][0].extra, vec![0xAA, 0xBB, 0xCC]);
     }
 
     #[test]
@@ -934,21 +1100,22 @@ mod tests {
     #[test]
     fn extra_byte_counts_default_and_marker() {
         let rom = test_rom();
-        assert_eq!(extra_byte_counts(&rom, 0)[0x10], 1);
+        assert!(extra_byte_counts(&rom, 0).iter().all(|&c| c == 1));
 
-        // Install the LM v3.51 marker + table.
+        // Install the LM v3.51+ marker + table. Table bytes are TOTAL record
+        // sizes (LM help: 3 = no extra bytes, 0xF = max); entry i is sprite
+        // i+1 (LM 3.60+ layout).
         let mut rom = rom;
-        let ptr_pc = AddrPc::try_from_lorom(EXTRA_BYTE_COUNT_PTR_SNES).unwrap().as_index();
-        let marker_pc = AddrPc::try_from_lorom(EXTRA_BYTE_COUNT_MARKER_SNES).unwrap().as_index();
-        let table_pc = 0x20000;
-        let snes = AddrSnes::try_from_lorom(AddrPc(table_pc as u32)).unwrap();
-        rom[ptr_pc..ptr_pc + 3].copy_from_slice(&snes.0.to_le_bytes()[..3]);
-        rom[marker_pc] = EXTRA_BYTE_COUNT_MARKER;
-        rom[table_pc..table_pc + 128].fill(1);
-        rom[table_pc + 0x10] = 5;
+        let mut sizes = [DEFAULT_SPRITE_RECORD_SIZE; SIZE_TABLE_LEN];
+        sizes[0x0F] = 6; // sprite 0x10: 6 total = 3 extra
+        sizes[0x7E] = 3; // sprite 0x7F: 3 total = 0 extra
+        install_raw_size_table(&mut rom, &sizes);
         let counts = extra_byte_counts(&rom, 0);
-        assert_eq!(counts[0x10], 5);
+        assert_eq!(counts[0x10], 3);
+        assert_eq!(counts[0x7F], 0);
         assert_eq!(counts[0x11], 1);
+        // Sprite 0 has no table entry: always the default.
+        assert_eq!(counts[0], 1);
     }
 
     /// Real-ROM validation: parse the vanilla sprite/visibility tables from
@@ -983,7 +1150,8 @@ mod tests {
 
         // Vanilla ROM has no custom sprite table (pointer is FF FF FF).
         assert_eq!(parse_custom_table(&bytes, header_offset).unwrap(), None);
-        // ... and no extra-byte-count table either.
+        // ... and no sprite record-size table either.
+        assert_eq!(parse_size_table(&bytes, header_offset).unwrap(), None);
         assert!(extra_byte_counts(&bytes, header_offset).iter().all(|&c| c == 1));
     }
 }
