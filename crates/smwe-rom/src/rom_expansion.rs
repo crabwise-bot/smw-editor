@@ -83,6 +83,17 @@ pub fn compute_checksum(bytes: &[u8]) -> u16 {
     (sum & 0xFFFF) as u16
 }
 
+/// Rewrite the internal-header checksum/complement pair in place over
+/// `bytes` (the headerless image). Same math as [`expand_rom`], factored out
+/// so other ROM-surgery operations (e.g. level deletion) can repair the
+/// checksum without expanding.
+pub fn rewrite_checksum(bytes: &mut [u8]) {
+    let checksum = compute_checksum(bytes);
+    let complement = checksum ^ 0xFFFF;
+    bytes[COMPLEMENT_OFFSET..COMPLEMENT_OFFSET + 2].copy_from_slice(&complement.to_le_bytes());
+    bytes[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&checksum.to_le_bytes());
+}
+
 // -------------------------------------------------------------------------------------------------
 
 /// Expand `rom` to `target_size` bytes (one of [`EXPANSION_TARGETS`]).
@@ -113,10 +124,7 @@ pub fn expand_rom(rom: &Rom, target_size: usize) -> Result<Rom, ExpansionError> 
 
     // Recompute checksum over the final image (header fields zeroed while
     // summing, per `compute_checksum`'s convention).
-    let checksum = compute_checksum(&bytes);
-    let complement = checksum ^ 0xFFFF;
-    bytes[COMPLEMENT_OFFSET..COMPLEMENT_OFFSET + 2].copy_from_slice(&complement.to_le_bytes());
-    bytes[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&checksum.to_le_bytes());
+    rewrite_checksum(&mut bytes);
 
     let expanded = Rom(Arc::from(bytes.into_boxed_slice()));
     // Sanity: the expanded image must still locate its own internal header.

@@ -23,6 +23,8 @@ use egui_dock::{DockArea, DockState, Style as DockStyle};
 use egui_file_dialog::FileDialog;
 use egui_phosphor::Variant;
 use smwe_rom::{
+    level_deletion::{delete_levels, level_modified_vs, GAMEPLAY_CRITICAL_LEVELS},
+    overworld::level_number_for_index,
     rom_expansion::{expand_rom, expansion_targets, format_size, split_smc_header},
     snes_utils::rom::Rom,
     SmwRom,
@@ -42,66 +44,79 @@ use crate::{
 };
 
 pub struct UiMainWindow {
-    gl:                       Arc<glow::Context>,
-    dock_style:               DockStyle,
-    dock_state:               DockState<Box<dyn DockableEditorTool>>,
+    gl:                        Arc<glow::Context>,
+    dock_style:                DockStyle,
+    dock_state:                DockState<Box<dyn DockableEditorTool>>,
     /// Path of the currently-open ROM (for Save).
-    rom_path:                 Option<PathBuf>,
+    rom_path:                  Option<PathBuf>,
     /// Set when a Save error needs to be shown.
-    save_error:               Option<String>,
+    save_error:                Option<String>,
     /// In-egui file dialog for Open ROM.
-    open_dialog:              FileDialog,
+    open_dialog:               FileDialog,
     /// In-egui file dialog for Save As.
-    save_as_dialog:           FileDialog,
+    save_as_dialog:            FileDialog,
     /// In-egui file dialog for BPS patch export.
-    bps_export_dialog:        FileDialog,
+    bps_export_dialog:         FileDialog,
     /// In-egui file dialog for IPS patch export.
-    ips_export_dialog:        FileDialog,
+    ips_export_dialog:         FileDialog,
     /// Expand-ROM dialog (File > Expand ROM...).
-    show_expand_dialog:       bool,
+    show_expand_dialog:        bool,
     /// Selected expansion target size in bytes.
-    expand_target:            usize,
+    expand_target:             usize,
     /// Status line shown in the Expand-ROM dialog.
-    expand_status:            Option<String>,
+    expand_status:             Option<String>,
     /// In-egui file dialog for single-level PNG export (File > Export Level to PNG...).
-    png_export_dialog:        FileDialog,
+    png_export_dialog:         FileDialog,
     /// Translevel chosen for the pending single-level PNG export.
-    png_export_level:         Option<u16>,
+    png_export_level:          Option<u16>,
     /// Status line for the last single-level PNG export.
-    png_export_status:        Option<String>,
+    png_export_status:         Option<String>,
     /// Batch level-export dialog (File > Levels > Export Multiple Levels to Image Files...).
-    show_batch_export_dialog: bool,
+    show_batch_export_dialog:  bool,
     /// In-egui directory picker for the batch export output folder.
-    batch_export_dir_dialog:  FileDialog,
+    batch_export_dir_dialog:   FileDialog,
     /// Hex strings for the batch export range (inclusive), e.g. "000"–"1FF".
-    batch_from:               String,
-    batch_to:                 String,
+    batch_from:                String,
+    batch_to:                  String,
     /// Batch export output folder.
-    batch_out_dir:            Option<PathBuf>,
+    batch_out_dir:             Option<PathBuf>,
     /// Batch export layer toggles (mirror the single-level options).
-    batch_include_l1:         bool,
-    batch_include_l2:         bool,
-    batch_include_sprites:    bool,
+    batch_include_l1:          bool,
+    batch_include_l2:          bool,
+    batch_include_sprites:     bool,
     /// Status line shown in the batch-export dialog.
-    batch_status:             Option<String>,
+    batch_status:              Option<String>,
+    /// Delete-levels dialog (File > Levels > Delete Levels from ROM..., LM v3.50 parity).
+    show_delete_levels_dialog: bool,
+    /// Per-level checkbox state for the delete dialog (index = level number).
+    delete_levels_selected:    Vec<bool>,
+    /// Per-level "modified vs ROM-as-opened" flags, refreshed when the dialog opens.
+    delete_levels_modified:    Vec<bool>,
+    /// Per-level gameplay-critical flags (title/demo + overworld-placed),
+    /// refreshed when the dialog opens; selecting any shows a warning.
+    delete_levels_critical:    Vec<bool>,
+    /// Levels awaiting delete confirmation.
+    delete_levels_pending:     Option<Vec<u16>>,
+    /// Status line shown in the delete-levels dialog.
+    delete_levels_status:      Option<String>,
     /// Set when user tries to close the app with unsaved changes
-    show_exit_dialog:         bool,
+    show_exit_dialog:          bool,
     /// Restore points + original-ROM reference copy (Restore menu, LM v1.80).
-    restore_manager:          RestoreManager,
+    restore_manager:           RestoreManager,
     /// In-egui file dialog for Apply IPS Patch.
-    ips_apply_dialog:         FileDialog,
+    ips_apply_dialog:          FileDialog,
     /// "Create Restore Point" dialog state.
-    show_restore_dialog:      bool,
+    show_restore_dialog:       bool,
     /// Name typed into the "Create Restore Point" dialog.
-    restore_point_name:       String,
+    restore_point_name:        String,
     /// Restore-point index awaiting revert confirmation.
-    pending_revert:           Option<usize>,
+    pending_revert:            Option<usize>,
     /// IPS patch path + preview awaiting apply confirmation.
-    pending_ips_apply:        Option<PendingIpsApply>,
+    pending_ips_apply:         Option<PendingIpsApply>,
     /// IPS export destination awaiting same-directory-warning confirmation.
-    pending_ips_export:       Option<PathBuf>,
+    pending_ips_export:        Option<PathBuf>,
     /// Status line for restore/IPS actions (shown in the Restore menu area).
-    restore_status:           Option<String>,
+    restore_status:            Option<String>,
 }
 
 /// An IPS patch the user picked, applied in-memory to the current ROM image,
@@ -147,6 +162,12 @@ impl UiMainWindow {
             batch_include_l2: true,
             batch_include_sprites: true,
             batch_status: None,
+            show_delete_levels_dialog: false,
+            delete_levels_selected: Vec::new(),
+            delete_levels_modified: Vec::new(),
+            delete_levels_critical: Vec::new(),
+            delete_levels_pending: None,
+            delete_levels_status: None,
             show_exit_dialog: false,
             restore_manager: RestoreManager::new(),
             ips_apply_dialog: FileDialog::new(),
@@ -197,6 +218,14 @@ impl eframe::App for UiMainWindow {
         if let Some(dir) = self.batch_export_dir_dialog.take_picked() {
             self.batch_out_dir = Some(dir);
             self.batch_status = None;
+        }
+
+        // Delete-levels dialog (File > Levels > Delete Levels from ROM...).
+        if self.show_delete_levels_dialog {
+            self.delete_levels_window(ctx);
+        }
+        if self.delete_levels_pending.is_some() {
+            self.delete_levels_confirm_window(ctx);
         }
         // IPS export same-directory warning (LM v1.80).
         self.show_ips_export_warning_dialog(ctx, rom.as_ref());
@@ -745,6 +774,218 @@ impl UiMainWindow {
         log::info!("Batch-exported {exported} level PNGs to {}", out_dir.display());
     }
 
+    // ── Delete Levels from ROM (LM v3.50 parity) ───────────────────────
+
+    /// Open the Delete Levels dialog, refreshing the modified/critical
+    /// classifications against the ROM as currently opened.
+    fn open_delete_levels_dialog(&mut self, ctx: &Context) {
+        let count = LEVEL_COUNT as usize;
+        self.delete_levels_selected = vec![false; count];
+        self.delete_levels_modified = vec![false; count];
+        self.delete_levels_critical = vec![false; count];
+
+        // Modified flags: compare the current image (with tab edits) against
+        // the ROM-as-opened reference copy. Pointer relocation and in-place
+        // block edits both count as modified.
+        if let (Some(original), Ok(current)) = (self.restore_manager.original(), self.current_rom_image()) {
+            let header_offset = usize::from(current.len() % 0x400 == 0x200) * 0x200;
+            for level in 0..count {
+                self.delete_levels_modified[level] = level_modified_vs(&current, original, level as u16, header_offset);
+            }
+        }
+
+        // Gameplay-critical: the title/demo sequence levels plus every level
+        // placed as a tile on the overworld map (deleting one leaves the
+        // overworld tile loading the test level instead).
+        for &level in GAMEPLAY_CRITICAL_LEVELS {
+            self.delete_levels_critical[level as usize] = true;
+        }
+        let rom: Option<Arc<SmwRom>> = ctx.data(|d| d.get_temp(Project::rom_id()));
+        if let Some(rom) = rom {
+            let tiles = &rom.overworld.layer1_tiles;
+            for idx in 0..tiles.len() {
+                if let Some(level) = level_number_for_index(tiles, idx) {
+                    self.delete_levels_critical[level as usize] = true;
+                }
+            }
+        }
+
+        self.delete_levels_status = None;
+        self.delete_levels_pending = None;
+        self.show_delete_levels_dialog = true;
+    }
+
+    fn delete_levels_window(&mut self, ctx: &Context) {
+        let mut open = true;
+        let mut close_requested = false;
+        Window::new("Delete Levels from ROM")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Replaces each selected level's data with the vanilla test level\n\
+                     and erases the old data blocks, reclaiming them as free space.\n\
+                     A restore point is created first, and the ROM checksum is repaired.",
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Quick select:");
+                    if ui.button("All").clicked() {
+                        self.delete_levels_selected.fill(true);
+                    }
+                    if ui.button("Modified").clicked() {
+                        for i in 0..self.delete_levels_selected.len() {
+                            self.delete_levels_selected[i] = self.delete_levels_modified[i];
+                        }
+                    }
+                    if ui.button("Unmodified").clicked() {
+                        for i in 0..self.delete_levels_selected.len() {
+                            self.delete_levels_selected[i] = !self.delete_levels_modified[i];
+                        }
+                    }
+                    if ui.button("None").clicked() {
+                        self.delete_levels_selected.fill(false);
+                    }
+                });
+                let selected_count = self.delete_levels_selected.iter().filter(|&&s| s).count();
+                ui.label(format!("{selected_count} level(s) selected"));
+                ui.label(
+                    RichText::new("Yellow = modified since the ROM was opened · Red = gameplay-critical")
+                        .small()
+                        .italics(),
+                );
+                ui.separator();
+                ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                    Grid::new("delete_levels_grid").num_columns(8).spacing([8.0, 2.0]).show(ui, |ui| {
+                        for level in 0..LEVEL_COUNT as usize {
+                            let mut label = RichText::new(format!("{level:03X}")).monospace();
+                            if self.delete_levels_critical[level] {
+                                label = label.color(Color32::from_rgb(255, 120, 120));
+                            } else if self.delete_levels_modified[level] {
+                                label = label.color(Color32::from_rgb(255, 205, 90));
+                            }
+                            ui.checkbox(&mut self.delete_levels_selected[level], label);
+                            if level % 8 == 7 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                });
+                ui.separator();
+                let critical_selected: Vec<u16> = (0..LEVEL_COUNT)
+                    .filter(|&l| self.delete_levels_selected[l as usize] && self.delete_levels_critical[l as usize])
+                    .collect();
+                if !critical_selected.is_empty() {
+                    let shown: Vec<String> =
+                        critical_selected.iter().take(8).map(|l| format!("{l:03X}")).collect();
+                    let more = if critical_selected.len() > 8 { ", ..." } else { "" };
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ Deleting gameplay-critical level(s) {}{} can break the game\n(title/demo or overworld-placed levels).",
+                            shown.join(", "),
+                            more
+                        ))
+                        .color(Color32::from_rgb(255, 120, 120)),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            selected_count > 0,
+                            Button::new(format!("Delete {selected_count} level(s)")),
+                        )
+                        .clicked()
+                    {
+                        self.delete_levels_pending = Some(
+                            (0..LEVEL_COUNT)
+                                .filter(|&l| self.delete_levels_selected[l as usize])
+                                .collect(),
+                        );
+                    }
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                });
+                if let Some(status) = &self.delete_levels_status.clone() {
+                    ui.separator();
+                    ui.label(status);
+                }
+            });
+        if !open || close_requested {
+            self.show_delete_levels_dialog = false;
+            self.delete_levels_pending = None;
+        }
+    }
+
+    fn delete_levels_confirm_window(&mut self, ctx: &Context) {
+        let Some(levels) = self.delete_levels_pending.clone() else { return };
+        let mut confirmed = false;
+        let mut cancelled = false;
+        Window::new("Confirm Delete Levels").collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(format!("Delete {} level(s)?", levels.len()));
+            ui.label(
+                "Each level's Layer 1, sprite, and Layer 2 data is replaced with\n\
+                 the vanilla test level. The old data blocks are erased and\n\
+                 reclaimed as free space. A restore point is created first so\n\
+                 this can be undone.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+        });
+        if confirmed {
+            self.perform_delete_levels(ctx);
+        } else if cancelled {
+            self.delete_levels_pending = None;
+        }
+    }
+
+    fn perform_delete_levels(&mut self, ctx: &Context) {
+        let Some(levels) = self.delete_levels_pending.take() else { return };
+        let mut bytes = match self.current_rom_image() {
+            Ok(b) => b,
+            Err(e) => {
+                self.delete_levels_status = Some(format!("Could not read ROM image: {e:#}"));
+                return;
+            }
+        };
+        let header_offset = usize::from(bytes.len() % 0x400 == 0x200) * 0x200;
+        // A restore point first, so the deletion can always be undone.
+        self.restore_manager.create_point(format!("Before deleting {} level(s)", levels.len()), bytes.clone());
+        match delete_levels(&mut bytes, &levels, header_offset) {
+            Ok(report) => match self.install_rom_image(ctx, &bytes) {
+                Ok(()) => {
+                    log::info!(
+                        "Deleted {} level(s); reclaimed {} bytes in {} erased block(s)",
+                        report.deleted.len(),
+                        report.bytes_reclaimed,
+                        report.blocks_erased
+                    );
+                    self.delete_levels_status = Some(format!(
+                        "Deleted {} level(s); reclaimed {} bytes in {} erased block(s).",
+                        report.deleted.len(),
+                        report.bytes_reclaimed,
+                        report.blocks_erased
+                    ));
+                    self.show_delete_levels_dialog = false;
+                    self.delete_levels_selected.fill(false);
+                }
+                Err(e) => {
+                    self.delete_levels_status = Some(format!("Levels deleted, but ROM reload failed: {e:#}"));
+                }
+            },
+            Err(e) => {
+                self.delete_levels_status = Some(format!("Delete failed: {e}"));
+            }
+        }
+    }
+
     // ── Restore menu (LM v1.80 parity) ──────────────────────────────
 
     /// Full current ROM image: the file on disk with all unsaved tab edits
@@ -1085,6 +1326,11 @@ impl UiMainWindow {
                                 self.batch_include_sprites = true;
                                 self.batch_status = None;
                                 self.show_batch_export_dialog = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Delete Levels from ROM...").clicked() {
+                                self.open_delete_levels_dialog(ctx);
                                 ui.close_menu();
                             }
                         });
