@@ -397,14 +397,22 @@ impl UiLevelEditor {
                             let preview = self.sprite_preview_texture(ui.ctx(), id);
                             ui.horizontal(|ui| {
                                 let image = egui::ImageButton::new((preview.id(), vec2(32.0, 32.0))).selected(selected);
-                                if ui.add(image).clicked() {
+                                if ui.add(image).on_hover_text(super::sprite_catalog::sprite_tooltip(id)).clicked() {
                                     self.draw_sprite_id = id;
                                 }
                                 ui.vertical(|ui| {
-                                    if ui.selectable_label(selected, format!("{id:02X}")).clicked() {
+                                    if ui
+                                        .selectable_label(selected, format!("{id:02X}"))
+                                        .on_hover_text(super::sprite_catalog::sprite_tooltip(id))
+                                        .clicked()
+                                    {
                                         self.draw_sprite_id = id;
                                     }
-                                    if ui.small_button(super::sprite_catalog::sprite_name(id)).clicked() {
+                                    if ui
+                                        .small_button(super::sprite_catalog::sprite_name(id))
+                                        .on_hover_text(super::sprite_catalog::sprite_tooltip(id))
+                                        .clicked()
+                                    {
                                         self.draw_sprite_id = id;
                                     }
                                 });

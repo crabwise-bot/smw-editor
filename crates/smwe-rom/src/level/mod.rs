@@ -23,6 +23,7 @@ use crate::{
 };
 
 pub mod background;
+pub mod custom_palette;
 pub mod dimensions;
 pub mod headers;
 pub mod object_layer;

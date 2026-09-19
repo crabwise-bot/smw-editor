@@ -250,6 +250,20 @@ pub(super) fn sprite_variant_name(id: u8, extra_bits: u8) -> Option<&'static str
     }
 }
 
+/// Hover tooltip for a sprite picker entry: ID + name, plus the extra-bit
+/// variant names for sprites whose extra bits select distinct behaviors
+/// (Lunar Magic v3.30 parity: separate tooltips for sprites based on the
+/// lower bits of a single extension byte).
+pub(super) fn sprite_tooltip(id: u8) -> String {
+    let mut tip = format!("{id:02X} — {}", sprite_name(id));
+    for bits in 0..=3u8 {
+        if let Some(variant) = sprite_variant_name(id, bits) {
+            tip.push_str(&format!("\nExtra bits {bits}: {variant}"));
+        }
+    }
+    tip
+}
+
 pub(super) fn preview_sprite_tileset(id: u8) -> Option<u8> {
     match id {
         // Forest sprite tileset ($00,$01,$13,$02): SP3=13 / SP4=02 family.
@@ -281,7 +295,7 @@ pub(super) fn preview_sprite_tileset(id: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_sprite_tileset, sprite_matches_search, sprite_name, sprite_variant_name};
+    use super::{preview_sprite_tileset, sprite_matches_search, sprite_name, sprite_tooltip, sprite_variant_name};
 
     #[test]
     fn names_cover_common_sprites() {
@@ -303,6 +317,17 @@ mod tests {
         assert!(sprite_matches_search(0x7B, "secret exit"));
         assert!(sprite_matches_search(0x7B, "secret exit 3"));
         assert!(!sprite_matches_search(0x0F, "secret exit"));
+    }
+
+    #[test]
+    fn sprite_tooltip_lists_extra_bit_variants() {
+        // Lunar Magic v3.30: separate tooltips per extension-byte bits.
+        let tip = sprite_tooltip(0x7B);
+        assert!(tip.contains("Goal Point"), "base name: {tip}");
+        assert!(tip.contains("Extra bits 2: Goal Point (Secret Exit 2)"), "variant 2: {tip}");
+        assert!(tip.contains("Extra bits 3: Goal Point (Secret Exit 3)"), "variant 3: {tip}");
+        let plain = sprite_tooltip(0x0F);
+        assert_eq!(plain, "0F — Goomba");
     }
 
     #[test]

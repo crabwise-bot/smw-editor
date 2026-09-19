@@ -250,13 +250,32 @@ pub struct UiLevelEditor {
     // Palette editor (12 ABGR1555 colors per group, stored as raw u16).
     // Undoable so Ctrl+Z / Ctrl+Y and the Undo/Redo buttons work like
     // Lunar Magic v1.80's palette editors.
-    palettes:               UndoableData<palette_editor::EditablePalettes>,
-    palette_dirty:          bool,
-    selected_palette_group: u8,
-    selected_palette_idx:   usize,
+    palettes:                   UndoableData<palette_editor::EditablePalettes>,
+    palette_dirty:              bool,
+    selected_palette_group:     u8,
+    selected_palette_idx:       usize,
     // Pre-drag snapshot for gesture-style color edits (see
     // palette_editor_window); one undo step is committed per drag.
-    palette_gesture_before: Option<palette_editor::EditablePalettes>,
+    palette_gesture_before:     Option<palette_editor::EditablePalettes>,
+    // Hex RGB entry field state (Lunar Magic v3.50 parity: "a way to enter
+    // RGB colors in hex format"). While the field is unfocused it is synced
+    // to the selected swatch's current color; Enter/Apply parses `RRGGBB`
+    // (optional leading `#`) as one undo step.
+    palette_hex_input:          String,
+    palette_hex_invalid:        bool,
+    // Per-level custom palette (Lunar Magic v3.30 "Auto-Enable custom
+    // palette on edit" parity): local mutable copy of the editor-owned
+    // RATS block. `custom_palette_enabled` tells whether the current level
+    // edits its own private palette instead of the shared palette tables;
+    // the level's entry is synced from `palettes` at save time, so undo /
+    // redo and in-flight color drags stay consistent automatically.
+    custom_palettes:            smwe_rom::level::custom_palette::CustomPaletteData,
+    custom_palette_dirty:       bool,
+    custom_palette_enabled:     bool,
+    // Lunar Magic v3.30 "Auto-Enable custom palette on edit": when set,
+    // the first palette edit of the session enables the custom palette
+    // automatically instead of editing the shared tables.
+    auto_enable_custom_palette: bool,
 
     // Map16 editor. Undoable so Ctrl+Z / Ctrl+Y work like Lunar Magic
     // v1.91's Map16 editor. Serialized sorted-by-key, so undo deltas are
@@ -562,6 +581,7 @@ impl UiLevelEditor {
         // Clone before `rom` moves into the struct literal below.
         let exgfx_data = rom.exgfx.clone();
         let bypass_data = rom.gfx_bypass.clone();
+        let custom_palettes = rom.custom_palettes.clone();
 
         let mut editor = Self {
             gl,
@@ -652,6 +672,12 @@ impl UiLevelEditor {
             selected_palette_group: 3, // none
             selected_palette_idx: 0,
             palette_gesture_before: None,
+            palette_hex_input: String::new(),
+            palette_hex_invalid: false,
+            custom_palettes,
+            custom_palette_dirty: false,
+            custom_palette_enabled: false,
+            auto_enable_custom_palette: true,
             map16_edits: UndoableData::new(map16_editor::EditableMap16Edits::default()),
             map16_acts_edits: HashMap::new(),
             map16_gesture_before: None,
@@ -1426,23 +1452,69 @@ impl DockableEditorTool for UiLevelEditor {
         }
 
         // ── Palette tables ────────────────────────────────────────────────────
-        if self.palette_dirty {
-            let p = &self.level_properties;
-            let write_palette = |rom_bytes: &mut [u8], snes_addr: u32, colors: &[u16; 12]| -> anyhow::Result<()> {
-                let pc = AddrPc::try_from_lorom(AddrSnes(snes_addr))?.as_index() + header_offset;
-                for (i, &c) in colors.iter().enumerate() {
-                    let off = pc + i * 2;
-                    if off + 1 < rom_bytes.len() {
-                        rom_bytes[off] = (c & 0xFF) as u8;
-                        rom_bytes[off + 1] = (c >> 8) as u8;
-                    }
-                }
-                Ok(())
+        // ── Palette data ──────────────────────────────────────────────────────
+        // Custom-palette mode (Lunar Magic v3.30 "Enable Custom Palette"):
+        // the level's colors live in the editor-owned RATS block and the
+        // shared tables are left alone. Otherwise the colors go to the
+        // shared tables, the vanilla behavior. `save_to_rom` is `&self`,
+        // so the working copy is synced at edit time (see
+        // `sync_custom_palette_entry`); the save only merges it into the
+        // on-disk block.
+        if self.palette_dirty || self.custom_palette_dirty {
+            use smwe_rom::level::custom_palette::{CustomPalette, CustomPaletteData, CustomPaletteError};
+            // Merge on save: re-read the block and replace only this level's
+            // entry, so another tab's saved custom palette for a different
+            // level is never clobbered.
+            let mut merged = match CustomPaletteData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(CustomPaletteError::NotFound) => CustomPaletteData::default(),
+                Err(e) => anyhow::bail!("Custom-palette read failed: {e}"),
             };
-            let (bg, fg, sprite) = self.palettes.read(|pal| (pal.bg, pal.fg, pal.sprite));
-            write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &bg)?;
-            write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &fg)?;
-            write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &sprite)?;
+            if self.custom_palette_enabled {
+                // The entry is synced at edit time; fall back to the live
+                // palette state if it is somehow missing.
+                let entry = match self.custom_palettes.get(self.level_num) {
+                    Some(e) => e.clone(),
+                    None => {
+                        let (bg, fg, sprite) = self.palettes.read(|pal| (pal.bg, pal.fg, pal.sprite));
+                        CustomPalette { bg, fg, sprite }
+                    }
+                };
+                merged.set(self.level_num, entry);
+                merged
+                    .write_to_rom(rom_bytes, header_offset)
+                    .map_err(|e| anyhow::anyhow!("Custom-palette write failed: {e}"))?;
+            } else {
+                // Leaving custom mode: erase any on-disk entry for this
+                // level, so a stale entry can't silently re-enable the
+                // custom palette the next time the level loads. Only when
+                // the mode actually changed (`custom_palette_dirty`).
+                if self.custom_palette_dirty && merged.get(self.level_num).is_some() {
+                    merged.clear(self.level_num);
+                    merged
+                        .write_to_rom(rom_bytes, header_offset)
+                        .map_err(|e| anyhow::anyhow!("Custom-palette erase failed: {e}"))?;
+                }
+                if self.palette_dirty {
+                    let p = &self.level_properties;
+                    let write_palette =
+                        |rom_bytes: &mut [u8], snes_addr: u32, colors: &[u16; 12]| -> anyhow::Result<()> {
+                            let pc = AddrPc::try_from_lorom(AddrSnes(snes_addr))?.as_index() + header_offset;
+                            for (i, &c) in colors.iter().enumerate() {
+                                let off = pc + i * 2;
+                                if off + 1 < rom_bytes.len() {
+                                    rom_bytes[off] = (c & 0xFF) as u8;
+                                    rom_bytes[off + 1] = (c >> 8) as u8;
+                                }
+                            }
+                            Ok(())
+                        };
+                    let (bg, fg, sprite) = self.palettes.read(|pal| (pal.bg, pal.fg, pal.sprite));
+                    write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &bg)?;
+                    write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &fg)?;
+                    write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &sprite)?;
+                }
+            }
         }
 
         // ── Map16 block edits ─────────────────────────────────────────────────
@@ -1594,6 +1666,7 @@ impl DockableEditorTool for UiLevelEditor {
     fn on_save_succeeded(&mut self) {
         self.has_edits = false;
         self.palette_dirty = false;
+        self.custom_palette_dirty = false;
         self.title_credits_dirty = false;
         self.exanimation_dirty = false;
         self.secondary_exit_ext_dirty = false;
@@ -1908,11 +1981,28 @@ impl UiLevelEditor {
                 }
                 colors
             };
-            self.palettes = UndoableData::new(palette_editor::EditablePalettes {
+            // Session-authoritative custom palettes (synced from the ROM at
+            // construction and kept current at save time, like the other
+            // editor-owned RATS working copies): a level with an entry edits
+            // its own private palette instead of the shared tables (Lunar
+            // Magic v3.30 "Enable Custom Palette"). `self.rom` is NOT
+            // re-read here — it is not refreshed after a save, so re-reading
+            // the stale parse would revert an already-saved change on the
+            // next level switch.
+            self.custom_palette_enabled = self.custom_palettes.get(self.level_num).is_some();
+            self.custom_palette_dirty = false;
+            let shared = palette_editor::EditablePalettes {
                 bg:     read_palette(0x00B0B0 + p.palette_bg() as u32 * 0x18),
                 fg:     read_palette(0x00B190 + p.palette_fg() as u32 * 0x18),
                 sprite: read_palette(0x00B318 + p.palette_sprite() as u32 * 0x18),
-            });
+            };
+            let editable = match self.custom_palettes.get(self.level_num) {
+                Some(custom) => {
+                    palette_editor::EditablePalettes { bg: custom.bg, fg: custom.fg, sprite: custom.sprite }
+                }
+                None => shared,
+            };
+            self.palettes = UndoableData::new(editable);
             self.palette_dirty = false;
             self.palette_gesture_before = None;
         }
