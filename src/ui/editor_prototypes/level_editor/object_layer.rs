@@ -628,9 +628,12 @@ mod dm16_tests {
         assert_eq!(bytes.len(), layer.size_bytes());
         let back = EditableDirectMap16::from_bytes(bytes);
         assert_eq!(back, layer);
-        // Pattern repetition on the decoded object.
-        assert_eq!(back.objects[0].tile_at(2, 0), 0x25);
-        assert_eq!(back.objects[0].tile_at(3, 2), 0x26);
+        // Pattern repetition on the decoded object (pattern is 2x2, so
+        // local coords wrap into it).
+        assert_eq!(back.objects[0].tile_at(1, 0), 0x26);
+        assert_eq!(back.objects[0].tile_at(1, 1), 0x2C);
+        assert_eq!(back.objects[0].tile_at(3, 0), 0x26); // x wraps: 3 -> 1
+        assert_eq!(back.objects[0].tile_at(2, 3), 0x2B); // wraps to (0, 1)
     }
 
     #[test]
