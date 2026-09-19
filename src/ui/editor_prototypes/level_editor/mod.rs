@@ -483,6 +483,15 @@ pub struct UiLevelEditor {
     title_credits_dirty:       bool,
     show_title_credits_editor: bool,
     credits_editor_selected:   usize,
+    // Credits WYSIWYG editor: per-scene L3 text grid, preserved non-L3
+    // commands, and render cache. The grid is 64x64 but only rows
+    // CREDITS_L3_FIRST_ROW..=CREDITS_L3_LAST_ROW are editable.
+    credits_grid:              Option<smwe_rom::title_stripe::TitleTileGrid>,
+    credits_non_l3:            Vec<smwe_rom::title_stripe::TitleStripeCommand>,
+    credits_grid_tex:          Option<egui::TextureHandle>,
+    credits_grid_for_scene:    Option<usize>,
+    credits_grid_error:        Option<String>,
+    credits_gfx2f_tiles:       Option<Vec<smwe_rom::graphics::gfx_file::Tile>>,
     // Title screen WYSIWYG stripe editor: parsed 64x64 tile grid, its
     // rendered preview, and the VRAM/CGRAM snapshots the preview is drawn
     // from (captured from a scratch CPU running the real title init).
@@ -494,6 +503,12 @@ pub struct UiLevelEditor {
     title_selected_cell:       Option<(usize, usize)>,
     title_paint_word:          u16,
     title_grid_error:          Option<String>,
+    // Player-select menu stripe (composited over the logo grid). The menu
+    // owns rows MENU_FIRST_ROW..=MENU_LAST_ROW; its RLE clear commands are
+    // preserved verbatim and not editable.
+    menu_grid:                 Option<smwe_rom::title_stripe::TitleTileGrid>,
+    menu_clears:               Vec<smwe_rom::title_stripe::TitleStripeCommand>,
+    menu_grid_for_stripe_len:  Option<usize>,
 
     // Lunar Magic `.mwl` level import/export.
     rom_path:   PathBuf,
@@ -749,6 +764,12 @@ impl UiLevelEditor {
             title_credits_dirty: false,
             show_title_credits_editor: false,
             credits_editor_selected: 0,
+            credits_grid: None,
+            credits_non_l3: Vec::new(),
+            credits_grid_tex: None,
+            credits_grid_for_scene: None,
+            credits_grid_error: None,
+            credits_gfx2f_tiles: None,
             title_grid: None,
             title_grid_tex: None,
             title_grid_vram: None,
@@ -757,6 +778,9 @@ impl UiLevelEditor {
             title_selected_cell: None,
             title_paint_word: 0x2C58,
             title_grid_error: None,
+            menu_grid: None,
+            menu_clears: Vec::new(),
+            menu_grid_for_stripe_len: None,
             rom_path: rom_path.clone(),
             mwl_status: None,
             map16_file_status: None,
@@ -1315,6 +1339,17 @@ impl DockableEditorTool for UiLevelEditor {
                 .fill(0xFF);
             rom_bytes[title_stripe_pc..title_stripe_pc + self.title_credits.title_screen_stripe.len()]
                 .copy_from_slice(&self.title_credits.title_screen_stripe);
+
+            self.title_credits.validate_player_select_stripe()?;
+            let menu_stripe_pc =
+                AddrPc::try_from_lorom(smwe_rom::title_credits::PLAYER_SELECT_STRIPE_SNES)?.as_index() + header_offset;
+            let menu_stripe_end = menu_stripe_pc + smwe_rom::title_credits::PLAYER_SELECT_STRIPE_MAX_SIZE;
+            rom_bytes
+                .get_mut(menu_stripe_pc..menu_stripe_end)
+                .ok_or_else(|| anyhow::anyhow!("Player select stripe image out of range"))?
+                .fill(0xFF);
+            rom_bytes[menu_stripe_pc..menu_stripe_pc + self.title_credits.player_select_stripe.len()]
+                .copy_from_slice(&self.title_credits.player_select_stripe);
 
             for (i, stripe) in self.title_credits.enemy_name_stripes.iter().enumerate() {
                 let slot_size = smwe_rom::title_credits::TitleCreditsData::enemy_name_slot_size(i);
