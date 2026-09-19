@@ -3,6 +3,7 @@ mod bg_tilemap_editor;
 mod boss_text_editor;
 mod central_panel;
 mod custom_tooltips_ui;
+mod dm16_editor;
 mod edit_manual_dialog;
 mod editing;
 mod exgfx_manager;
@@ -55,8 +56,9 @@ use smwe_rom::{
 
 use self::{
     background_layer::EditableBackgroundLayer,
+    dm16_editor::Dm16Placement,
     level_renderer::LevelRenderer,
-    object_layer::EditableObjectLayer,
+    object_layer::{EditableDirectMap16, EditableObjectLayer},
     properties::LevelProperties,
     sprite_layer::EditableSpriteLayer,
     tile_picker::{BgTilePicker, TilePicker},
@@ -418,6 +420,42 @@ pub struct UiLevelEditor {
     /// Clean post-load VRAM snapshot the tile browser decodes from.
     exanimation_base_vram: Vec<u8>,
 
+    // Direct Map16 (Lunar Magic v1.70-v1.90 "Add Objects / Direct Map16"
+    // parity): per-level objects, undoable, stamped into the WRAM block map
+    // on load and after every edit. Distinct from vanilla objects — saved
+    // to the editor-native RATS block, never the object stream.
+    direct_map16:          UndoableData<EditableDirectMap16>,
+    dm16_dirty:            bool,
+    /// Vanilla (DM16-free) layer-1 block map snapshot: `dm16_base_lo/hi[i]`
+    /// mirror the WRAM bytes at 0x7EC800/0x7FC800 taken right after level
+    /// decompression, kept in sync with every vanilla `set_block_id_at`
+    /// write. `rerasterize_dm16` restores from it, so vanilla tiles hidden
+    /// under DM16 objects are never lost on DM16 edit/undo/redo/delete.
+    dm16_base_lo:          Vec<u8>,
+    dm16_base_hi:          Vec<u8>,
+    selected_dm16_indices: HashSet<usize>,
+    /// Redo routing: true when the last undo targeted the DM16 layer (any
+    /// selection change or edit elsewhere disarms it).
+    last_undo_was_dm16:    bool,
+    /// "Add Objects / Direct Map16" window visibility.
+    dm16_add_open:         bool,
+    /// Selected rectangle in the Map16 picker: (block_x, block_y, w, h).
+    dm16_selection:        Option<(u32, u32, u32, u32)>,
+    /// In-progress drag on the Add Objects Map16 grid (start block).
+    dm16_sel_drag_start:   Option<(u32, u32)>,
+    /// Armed placement: next canvas click drops this pattern as one object.
+    dm16_placing:          Option<Dm16Placement>,
+    /// Conditional Direct Map16 dialog: index of the object being edited.
+    dm16_cond_open:        Option<usize>,
+    /// Conditional dialog fields: RAM address + bit (8 = nonzero byte).
+    dm16_cond_addr:        u32,
+    dm16_cond_bit:         i32,
+    /// Remap Direct Map16 dialog visibility + rows of (old, new) tile IDs.
+    dm16_remap_open:       bool,
+    dm16_remap_rows:       Vec<(u32, u32)>,
+    /// Status line for Direct Map16 actions (surfaced via the MWL status line).
+    dm16_status:           Option<String>,
+
     // Title screen / ending credits fixed-location data.
     title_credits:             smwe_rom::title_credits::TitleCreditsData,
     title_credits_dirty:       bool,
@@ -654,6 +692,22 @@ impl UiLevelEditor {
                 crate::ui::exanimation_dialog::ExAnimList::Level,
             ),
             exanimation_base_vram: Vec::new(),
+            direct_map16: UndoableData::new(EditableDirectMap16::default()),
+            dm16_dirty: false,
+            dm16_base_lo: Vec::new(),
+            dm16_base_hi: Vec::new(),
+            selected_dm16_indices: HashSet::new(),
+            last_undo_was_dm16: false,
+            dm16_add_open: false,
+            dm16_selection: None,
+            dm16_sel_drag_start: None,
+            dm16_placing: None,
+            dm16_cond_open: None,
+            dm16_cond_addr: 0x13CE,
+            dm16_cond_bit: 0,
+            dm16_remap_open: false,
+            dm16_remap_rows: Vec::new(),
+            dm16_status: None,
             title_credits,
             title_credits_dirty: false,
             show_title_credits_editor: false,
@@ -693,6 +747,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.palette_editor_window(&ctx);
         self.map16_editor_window(&ctx);
         self.map16_remap_window(&ctx);
+        self.dm16_windows(ui);
         self.sprite_tweaker_editor_window(&ctx);
         self.sprite_header_editor_window(&ctx);
         self.gfx_editor_window(&ctx);
@@ -1345,6 +1400,29 @@ impl DockableEditorTool for UiLevelEditor {
                 .map_err(|e| anyhow::anyhow!("act-as table: {e}"))?;
         }
 
+        // ── Direct Map16 objects ────────────────────────────────────────────
+        // Single RATS-tagged free-space block (`SMWDM161`); erased and
+        // reallocated on every save that touched the DM16 objects. Only this
+        // level's entry is replaced — other levels' objects are preserved.
+        if self.dm16_dirty {
+            use smwe_rom::direct_map16::{DirectMap16Data, Dm16Error};
+            let mut merged = match DirectMap16Data::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(Dm16Error::NotFound) => DirectMap16Data::default(),
+                Err(e) => anyhow::bail!("Direct Map16 read failed: {e}"),
+            };
+            let objects: Vec<smwe_rom::direct_map16::DirectMap16Object> =
+                self.direct_map16.read(|d| d.objects.iter().map(|o| o.to_rom_obj()).collect());
+            if objects.is_empty() {
+                merged.levels.remove(&self.level_num);
+            } else {
+                merged.levels.insert(self.level_num, objects);
+            }
+            merged
+                .write_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Direct Map16 write failed: {e}"))?;
+        }
+
         Ok(())
     }
 
@@ -1363,6 +1441,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.exanimation_dirty = false;
         self.secondary_exit_ext_dirty = false;
         self.sprite_header_dirty = false;
+        self.dm16_dirty = false;
         let (spawn_x, spawn_y) = self.spawn_pos();
         self.initial_spawn_x = spawn_x;
         self.initial_spawn_y = spawn_y;
@@ -1380,6 +1459,48 @@ fn read_u24(rom_bytes: &[u8], file_off: usize) -> Option<u32> {
 }
 
 // Internals
+
+/// Pure WRAM block-map index math shared by [`UiLevelEditor::block_map_index`]
+/// and the Direct Map16 stamp path. `vertical` selects the level orientation;
+/// `edit_layer`/`has_layer2` reproduce the layer-2-background wrap. Kept as a
+/// free function so the horizontal/vertical mapping is unit-testable without
+/// a UI context.
+fn block_map_index_math(block_x: u32, block_y: u32, vertical: bool, edit_layer: u8, has_layer2: bool) -> u32 {
+    let scr_size: u32 = if vertical { 16 * 32 } else { 16 * 27 };
+
+    // Convert block coords to pixel coords matching load_layer's format:
+    //   block_x_pixels = column * 16 + screen * 256
+    //   block_y_pixels = row * 16  (+ screen offset for vertical)
+    // The "screen column" used by load_layer is block_x_pixels / 16.
+    let block_x_px = block_x * 16;
+    let block_y_px = block_y * 16;
+
+    let (screen, sidx) = if vertical {
+        let sub_y = block_y_px / 512;
+        let sub_x = block_x_px / 256;
+        let screen = sub_y * 2 + sub_x;
+        let col = (block_x_px / 16) % 16;
+        let row = (block_y_px / 16) % 32;
+        (screen, row * 16 + col)
+    } else {
+        // Each horizontal screen is 16 tiles wide (256 px / 16 px per tile).
+        // load_layer indexes as: idx = screen * (16 * 27) + row * 16 + col
+        //   where block_x = col + screen * 16,  block_y = row
+        let screen = block_x / 16;
+        let col = block_x % 16;
+        let row = block_y;
+        let sidx = row * 16 + col;
+        (screen, sidx)
+    };
+
+    let idx = screen * scr_size + sidx;
+    if edit_layer == 2 && !has_layer2 {
+        idx % (16 * 27 * 2)
+    } else {
+        idx
+    }
+}
+
 impl UiLevelEditor {
     fn layer3_settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_layer3_settings {
@@ -1452,6 +1573,8 @@ impl UiLevelEditor {
             self.level_properties = LevelProperties::from_level(level);
             let layer1 = EditableObjectLayer::from_level(level);
             self.layer1 = UndoableData::new(layer1);
+            self.direct_map16 =
+                UndoableData::new(EditableDirectMap16::from_rom_data(&self.rom.direct_map16, self.level_num));
             self.sprites = UndoableData::new(EditableSpriteLayer::from_level(level));
             // Sprite header dialog working copy: the 1-byte vanilla header.
             // Prefer the session-authoritative edit map: `self.rom` is not
@@ -1507,6 +1630,15 @@ impl UiLevelEditor {
         self.selected_tile = None;
         self.selected_object_indices.clear();
         self.selected_sprite_indices.clear();
+        self.selected_dm16_indices.clear();
+        self.last_undo_was_dm16 = false;
+        self.dm16_placing = None;
+        self.dm16_cond_open = None;
+        self.dm16_remap_open = false;
+        self.dm16_selection = None;
+        self.dm16_sel_drag_start = None;
+        self.dm16_status = None;
+        self.dm16_dirty = false;
         self.sprite_preview_textures.clear();
         self.sprite_oam_cache.clear();
 
@@ -1529,6 +1661,15 @@ impl UiLevelEditor {
         // (bit-exact); ExGFX files are memcpied. Everything downstream
         // (renderer upload, tile picker rebuild) then sees the bypassed GFX.
         self.apply_bypass_to_vram();
+
+        // Snapshot the vanilla layer-1 block map before any DM16 stamping,
+        // so rerasterization can always restore tiles hidden under DM16.
+        self.dm16_snapshot_base();
+
+        // Stamp Direct Map16 objects into the WRAM block map (the vanilla
+        // game would render them via the Direct Map16 ASM; the editor
+        // reproduces that rendering itself).
+        self.stamp_dm16_tiles();
 
         // Snapshot clean VRAM for the ExAnimation tile browser (it decodes
         // source tiles from the pre-animation graphics), and restart the
@@ -1737,45 +1878,29 @@ impl UiLevelEditor {
     /// Compute the WRAM block map index from block (tile) coordinates.
     /// Must produce the same index as `load_layer`'s reverse mapping.
     fn block_map_index(&self, block_x: u32, block_y: u32) -> u32 {
-        let vertical = self.level_properties.is_vertical;
-        let scr_size = if vertical { 16 * 32 } else { 16 * 27 };
+        self.block_map_index_for_layer(block_x, block_y, self.edit_layer)
+    }
 
-        // Convert block coords to pixel coords matching load_layer's format:
-        //   block_x_pixels = column * 16 + screen * 256
-        //   block_y_pixels = row * 16  (+ screen offset for vertical)
-        // The "screen column" used by load_layer is block_x_pixels / 16.
-        let block_x_px = block_x * 16;
-        let block_y_px = block_y * 16;
-
-        let (screen, sidx) = if vertical {
-            let sub_y = block_y_px / 512;
-            let sub_x = block_x_px / 256;
-            let screen = sub_y * 2 + sub_x;
-            let col = (block_x_px / 16) % 16;
-            let row = (block_y_px / 16) % 32;
-            (screen, row * 16 + col)
-        } else {
-            // Each horizontal screen is 16 tiles wide (256 px / 16 px per tile).
-            // load_layer indexes as: idx = screen * (16 * 27) + row * 16 + col
-            //   where block_x = col + screen * 16,  block_y = row
-            let screen = block_x / 16;
-            let col = block_x % 16;
-            let row = block_y;
-            let sidx = row * 16 + col;
-            (screen, sidx)
-        };
-
-        let idx = screen * scr_size as u32 + sidx;
-        if self.edit_layer == 2 && !self.level_properties.has_layer2 {
-            idx % (16 * 27 * 2)
-        } else {
-            idx
-        }
+    /// Layer-explicit variant of [`Self::block_map_index`]. Direct Map16
+    /// stamping always targets layer 1, regardless of the editing layer.
+    fn block_map_index_for_layer(&self, block_x: u32, block_y: u32, edit_layer: u8) -> u32 {
+        block_map_index_math(
+            block_x,
+            block_y,
+            self.level_properties.is_vertical,
+            edit_layer,
+            self.level_properties.has_layer2,
+        )
     }
 
     /// Get the WRAM base addresses for the currently edited layer.
     fn block_map_base(&self) -> (u32, u32) {
-        if self.edit_layer == 2 {
+        self.block_map_base_for_layer(self.edit_layer)
+    }
+
+    /// Layer-explicit variant of [`Self::block_map_base`].
+    fn block_map_base_for_layer(&self, edit_layer: u8) -> (u32, u32) {
+        if edit_layer == 2 {
             if self.level_properties.has_layer2 {
                 let vertical = self.level_properties.is_vertical;
                 let scr_len: u32 = if vertical { 0x0E } else { 0x10 };
@@ -1791,11 +1916,89 @@ impl UiLevelEditor {
     }
 
     /// Write a block ID at the given block coordinates into the WRAM block map.
+    ///
+    /// Vanilla (non-DM16) writes to layer 1 are mirrored into the DM16-free
+    /// base snapshot (`dm16_base_lo/hi`), so [`Self::rerasterize_dm16`] can
+    /// restore vanilla tiles hidden under Direct Map16 objects.
     fn set_block_id_at(&mut self, block_x: u32, block_y: u32, block_id: u16) {
         let idx = self.block_map_index(block_x, block_y);
         let (lo_base, hi_base) = self.block_map_base();
         self.cpu.mem.store_u8(lo_base + idx, (block_id & 0xFF) as u8);
         self.cpu.mem.store_u8(hi_base + idx, ((block_id >> 8) & 0x01) as u8);
+        if self.edit_layer != 2 {
+            let i = idx as usize;
+            if i < self.dm16_base_lo.len() && i < self.dm16_base_hi.len() {
+                self.dm16_base_lo[i] = (block_id & 0xFF) as u8;
+                self.dm16_base_hi[i] = ((block_id >> 8) & 0x01) as u8;
+            }
+            // A vanilla edit under a Direct Map16 object updates the base
+            // tile (revealed if the object is later deleted) but must not
+            // punch a hole in the overlay: re-stamp the topmost covering
+            // DM16 object at this cell so it stays visually on top.
+            let stamp = self.direct_map16.read(|d| {
+                d.objects.iter().rev().find_map(|o| {
+                    (block_x >= o.x && block_x < o.x + o.w && block_y >= o.y && block_y < o.y + o.h)
+                        .then(|| o.tile_at(block_x - o.x, block_y - o.y))
+                })
+            });
+            if let Some(tile) = stamp {
+                self.dm16_stamp_at(block_x, block_y, tile);
+            }
+        }
+    }
+
+    /// Layer-1 block write for Direct Map16 stamping. Bypasses the DM16-free
+    /// base snapshot: the snapshot is, by definition, the map without DM16
+    /// stamps, and [`Self::rerasterize_dm16`] re-applies them afterwards.
+    fn dm16_stamp_at(&mut self, block_x: u32, block_y: u32, block_id: u16) {
+        let idx = self.block_map_index_for_layer(block_x, block_y, 1);
+        let (lo_base, hi_base) = self.block_map_base_for_layer(1);
+        self.cpu.mem.store_u8(lo_base + idx, (block_id & 0xFF) as u8);
+        self.cpu.mem.store_u8(hi_base + idx, ((block_id >> 8) & 0x01) as u8);
+    }
+
+    /// Layer-1 block read for Direct Map16 hit-testing (flood fill).
+    fn dm16_block_id_at(&mut self, block_x: u32, block_y: u32) -> Option<u16> {
+        let idx = self.block_map_index_for_layer(block_x, block_y, 1);
+        let (lo_base, hi_base) = self.block_map_base_for_layer(1);
+        Some(self.cpu.mem.load_u8(lo_base + idx) as u16 | (((self.cpu.mem.load_u8(hi_base + idx) as u16) & 0x01) << 8))
+    }
+
+    /// Snapshot the vanilla (DM16-free) layer-1 block map. Called from
+    /// `load_level` after decompression, before any DM16 stamping.
+    fn dm16_snapshot_base(&mut self) {
+        let vertical = self.level_properties.is_vertical;
+        let has_l2 = self.level_properties.has_layer2;
+        let scr_len: u32 = match (vertical, has_l2) {
+            (false, false) => 0x20,
+            (true, false) => 0x1C,
+            (false, true) => 0x10,
+            (true, true) => 0x0E,
+        };
+        let scr_size: u32 = if vertical { 16 * 32 } else { 16 * 27 };
+        let len = (scr_len * scr_size) as usize;
+        let (lo_base, hi_base) = self.block_map_base_for_layer(1);
+        self.dm16_base_lo = (0..len).map(|i| self.cpu.mem.load_u8(lo_base + i as u32)).collect();
+        self.dm16_base_hi = (0..len).map(|i| self.cpu.mem.load_u8(hi_base + i as u32)).collect();
+    }
+
+    /// Restore the vanilla layer-1 block map, re-stamp every Direct Map16
+    /// object in order, and re-render. The single choke point after any
+    /// DM16 model change (place / edit / delete / remap / fill / undo /
+    /// redo): vanilla tiles hidden under DM16 objects are restored instead
+    /// of being blanked to 0x25.
+    pub(super) fn rerasterize_dm16(&mut self) {
+        if !self.dm16_base_lo.is_empty() && self.dm16_base_lo.len() == self.dm16_base_hi.len() {
+            let (lo_base, hi_base) = self.block_map_base_for_layer(1);
+            for (i, b) in self.dm16_base_lo.iter().enumerate() {
+                self.cpu.mem.store_u8(lo_base + i as u32, *b);
+            }
+            for (i, b) in self.dm16_base_hi.iter().enumerate() {
+                self.cpu.mem.store_u8(hi_base + i as u32, *b);
+            }
+        }
+        self.stamp_dm16_tiles();
+        self.rebuild_tiles();
     }
 
     /// Re-render the GL tiles from the current WRAM block map.
@@ -1983,5 +2186,56 @@ mod tests {
         assert_eq!((q.x, q.y), (0, 0));
         let q = SpawnPos::from_bytes(vec![9; 7]);
         assert_eq!((q.x, q.y), (0x0909_0909, 0));
+    }
+}
+
+#[cfg(test)]
+mod block_map_tests {
+    use super::block_map_index_math;
+
+    #[test]
+    fn horizontal_index_math() {
+        // idx = screen * (16*27) + row * 16 + col; block_x = col + screen*16.
+        let h = |x, y| block_map_index_math(x, y, false, 1, false);
+        assert_eq!(h(0, 0), 0);
+        assert_eq!(h(15, 0), 15);
+        assert_eq!(h(0, 26), 26 * 16);
+        assert_eq!(h(15, 26), 26 * 16 + 15);
+        assert_eq!(h(16, 0), 16 * 27);
+        assert_eq!(h(16, 26), 16 * 27 + 26 * 16);
+        assert_eq!(h(31, 13), 16 * 27 + 13 * 16 + 15);
+    }
+
+    #[test]
+    fn vertical_index_math() {
+        // Vertical screens are 16x32; screen = sub_y * 2 + sub_x with
+        // 256px-wide / 512px-tall subscreens.
+        let v = |x, y| block_map_index_math(x, y, true, 1, false);
+        assert_eq!(v(0, 0), 0);
+        assert_eq!(v(15, 0), 15);
+        assert_eq!(v(0, 31), 31 * 16);
+        assert_eq!(v(16, 0), 16 * 32); // second subscreen column
+        assert_eq!(v(0, 32), 2 * 16 * 32); // second subscreen row
+        assert_eq!(v(16, 32), 3 * 16 * 32);
+        assert_eq!(v(31, 63), 3 * 16 * 32 + 31 * 16 + 15);
+    }
+
+    #[test]
+    fn layer2_background_wrap() {
+        // edit_layer == 2 without Layer 2 wraps into the 2-screen BG map.
+        let wrap = |x, y| block_map_index_math(x, y, false, 2, false);
+        assert_eq!(wrap(0, 0), 0);
+        assert_eq!(wrap(32, 0), (2 * 16 * 27) % (16 * 27 * 2));
+        // Layer 1 is unaffected by the wrap.
+        assert_eq!(block_map_index_math(32, 0, false, 1, false), 2 * 16 * 27);
+    }
+
+    #[test]
+    fn dm16_layer_is_always_layer1() {
+        // The Direct Map16 stamp path forces layer 1: same index as an
+        // explicit layer-1 write, never the layer-2 wrap.
+        for &(x, y) in &[(0, 0), (15, 26), (48, 13)] {
+            assert_eq!(block_map_index_math(x, y, false, 1, false), block_map_index_math(x, y, false, 1, true));
+        }
     }
 }

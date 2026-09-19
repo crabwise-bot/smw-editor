@@ -537,6 +537,19 @@ impl UiLevelEditor {
             }
         }
 
+        // ── Direct Map16 overlay (purple; cyan when selected) ──
+        self.dm16_overlay(&painter, origin, tile_sz);
+        if self.dm16_placing.is_some() {
+            if let Some(cursor) = resp.hover_pos() {
+                let rel = (cursor - origin) / tile_sz;
+                let tx = rel.x.floor() as i32;
+                let ty = rel.y.floor() as i32;
+                if tx >= 0 && ty >= 0 && (tx as u32) < level_w && (ty as u32) < level_h {
+                    self.dm16_placement_preview(&painter, origin, tile_sz, tx as u32, ty as u32);
+                }
+            }
+        }
+
         // ── Hover / click (tile granularity) ────────────────────
         if let Some(cursor) = resp.hover_pos() {
             let rel = (cursor - origin) / tile_sz;
@@ -573,16 +586,39 @@ impl UiLevelEditor {
             }
         }
 
+        // ── Direct Map16 gestures (placement / flood fill) ───
+        // Runs before vanilla object editing so an armed placement click
+        // drops the DM16 pattern instead of placing/selecting an object.
+        let dm16_consumed = {
+            let modifiers = ui.input(|i| i.modifiers);
+            self.handle_dm16_canvas_click(&resp, origin, tile_sz, modifiers)
+        };
+
         // ── Editing interaction (object select/place/delete) ───
-        self.handle_editing_interaction(&resp, origin, tile_sz);
+        if !dm16_consumed {
+            self.handle_editing_interaction(&resp, origin, tile_sz);
+        }
 
         // ── Keyboard shortcuts ─────────────────────────────────
         ui.input_mut(|input| {
             if input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z)) {
-                self.handle_undo();
+                // Route undo to the layer with the active selection.
+                if !self.selected_dm16_indices.is_empty() {
+                    self.handle_dm16_undo();
+                } else {
+                    self.last_undo_was_dm16 = false;
+                    self.handle_undo();
+                }
             }
             if input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Y)) {
-                self.handle_redo();
+                // Redo follows the layer of the last undo; any selection or
+                // edit elsewhere disarms it back to the vanilla layer.
+                if self.last_undo_was_dm16 && self.direct_map16.can_redo() {
+                    self.handle_dm16_redo();
+                } else {
+                    self.last_undo_was_dm16 = false;
+                    self.handle_redo();
+                }
             }
             if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
                 self.delete_selected_objects();

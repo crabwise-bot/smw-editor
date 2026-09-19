@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, bail, Result};
-use smwe_rom::{level::Level, objects::Object};
+use smwe_rom::{direct_map16, level::Level, objects::Object};
 
 use crate::undo::Undo;
 
@@ -405,5 +405,240 @@ mod tests {
         let bytes = layer.serialize_layer1_bytes(true).unwrap();
 
         assert_eq!(bytes, vec![0xA7, 0x12, 0xAA, 0x04, 0x00, 0x01, 0x49, 0x20, 0xBB, 0xFF]);
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Direct Map16 objects (LM v1.70-v1.90 "Add Objects / Direct Map16" parity)
+// -------------------------------------------------------------------------------------------------
+
+/// One editable Direct Map16 object: a rectangular Map16 pattern placed as a
+/// single resizable level object. Distinct from vanilla objects — stored in
+/// this editor's native RATS block (see `smwe_rom::direct_map16`), never in
+/// the vanilla object stream.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(in crate::ui::editor_prototypes) struct EditableDm16Object {
+    /// Absolute level tile coords of the object's top-left corner.
+    pub x:         u32,
+    pub y:         u32,
+    /// Current object size in tiles; the pattern repeats to fill it.
+    pub w:         u32,
+    pub h:         u32,
+    /// Stored pattern dimensions in tiles.
+    pub pw:        u32,
+    pub ph:        u32,
+    /// Row-major Map16 block IDs (`pw * ph` entries).
+    pub tiles:     Vec<u16>,
+    /// Optional conditional flag: `(ram_addr, bit)` — bit 0..=7, 8 = nonzero.
+    /// Inert metadata on a stock ROM (see `direct_map16` docs).
+    pub condition: Option<(u16, u8)>,
+}
+
+impl EditableDm16Object {
+    pub fn from_rom_obj(o: &direct_map16::DirectMap16Object) -> Self {
+        EditableDm16Object {
+            x:         o.x,
+            y:         o.y,
+            w:         o.w,
+            h:         o.h,
+            pw:        o.pw,
+            ph:        o.ph,
+            tiles:     o.tiles.clone(),
+            condition: o.condition.map(|c| (c.ram_addr, c.bit)),
+        }
+    }
+
+    pub fn to_rom_obj(&self) -> direct_map16::DirectMap16Object {
+        direct_map16::DirectMap16Object {
+            x:         self.x,
+            y:         self.y,
+            w:         self.w,
+            h:         self.h,
+            pw:        self.pw,
+            ph:        self.ph,
+            tiles:     self.tiles.clone(),
+            condition: self.condition.map(|(ram_addr, bit)| direct_map16::DirectMap16Condition { ram_addr, bit }),
+        }
+    }
+
+    /// The Map16 tile rendered at local coords (lx, ly): the pattern repeats
+    /// when the object is larger than the pattern.
+    pub fn tile_at(&self, lx: u32, ly: u32) -> u16 {
+        if self.tiles.is_empty() || self.pw == 0 || self.ph == 0 {
+            return 0x25;
+        }
+        self.tiles[((ly % self.ph) * self.pw + (lx % self.pw)) as usize]
+    }
+
+    /// Whether absolute tile (tx, ty) is covered by this object.
+    pub fn covers(&self, tx: u32, ty: u32) -> bool {
+        tx >= self.x && ty >= self.y && tx < self.x + self.w && ty < self.y + self.h
+    }
+
+    /// Clamp dimensions into 1..=64 and fix up the tile vector after a
+    /// resize (pattern keeps its tiles; the object size repeats them).
+    pub fn sanitize(&mut self) {
+        self.w = self.w.clamp(1, direct_map16::DM16_MAX_DIM);
+        self.h = self.h.clamp(1, direct_map16::DM16_MAX_DIM);
+        self.pw = self.pw.clamp(1, direct_map16::DM16_MAX_DIM);
+        self.ph = self.ph.clamp(1, direct_map16::DM16_MAX_DIM);
+        self.tiles.resize((self.pw * self.ph) as usize, 0x25);
+        if let Some((_, bit)) = &mut self.condition {
+            *bit = (*bit).min(8);
+        }
+    }
+}
+
+/// The level's Direct Map16 objects, kept separate from the vanilla object
+/// layer (they serialize to the editor-native RATS block, not the object
+/// stream).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(in crate::ui::editor_prototypes) struct EditableDirectMap16 {
+    pub objects: Vec<EditableDm16Object>,
+}
+
+impl EditableDirectMap16 {
+    pub fn from_rom_data(data: &direct_map16::DirectMap16Data, level: u16) -> Self {
+        EditableDirectMap16 { objects: data.objects_for(level).iter().map(EditableDm16Object::from_rom_obj).collect() }
+    }
+}
+
+impl Undo for EditableDirectMap16 {
+    fn from_bytes(bytes: Vec<u8>) -> Self {
+        if bytes.len() < 2 {
+            return Self::default();
+        }
+        let count = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+        let mut objects = Vec::with_capacity(count.min(1024));
+        let mut off = 2usize;
+        for _ in 0..count {
+            if off + 13 > bytes.len() {
+                break;
+            }
+            let x = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+            let y = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+            let w = bytes[off + 8] as u32;
+            let h = bytes[off + 9] as u32;
+            let pw = bytes[off + 10] as u32;
+            let ph = bytes[off + 11] as u32;
+            let cond_present = bytes[off + 12] != 0;
+            off += 13;
+            let condition = if cond_present {
+                if off + 3 > bytes.len() {
+                    break;
+                }
+                let ram_addr = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
+                let bit = bytes[off + 2].min(8);
+                off += 3;
+                Some((ram_addr, bit))
+            } else {
+                None
+            };
+            let tile_count = (pw.max(1).min(64) as usize) * (ph.max(1).min(64) as usize);
+            if off + tile_count * 2 > bytes.len() {
+                break;
+            }
+            let mut tiles = Vec::with_capacity(tile_count);
+            for i in 0..tile_count {
+                tiles.push(u16::from_le_bytes([bytes[off + 2 * i], bytes[off + 2 * i + 1]]));
+            }
+            off += tile_count * 2;
+            let mut obj = EditableDm16Object { x, y, w, h, pw, ph, tiles, condition };
+            obj.sanitize();
+            objects.push(obj);
+        }
+        Self { objects }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(self.objects.len().min(1024) as u16).to_le_bytes());
+        for obj in self.objects.iter().take(1024) {
+            bytes.extend_from_slice(&obj.x.to_le_bytes());
+            bytes.extend_from_slice(&obj.y.to_le_bytes());
+            bytes.push(obj.w.clamp(1, 64) as u8);
+            bytes.push(obj.h.clamp(1, 64) as u8);
+            bytes.push(obj.pw.clamp(1, 64) as u8);
+            bytes.push(obj.ph.clamp(1, 64) as u8);
+            match obj.condition {
+                None => bytes.push(0),
+                Some((ram_addr, bit)) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&ram_addr.to_le_bytes());
+                    bytes.push(bit.min(8));
+                }
+            }
+            // Keep the stream self-consistent: exactly the declared pattern
+            // size is written (truncate oversized vectors, pad undersized).
+            let want = (obj.pw.clamp(1, 64) as usize) * (obj.ph.clamp(1, 64) as usize);
+            for t in obj.tiles.iter().take(want) {
+                bytes.extend_from_slice(&t.to_le_bytes());
+            }
+            for _ in obj.tiles.len().min(want)..want {
+                bytes.extend_from_slice(&0x25u16.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    fn size_bytes(&self) -> usize {
+        2 + self
+            .objects
+            .iter()
+            .map(|o| {
+                let want = (o.pw.clamp(1, 64) as usize) * (o.ph.clamp(1, 64) as usize);
+                13 + if o.condition.is_some() { 3 } else { 0 } + want * 2
+            })
+            .sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod dm16_tests {
+    use super::EditableDirectMap16;
+    use crate::undo::Undo;
+
+    #[test]
+    fn dm16_undo_round_trip() {
+        let layer = EditableDirectMap16 {
+            objects: vec![
+                super::EditableDm16Object {
+                    x:         10,
+                    y:         20,
+                    w:         4,
+                    h:         3,
+                    pw:        2,
+                    ph:        2,
+                    tiles:     vec![0x25, 0x26, 0x2B, 0x2C],
+                    condition: Some((0x14AF, 0)),
+                },
+                super::EditableDm16Object {
+                    x:         0,
+                    y:         0,
+                    w:         1,
+                    h:         1,
+                    pw:        1,
+                    ph:        1,
+                    tiles:     vec![0x130],
+                    condition: None,
+                },
+            ],
+        };
+        let bytes = layer.to_bytes();
+        assert_eq!(bytes.len(), layer.size_bytes());
+        let back = EditableDirectMap16::from_bytes(bytes);
+        assert_eq!(back, layer);
+        // Pattern repetition on the decoded object (pattern is 2x2, so
+        // local coords wrap into it).
+        assert_eq!(back.objects[0].tile_at(1, 0), 0x26);
+        assert_eq!(back.objects[0].tile_at(1, 1), 0x2C);
+        assert_eq!(back.objects[0].tile_at(3, 0), 0x26); // x wraps: 3 -> 1
+        assert_eq!(back.objects[0].tile_at(2, 3), 0x2B); // wraps to (0, 1)
+    }
+
+    #[test]
+    fn dm16_from_bytes_tolerates_truncation() {
+        let back = EditableDirectMap16::from_bytes(vec![0x02, 0x00, 0xFF]);
+        assert!(back.objects.is_empty());
     }
 }

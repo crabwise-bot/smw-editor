@@ -12,11 +12,28 @@ use crate::ui::{
 // the way LM copies "tile hex values as text".
 
 impl UiLevelEditor {
-    /// Copy the current object/sprite selection to the system clipboard.
+    /// Copy the current object/sprite/Direct-Map16 selection to the system clipboard.
     /// Positions are stored relative to the selection's top-left so a paste
     /// can anchor at the cursor; each object also carries its rendered
-    /// footprint blocks so the paste stamps identical tiles.
+    /// footprint blocks so the paste stamps identical tiles. A single selected
+    /// Direct Map16 object copies as its Map16 pattern (the paste direction
+    /// recreates it as a DM16 object).
     pub(super) fn clipboard_copy_selection(&mut self, ctx: &egui::Context) -> bool {
+        if !self.selected_dm16_indices.is_empty() {
+            let selected: Vec<super::object_layer::EditableDm16Object> = self
+                .direct_map16
+                .read(|d| self.selected_dm16_indices.iter().filter_map(|&i| d.objects.get(i).cloned()).collect());
+            if selected.len() != 1 {
+                self.mwl_status = Some("Copy supports one Direct Map16 object at a time".to_string());
+                return false;
+            }
+            let obj = &selected[0];
+            let ids: Vec<u16> = obj.tiles.iter().take((obj.pw * obj.ph) as usize).copied().collect();
+            self.clipboard_copy_origin = Some((obj.x, obj.y));
+            copy_payload(ctx, &ClipboardPayload::Map16Blocks { cols: obj.pw, rows: obj.ph, ids });
+            self.mwl_status = Some(format!("Copied Direct Map16 pattern ({}×{} blocks) to clipboard", obj.pw, obj.ph));
+            return true;
+        }
         if self.edit_sprites {
             if self.entrance_selected && self.selected_sprite_indices.is_empty() {
                 // Lunar Magic v2.20: copy the entrance = copy its position.
@@ -127,13 +144,33 @@ impl UiLevelEditor {
             self.mwl_status = Some(format!("Moved entrance to ({nx}, {ny})"));
             return true;
         }
+        self.disarm_dm16_selection();
+        if let ClipboardPayload::Map16Blocks { cols, rows, ids } = payload {
+            // Map16 tiles paste into the level as one Direct Map16 access
+            // object (LM v1.70+ flow): the rectangular pattern becomes a
+            // resizable level object whose pattern repeats on resize.
+            let (pw, ph) = ((*cols).max(1), (*rows).max(1));
+            let mut tiles: Vec<u16> = ids.clone();
+            tiles.resize((pw * ph) as usize, 0x25);
+            tiles.truncate((pw * ph) as usize);
+            let w = pw.min(level_w.saturating_sub(anchor.0)).max(1);
+            let h = ph.min(level_h.saturating_sub(anchor.1)).max(1);
+            let obj = super::object_layer::EditableDm16Object {
+                x: anchor.0,
+                y: anchor.1,
+                w,
+                h,
+                pw,
+                ph,
+                tiles,
+                condition: None,
+            };
+            self.dm16_add_objects(vec![obj]);
+            self.mwl_status = Some(format!("Pasted Map16 pattern as a Direct Map16 object ({pw}×{ph})"));
+            return true;
+        }
         let ClipboardPayload::LevelObjects { objects, sprites } = payload else {
-            // Map16 tiles paste into the level through Direct Map16 access
-            // objects (LM v2.30 flow) — smw-editor has no DM16 support yet
-            // (parity audit §14), so this cross-editor direction stays
-            // unimplemented until that lands.
-            self.mwl_status =
-                Some("Clipboard holds Map16/8x8/overworld data — Direct Map16 paste isn't supported yet".to_string());
+            self.mwl_status = Some("Clipboard holds data this editor can't paste into the level".to_string());
             return false;
         };
         if self.edit_layer == 2 && self.layer2_objects.is_none() {
@@ -315,13 +352,21 @@ impl UiLevelEditor {
                 // don't also treat it as a click-select.
                 if !self.suppress_click_select && resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.hover_pos() {
-                        self.select_object_at(pos, origin, tile_sz);
+                        // Direct Map16 objects hit-test first (their overlay
+                        // paints on top of vanilla objects).
+                        if self.dm16_select_at(pos, origin, tile_sz) {
+                            self.selected_object_indices.clear();
+                            self.selected_sprite_indices.clear();
+                        } else {
+                            self.select_object_at(pos, origin, tile_sz);
+                        }
                     }
                 }
             }
             EditingMode::Erase => {
                 if resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.hover_pos() {
+                        self.disarm_dm16_selection();
                         self.erase_object_at(pos, origin, tile_sz);
                     }
                 }
@@ -329,6 +374,7 @@ impl UiLevelEditor {
             EditingMode::Draw => {
                 if resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.hover_pos() {
+                        self.disarm_dm16_selection();
                         self.place_object_at(pos, origin, tile_sz);
                     }
                 }
@@ -355,6 +401,7 @@ impl UiLevelEditor {
 
     fn select_sprite_at(&mut self, pos: Pos2, origin: Pos2, tile_sz: f32) {
         let idx = self.sprite_at(pos, origin, tile_sz);
+        self.disarm_dm16_selection();
         self.selected_sprite_indices.clear();
         if let Some(i) = idx {
             self.selected_sprite_indices.insert(i);
@@ -362,6 +409,7 @@ impl UiLevelEditor {
     }
 
     fn erase_sprite_at(&mut self, pos: Pos2, origin: Pos2, tile_sz: f32) {
+        self.disarm_dm16_selection();
         if let Some(idx) = self.sprite_at(pos, origin, tile_sz) {
             self.sprites.write(|sprites| {
                 sprites.sprites.remove(idx);
@@ -373,6 +421,7 @@ impl UiLevelEditor {
     }
 
     fn place_sprite_at(&mut self, pos: Pos2, origin: Pos2, tile_sz: f32) {
+        self.disarm_dm16_selection();
         let rel = (pos - origin) / tile_sz;
         let target_px_x = rel.x.floor() * 16.0;
         let target_px_y = rel.y.floor() * 16.0;
@@ -520,6 +569,11 @@ impl UiLevelEditor {
     }
 
     pub(super) fn delete_selected_objects(&mut self) {
+        // Direct Map16 objects delete through their own undoable path.
+        if !self.selected_dm16_indices.is_empty() {
+            self.dm16_delete_selected();
+            return;
+        }
         if self.edit_sprites {
             if self.entrance_selected {
                 // Lunar Magic v2.20: deleting the entrance resets it to the
