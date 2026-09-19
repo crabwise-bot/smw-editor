@@ -316,6 +316,11 @@ impl UiLevelEditor {
             }
         }
 
+        // ── Exit-enabled tile markers (LM v3.31 view option) ───
+        if self.mark_exit_tiles {
+            self.paint_exit_enabled_overlay(&painter, view_rect, origin, tile_sz, level_w, level_h);
+        }
+
         // ── Object overlay (structure view + editing) ─────────
         let show_overlay = self.show_object_overlay
             || self.editing_mode != EditingMode::Select
@@ -749,6 +754,54 @@ impl UiLevelEditor {
                     });
                     ui.label("Click the X again to close the editor.");
                 });
+        }
+    }
+
+    /// Paint the Lunar Magic v3.31 "Mark exit-enabled tiles" overlay:
+    /// Layer 1 tiles (plus the object-backed Layer 2 in level mode 0x01)
+    /// whose act-as root is exit-enabled get a translucent green fill.
+    /// Tile data comes straight from the WRAM block maps, so the markers
+    /// track the live level including unsaved object edits and staged
+    /// acts-like changes.
+    fn paint_exit_enabled_overlay(
+        &mut self, painter: &egui::Painter, view_rect: egui::Rect, origin: egui::Pos2, tile_sz: f32, level_w: u32,
+        level_h: u32,
+    ) {
+        use smwe_rom::{block_behavior::is_exit_enabled, map16_expanded::act_as_of};
+
+        let acts = self.effective_acts_table();
+        let level_mode = self.level_properties.level_mode;
+        // In level mode 0x01 the object-backed Layer 2 is interactive, so
+        // the game evaluates its tiles for exits too.
+        let l2_active = level_mode == 0x01 && self.level_properties.has_layer2;
+        let l2_off = if self.level_properties.is_vertical { 0x0E * 16 * 32 } else { 0x10 * 16 * 27 };
+
+        let x0 = ((view_rect.min.x - origin.x) / tile_sz).floor().max(0.0) as u32;
+        let y0 = ((view_rect.min.y - origin.y) / tile_sz).floor().max(0.0) as u32;
+        let x1 = ((view_rect.max.x - origin.x) / tile_sz).ceil().max(0.0).min(level_w as f32) as u32;
+        let y1 = ((view_rect.max.y - origin.y) / tile_sz).ceil().max(0.0).min(level_h as f32) as u32;
+
+        let fill = egui::Color32::from_rgba_unmultiplied(70, 220, 110, 70);
+        let edge = egui::Color32::from_rgba_unmultiplied(70, 220, 110, 230);
+        let stroke = egui::Stroke::new(1.5_f32, edge);
+
+        for ty in y0..y1 {
+            for tx in x0..x1 {
+                let id = self.raw_block_id_at(tx, ty, 0x7EC800, 0x7FC800);
+                let mut exit = id != 0 && is_exit_enabled(act_as_of(&acts, id), level_mode);
+                if !exit && l2_active {
+                    let id2 = self.raw_block_id_at(tx, ty, 0x7EC800 + l2_off, 0x7FC800 + l2_off);
+                    exit = id2 != 0 && is_exit_enabled(act_as_of(&acts, id2), level_mode);
+                }
+                if exit {
+                    let r = egui::Rect::from_min_size(
+                        origin + egui::vec2(tx as f32 * tile_sz, ty as f32 * tile_sz),
+                        egui::Vec2::splat(tile_sz),
+                    );
+                    painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
+                    painter.rect_stroke(r, egui::CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+                }
+            }
         }
     }
 }

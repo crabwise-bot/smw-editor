@@ -128,6 +128,7 @@ pub struct UiLevelEditor {
     show_object_overlay: bool,
     show_sprite_overlay: bool,
     show_object_labels:  bool,
+    mark_exit_tiles:     bool, // LM v3.31 view option: mark exit-enabled tiles
     selected_tile:       Option<(u32, u32)>,
 
     level_properties:        LevelProperties,
@@ -567,6 +568,7 @@ impl UiLevelEditor {
             show_object_overlay: false,
             show_sprite_overlay: true,
             show_object_labels: true,
+            mark_exit_tiles: false,
             selected_tile: None,
             level_properties: LevelProperties::default(),
             layer1: UndoableData::new(EditableObjectLayer::default()),
@@ -2086,6 +2088,35 @@ impl UiLevelEditor {
         let idx = self.block_map_index(block_x, block_y);
         let (lo_base, hi_base) = self.block_map_base();
         Some(self.cpu.mem.load_u8(lo_base + idx) as u16 | (((self.cpu.mem.load_u8(hi_base + idx) as u16) & 0x01) << 8))
+    }
+
+    /// Look up the block ID at the given block coordinates on the WRAM
+    /// block map starting at (`lo_base`, `hi_base`), independent of the
+    /// current edit layer. The exit-enabled-tile view option uses this to
+    /// evaluate Layer 1 always (bases `$7EC800`/`$7FC800`), plus the
+    /// object-backed Layer 2 in level mode 0x01. High byte uses the
+    /// renderer's `$3F` mask (full 12-bit Map16 ID space) rather than
+    /// [`Self::block_id_at`]'s vanilla `$01` mask.
+    pub(super) fn raw_block_id_at(&mut self, block_x: u32, block_y: u32, lo_base: u32, hi_base: u32) -> u16 {
+        let vertical = self.level_properties.is_vertical;
+        let scr_size: u32 = if vertical { 16 * 32 } else { 16 * 27 };
+        let block_x_px = block_x * 16;
+        let block_y_px = block_y * 16;
+        // Same screen/tile math as block_map_index, with explicit bases so
+        // this works regardless of the current edit layer.
+        let (screen, sidx) = if vertical {
+            let sub_y = block_y_px / 512;
+            let sub_x = block_x_px / 256;
+            let screen = sub_y * 2 + sub_x;
+            let col = (block_x_px / 16) % 16;
+            let row = (block_y_px / 16) % 32;
+            (screen, row * 16 + col)
+        } else {
+            let screen = block_x / 16;
+            (screen, block_y * 16 + (block_x % 16))
+        };
+        let idx = screen * scr_size + sidx;
+        self.cpu.mem.load_u8(lo_base + idx) as u16 | (((self.cpu.mem.load_u8(hi_base + idx) as u16) & 0x3F) << 8)
     }
 
     /// Update spawn point from absolute tile coordinates

@@ -405,7 +405,7 @@ impl UiLevelEditor {
 
     /// The act-as table as the user currently sees it: ROM table with
     /// pending edits overlaid.
-    fn effective_acts_table(&self) -> std::collections::HashMap<u16, u16> {
+    pub(super) fn effective_acts_table(&self) -> std::collections::HashMap<u16, u16> {
         let mut table = smwe_rom::map16_expanded::read_acts_table(self.rom.rom_bytes(), 0).unwrap_or_default();
         for (&t, &a) in &self.map16_acts_edits {
             if a == t {

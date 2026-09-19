@@ -163,6 +163,9 @@ impl UiLevelEditor {
             if tbtn(ui, icon::TEXT_T, "Show object labels", self.show_object_labels) {
                 self.show_object_labels = !self.show_object_labels;
             }
+            if tbtn(ui, icon::DOOR_OPEN, "Mark exit-enabled tiles (F9)", self.mark_exit_tiles) {
+                self.mark_exit_tiles = !self.mark_exit_tiles;
+            }
             ui.separator();
 
             // Sub-editor launchers (toggle the floating editor windows).
@@ -330,20 +333,22 @@ impl UiLevelEditor {
 
     /// Lunar Magic keyboard shortcuts that operate on the level editor:
     /// PageUp/PageDown step the level number, backtick toggles Layer 1/2, F8
-    /// toggles the grid, and Ctrl -/= zoom out/in.
+    /// toggles the grid, F9 toggles the exit-enabled tile markers, and
+    /// Ctrl -/= zoom out/in.
     fn handle_shortcuts(&mut self, ui: &mut Ui) {
         // Don't steal keys while a widget (e.g. the level-number box) is focused.
         if ui.ctx().memory(|m| m.focused().is_some()) {
             return;
         }
 
-        let (mut lvl_next, mut lvl_prev, mut toggle_l12, mut toggle_grid, mut zoom_in, mut zoom_out) =
-            (false, false, false, false, false, false);
+        let (mut lvl_next, mut lvl_prev, mut toggle_l12, mut toggle_grid, mut toggle_exits, mut zoom_in, mut zoom_out) =
+            (false, false, false, false, false, false, false);
         ui.input_mut(|i| {
             lvl_next = i.consume_key(Modifiers::NONE, Key::PageUp);
             lvl_prev = i.consume_key(Modifiers::NONE, Key::PageDown);
             toggle_l12 = i.consume_key(Modifiers::NONE, Key::Backtick);
             toggle_grid = i.consume_key(Modifiers::NONE, Key::F8);
+            toggle_exits = i.consume_key(Modifiers::NONE, Key::F9);
             zoom_in = i.consume_key(Modifiers::COMMAND, Key::Equals) || i.consume_key(Modifiers::COMMAND, Key::Plus);
             zoom_out = i.consume_key(Modifiers::COMMAND, Key::Minus);
         });
@@ -367,6 +372,9 @@ impl UiLevelEditor {
         }
         if toggle_grid {
             self.always_show_grid = !self.always_show_grid;
+        }
+        if toggle_exits {
+            self.mark_exit_tiles = !self.mark_exit_tiles;
         }
         if zoom_in {
             self.zoom = (self.zoom + 0.25).min(3.0);
