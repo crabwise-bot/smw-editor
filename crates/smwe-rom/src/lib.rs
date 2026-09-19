@@ -39,6 +39,7 @@ use crate::{
     graphics::Gfx,
     internal_header::{InternalHeaderParseError, RegionCode, RomInternalHeader},
     level::{
+        custom_palette::{CustomPaletteData, CustomPaletteError},
         dimensions::LevelHeights,
         secondary_entrance::{SecondaryEntrance, SecondaryExitExtData, SECONDARY_ENTRANCE_TABLE},
         sprite_header_ext::{SpriteHeaderExtData, SpriteHeaderExtError},
@@ -77,6 +78,7 @@ pub struct SmwRom {
     pub exanimation:         ExAnimationData,
     pub secondary_exit_ext:  SecondaryExitExtData,
     pub sprite_header_ext:   SpriteHeaderExtData,
+    pub custom_palettes:     CustomPaletteData,
     pub exgfx:               exgfx::ExGfxData,
     pub gfx_bypass:          exgfx::BypassData,
     pub direct_map16:        DirectMap16Data,
@@ -222,6 +224,16 @@ impl SmwRom {
             LevelHeights::default()
         });
 
+        log::info!("Parsing per-level custom palettes");
+        let custom_palettes = CustomPaletteData::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has enabled a
+            // custom palette for yet simply has no block.
+            if !matches!(e, CustomPaletteError::NotFound) {
+                log::warn!("Could not parse custom palette data: {e}");
+            }
+            CustomPaletteData::default()
+        });
+
         Ok(Self {
             rom,
             internal_header,
@@ -243,6 +255,7 @@ impl SmwRom {
             gfx_bypass,
             direct_map16,
             level_heights,
+            custom_palettes,
         })
     }
 
