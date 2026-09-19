@@ -38,9 +38,12 @@
 //! [`crate::title_credits::TITLE_SCREEN_STRIPE_MAX_SIZE`]; over-budget grids
 //! are refused, never silently truncated.
 //!
-//! Region scope: U-ROM fixed-slot addresses. J/E ROMs place the title stripe
-//! elsewhere (see `differences.txt` in SMWDisX); only the U layout is
-//! modeled.
+//! Region scope: this module is region-agnostic — it only parses and encodes
+//! stripe *bytes*. Which fixed-slot address those bytes come from is chosen
+//! per region by [`crate::title_credits::TitleCreditsRegion`] (U.S. layout:
+//! `TITLE_SCREEN_STRIPE_SNES`/`PLAYER_SELECT_STRIPE_SNES`; Japanese layout:
+//! `$05AF2C`/`$05B358`). The historical U-ROM constants below remain for
+//! U-layout callers; region-aware callers use `TitleCreditsData::layout()`.
 
 use crate::title_credits::{PLAYER_SELECT_STRIPE_MAX_SIZE, TITLE_SCREEN_STRIPE_MAX_SIZE};
 

@@ -1462,16 +1462,15 @@ impl DockableEditorTool for UiLevelEditor {
 
         // ── Title screen / credits fixed-location data ───────────────────────
         if self.title_credits_dirty {
-            let title_submap_pc =
-                AddrPc::try_from_lorom(smwe_rom::title_credits::TITLE_SUBMAP_OPERAND_SNES)?.as_index() + header_offset;
+            let layout = self.title_credits.layout();
+            let title_submap_pc = AddrPc::try_from_lorom(layout.title_submap_operand)?.as_index() + header_offset;
             *rom_bytes
                 .get_mut(title_submap_pc)
                 .ok_or_else(|| anyhow::anyhow!("Title submap operand out of range"))? = self.title_credits.title_submap;
 
-            let input_pc =
-                AddrPc::try_from_lorom(smwe_rom::title_credits::TITLE_INPUT_SEQ_SNES)?.as_index() + header_offset;
+            let input_pc = AddrPc::try_from_lorom(layout.title_input_seq)?.as_index() + header_offset;
             let input_bytes = self.title_credits.title_input_bytes()?;
-            let input_end = input_pc + smwe_rom::title_credits::TITLE_INPUT_SEQ_MAX_SIZE;
+            let input_end = input_pc + layout.title_input_seq_max;
             rom_bytes
                 .get_mut(input_pc..input_end)
                 .ok_or_else(|| anyhow::anyhow!("Title input sequence out of range"))?
@@ -1479,9 +1478,8 @@ impl DockableEditorTool for UiLevelEditor {
             rom_bytes[input_pc..input_pc + input_bytes.len()].copy_from_slice(&input_bytes);
 
             self.title_credits.validate_title_screen_stripe()?;
-            let title_stripe_pc =
-                AddrPc::try_from_lorom(smwe_rom::title_credits::TITLE_SCREEN_STRIPE_SNES)?.as_index() + header_offset;
-            let title_stripe_end = title_stripe_pc + smwe_rom::title_credits::TITLE_SCREEN_STRIPE_MAX_SIZE;
+            let title_stripe_pc = AddrPc::try_from_lorom(layout.title_stripe)?.as_index() + header_offset;
+            let title_stripe_end = title_stripe_pc + layout.title_stripe_max;
             rom_bytes
                 .get_mut(title_stripe_pc..title_stripe_end)
                 .ok_or_else(|| anyhow::anyhow!("Title screen stripe image out of range"))?
@@ -1490,9 +1488,8 @@ impl DockableEditorTool for UiLevelEditor {
                 .copy_from_slice(&self.title_credits.title_screen_stripe);
 
             self.title_credits.validate_player_select_stripe()?;
-            let menu_stripe_pc =
-                AddrPc::try_from_lorom(smwe_rom::title_credits::PLAYER_SELECT_STRIPE_SNES)?.as_index() + header_offset;
-            let menu_stripe_end = menu_stripe_pc + smwe_rom::title_credits::PLAYER_SELECT_STRIPE_MAX_SIZE;
+            let menu_stripe_pc = AddrPc::try_from_lorom(layout.player_select_stripe)?.as_index() + header_offset;
+            let menu_stripe_end = menu_stripe_pc + layout.player_select_stripe_max;
             rom_bytes
                 .get_mut(menu_stripe_pc..menu_stripe_end)
                 .ok_or_else(|| anyhow::anyhow!("Player select stripe image out of range"))?
@@ -1501,10 +1498,9 @@ impl DockableEditorTool for UiLevelEditor {
                 .copy_from_slice(&self.title_credits.player_select_stripe);
 
             for (i, stripe) in self.title_credits.enemy_name_stripes.iter().enumerate() {
-                let slot_size = smwe_rom::title_credits::TitleCreditsData::enemy_name_slot_size(i);
-                smwe_rom::title_credits::TitleCreditsData::validate_enemy_name_stripe(i, stripe)?;
-                let pc = AddrPc::try_from_lorom(smwe_rom::title_credits::ENEMY_NAME_STRIPE_STARTS[i])?.as_index()
-                    + header_offset;
+                let slot_size = self.title_credits.enemy_name_slot_size(i);
+                self.title_credits.validate_enemy_name_stripe(i, stripe)?;
+                let pc = AddrPc::try_from_lorom(layout.enemy_name_starts[i])?.as_index() + header_offset;
                 let end = pc + slot_size;
                 rom_bytes
                     .get_mut(pc..end)

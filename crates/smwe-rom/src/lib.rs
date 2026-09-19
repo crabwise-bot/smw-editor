@@ -56,7 +56,7 @@ use crate::{
         rom_slice::SnesSlice,
     },
     sprite_tweakers::SpriteTweakers,
-    title_credits::TitleCreditsData,
+    title_credits::{TitleCreditsData, TitleCreditsRegion},
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -162,10 +162,11 @@ impl SmwRom {
         });
 
         log::info!("Parsing title screen / credits data");
-        let title_credits = TitleCreditsData::parse(&rom).unwrap_or_else(|e| {
-            log::warn!("Could not parse title screen / credits data: {e}");
-            TitleCreditsData::empty()
-        });
+        let title_credits =
+            TitleCreditsData::parse(&rom, TitleCreditsRegion::of(&internal_header)).unwrap_or_else(|e| {
+                log::warn!("Could not parse title screen / credits data: {e}");
+                TitleCreditsData::empty(TitleCreditsRegion::of(&internal_header))
+            });
 
         log::info!("Parsing boss sequence text");
         let boss_text = BossText::parse(&rom).unwrap_or_else(|e| {
