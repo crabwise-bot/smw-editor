@@ -11,6 +11,7 @@
 
 mod editing;
 mod ow_tile_picker;
+mod reveal_list_editor;
 mod se_teleport_editor;
 mod secret_exits;
 mod sprite_tool;
@@ -197,6 +198,8 @@ impl OverworldRenderer {
 /// `[u32 LE custom payload length][custom sprite RATS payload]`
 /// `[128 extra-byte counts]`
 /// `[u32 LE secret-exit entry count][entries × 4 bytes: level u16 LE, exit2, exit3]`
+/// `[22 reveal-list before bytes][22 reveal-list after bytes]`
+/// `[22 start-position table bytes]`
 ///
 /// L1 is always exactly OWL1_TILE_DATA_SIZE bytes so `from_bytes` can split
 /// correctly; everything after it is length-prefixed.
@@ -226,6 +229,12 @@ pub(super) struct OverworldEditState {
     /// LM v3.00 Secret Exit 2/3 direction-to-enable settings (editor-owned
     /// `SMWSEXIT` RATS block; see `smwe_rom::overworld::secret_exits`).
     pub secret_exits:         smwe_rom::overworld::secret_exits::SecretExitSettings,
+    /// The 22 before/after reveal-tile pairs (`$04DA1D`/`$04DA33`, LM v2.30
+    /// "Edit Reveal Tile List"). Undoable like everything else in this state.
+    pub reveal_list:          smwe_rom::overworld::reveal_list::RevealTileList,
+    /// Mario's and Luigi's overworld starting positions (`$009EF0`, LM
+    /// v1.60/v1.90). Undoable like everything else in this state.
+    pub start_positions:      smwe_rom::overworld::start_positions::OverworldStartPositions,
 }
 
 impl Undo for OverworldEditState {
@@ -291,6 +300,26 @@ impl Undo for OverworldEditState {
                 break;
             }
         }
+        let reveal_before = take(&mut pos, smwe_rom::overworld::reveal_list::REVEAL_COUNT);
+        let reveal_after = take(&mut pos, smwe_rom::overworld::reveal_list::REVEAL_COUNT);
+        let reveal_list = if reveal_before.len() == smwe_rom::overworld::reveal_list::REVEAL_COUNT
+            && reveal_after.len() == smwe_rom::overworld::reveal_list::REVEAL_COUNT
+        {
+            smwe_rom::overworld::reveal_list::RevealTileList { before: reveal_before, after: reveal_after }
+        } else {
+            // Payloads written before the reveal list was undoable predate
+            // this tail; fall back to empty lists rather than failing the
+            // undo (can't happen for payloads this build writes).
+            smwe_rom::overworld::reveal_list::RevealTileList { before: Vec::new(), after: Vec::new() }
+        };
+        let start_bytes = take(&mut pos, smwe_rom::overworld::start_positions::START_POSITIONS_LEN);
+        let start_positions = if start_bytes.len() == smwe_rom::overworld::start_positions::START_POSITIONS_LEN {
+            smwe_rom::overworld::start_positions::OverworldStartPositions::decode(&start_bytes)
+        } else {
+            smwe_rom::overworld::start_positions::OverworldStartPositions::decode(
+                &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
+            )
+        };
         Self {
             layer1_tiles: l1,
             layer2_words,
@@ -300,6 +329,8 @@ impl Undo for OverworldEditState {
             custom_extra_counts,
             sprite_size_table,
             secret_exits,
+            reveal_list,
+            start_positions,
         }
     }
 
@@ -334,6 +365,9 @@ impl Undo for OverworldEditState {
             out.push(e.exit2);
             out.push(e.exit3);
         }
+        out.extend_from_slice(&self.reveal_list.before);
+        out.extend_from_slice(&self.reveal_list.after);
+        out.extend_from_slice(&self.start_positions.encode());
         out
     }
 
@@ -351,6 +385,8 @@ impl Undo for OverworldEditState {
             + self.sprite_size_table.map(|_| ow_sprites::SIZE_TABLE_LEN).unwrap_or(0)
             + 4
             + self.secret_exits.entries.len() * 4
+            + smwe_rom::overworld::reveal_list::REVEAL_COUNT * 2
+            + smwe_rom::overworld::start_positions::START_POSITIONS_LEN
     }
 }
 
@@ -493,10 +529,27 @@ pub struct UiWorldEditor {
     se_teleports_dirty:      bool,
     show_se_teleport_editor: bool,
     se_teleport_search:      String,
+    /// LM v2.30 "Edit Reveal Tile List" dialog visibility.
+    show_reveal_list_editor: bool,
+    /// True once the reveal list has been edited (in-place save on Ctrl+S).
+    reveal_list_dirty:       bool,
+    /// True once a start position has been edited (in-place save on Ctrl+S).
+    start_positions_dirty:   bool,
+    /// Click-to-place arming for the Mario/Luigi start markers on the main
+    /// map: while set, the next canvas click in Select mode moves that
+    /// player's starting position instead of selecting a tile.
+    place_start_target:      Option<StartPlayer>,
     /// Clean post-load VRAM snapshot the ExAnimation tile browser decodes from.
     exanimation_base_vram:   Vec<u8>,
     /// Bumped on every submap load so the tile-browser atlas rebuilds.
     exanim_vram_gen:         u64,
+}
+
+/// Which player's overworld starting position an action targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartPlayer {
+    Mario,
+    Luigi,
 }
 
 impl UiWorldEditor {
@@ -547,6 +600,22 @@ impl UiWorldEditor {
         // block; absence is the normal case (vanilla ROMs have none).
         let secret_exits = ow_secret_exits::parse_secret_exits(rom.rom_bytes(), 0);
         let secret_exits_at_load = secret_exits.clone();
+        // Decode the reveal-tile list ($04DA1D/$04DA33) and the Mario/Luigi
+        // starting positions ($009EF0) the same way; both are edited in
+        // place, so the parsed copies ride in the undoable edit state and
+        // are only written back on save when dirty.
+        let reveal_list =
+            smwe_rom::overworld::reveal_list::RevealTileList::parse(rom.rom_bytes(), 0).unwrap_or_else(|e| {
+                log::warn!("Could not parse overworld reveal list: {e}");
+                smwe_rom::overworld::reveal_list::RevealTileList { before: Vec::new(), after: Vec::new() }
+            });
+        let start_positions = smwe_rom::overworld::start_positions::OverworldStartPositions::parse(rom.rom_bytes(), 0)
+            .unwrap_or_else(|e| {
+                log::warn!("Could not parse overworld start positions: {e}");
+                smwe_rom::overworld::start_positions::OverworldStartPositions::decode(
+                    &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
+                )
+            });
         let edit_state = UndoableData::new(OverworldEditState {
             layer1_tiles: source_layer1_tiles,
             layer2_words: Vec::new(),
@@ -556,6 +625,8 @@ impl UiWorldEditor {
             custom_extra_counts,
             sprite_size_table,
             secret_exits,
+            reveal_list,
+            start_positions,
         });
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
@@ -637,6 +708,10 @@ impl UiWorldEditor {
             se_teleports_dirty: false,
             show_se_teleport_editor: false,
             se_teleport_search: String::new(),
+            show_reveal_list_editor: false,
+            reveal_list_dirty: false,
+            start_positions_dirty: false,
+            place_start_target: None,
         };
         editor.load_submap();
         editor
@@ -659,6 +734,7 @@ impl UiWorldEditor {
         log::info!("Loaded submap {}: L1={} tiles, L2={} tiles", self.submap, l1.len(), l2.len());
 
         r.set_tiles(&self.gl, l1, l2);
+        drop(r); // release the renderer guard before touching the CPU/VRAM again below
 
         self.tile_picker.rebuild(&self.cpu.mem.vram, &self.cpu.mem.cgram, VRAM_L1_TILEMAP_BASE, VRAM_L2_TILEMAP_BASE);
         self.l1_tile_picker.rebuild(&mut self.cpu);
@@ -681,6 +757,13 @@ impl UiWorldEditor {
         self.exanim_vram_gen += 1;
         self.exanim_tick = 0;
         self.exanim_dialog.reset_atlas();
+
+        // Re-apply the destruction events with the reveal list currently in
+        // the edit state. The emulated init above used the ROM bytes the
+        // emulator was constructed with; when the reveal list has unsaved
+        // edits, this Rust-side pass is what makes the preview show them.
+        // With an unedited list it reproduces the emulated result exactly.
+        self.refresh_event_preview();
     }
 }
 
@@ -711,6 +794,7 @@ impl DockableEditorTool for UiWorldEditor {
         }
         self.se_teleport_editor_window(ui.ctx());
         self.secret_exits_window(ui.ctx());
+        self.reveal_list_editor_window(ui.ctx());
     }
 
     fn on_closed(&mut self) {
@@ -726,6 +810,8 @@ impl DockableEditorTool for UiWorldEditor {
         self.event_ownership_dirty = false;
         self.exanimation_dirty = false;
         self.se_teleports_dirty = false;
+        self.reveal_list_dirty = false;
+        self.start_positions_dirty = false;
         // The ROM now matches the edit state; future saves skip rewrites.
         self.sprites_at_load =
             self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone(), s.sprite_size_table));
@@ -835,6 +921,25 @@ impl DockableEditorTool for UiWorldEditor {
             ownership
                 .apply_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Cannot apply event ownership edits: {e}"))?;
+        }
+
+        // ── Reveal tile list (LM v2.30 "Edit Reveal Tile List") ──────────────
+        // In-place write of the 22 before/after byte pairs
+        // (`$04DA1D`/`$04DA33`); only touches the ROM if the user actually
+        // changed a pair.
+        if self.reveal_list_dirty {
+            let list = self.edit_state.read(|s| s.reveal_list.clone());
+            list.apply_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot apply reveal list edits: {e}"))?;
+        }
+
+        // ── Mario/Luigi starting positions (LM v1.60/v1.90) ─────────────────
+        // In-place write of the 22-byte `$009EF0` table; only touches the ROM
+        // if the user actually moved a start position.
+        if self.start_positions_dirty {
+            let pos = self.edit_state.read(|s| s.start_positions);
+            pos.apply_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot apply start position edits: {e}"))?;
         }
 
         // ── Overworld ExAnimation (custom tile/palette animation) ────────────
@@ -1163,6 +1268,16 @@ impl UiWorldEditor {
                 self.show_secret_exits = true;
             }
             ui.small("Per-level direction-to-enable settings for LM v3.00's Secret Exits 2/3.");
+            // ── Reveal tile list (LM v2.30 parity) ──────────────────────────
+            ui.separator();
+            if ui.button("Edit Reveal Tile List…").clicked() {
+                self.show_reveal_list_editor = true;
+            }
+            ui.small("Which layer-1 tiles events reveal into which other tiles.");
+
+            // ── Starting positions (LM v1.60 Mario / v1.90 Luigi parity) ────
+            ui.separator();
+            self.start_position_panel(ui);
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();
@@ -1711,6 +1826,11 @@ impl UiWorldEditor {
             }
         }
 
+        // ── Mario/Luigi start-position markers ────────────────────────────────
+        // Main map only (the `$009EF0` coordinates live in the main-map pixel
+        // space); drawn under the sprite markers.
+        self.ow_draw_start_markers(&painter, origin, z);
+
         // ── Overworld sprite markers ──────────────────────────────────────────
         // Drawn above the event markers, using the same canvas basis
         // (`origin`, `z`, `visible_map_crop`) as the GL render.
@@ -1745,9 +1865,13 @@ impl UiWorldEditor {
                         && (self.editing_mode == EditingMode::Select || ui.input(|i| i.modifiers.alt))
                         && !ui.input(|i| i.modifiers.shift)
                     {
-                        self.selected_tile = Some((x, y));
-                        // A plain click replaces the clipboard region selection.
-                        self.ow_sel_rect = None;
+                        // Armed click-to-place for a start marker consumes the
+                        // click instead of selecting a tile.
+                        if !self.ow_place_start_on_click(x, y) {
+                            self.selected_tile = Some((x, y));
+                            // A plain click replaces the clipboard region selection.
+                            self.ow_sel_rect = None;
+                        }
                     }
 
                     painter.text(
@@ -2260,6 +2384,13 @@ mod tests {
                     exit3: ow_secret_exits::DIR_LEFT,
                 }],
             },
+            reveal_list:          smwe_rom::overworld::reveal_list::RevealTileList {
+                before: vec![0x00; smwe_rom::overworld::reveal_list::REVEAL_COUNT],
+                after:  vec![0x00; smwe_rom::overworld::reveal_list::REVEAL_COUNT],
+            },
+            start_positions:      smwe_rom::overworld::start_positions::OverworldStartPositions::decode(
+                &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
+            ),
         };
         let back = OverworldEditState::from_bytes(state.to_bytes());
         assert_eq!(back.layer1_tiles, state.layer1_tiles);
@@ -2270,6 +2401,10 @@ mod tests {
         assert_eq!(back.custom_extra_counts, state.custom_extra_counts);
         assert_eq!(back.sprite_size_table, state.sprite_size_table);
         assert_eq!(back.secret_exits, state.secret_exits);
+        assert_eq!(back.reveal_list.before, state.reveal_list.before);
+        assert_eq!(back.reveal_list.after, state.reveal_list.after);
+        assert_eq!(back.start_positions.mario.pixel_x, state.start_positions.mario.pixel_x);
+        assert_eq!(back.start_positions.luigi.tile_y, state.start_positions.luigi.tile_y);
     }
 
     /// Truncated buffers must not panic — `from_bytes` degrades gracefully.
