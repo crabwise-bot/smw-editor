@@ -1,3 +1,4 @@
+mod auto_screens;
 mod background_layer;
 mod bg_tilemap_editor;
 mod boss_text_editor;
@@ -436,6 +437,12 @@ pub struct UiLevelEditor {
     /// never re-read from the (post-save stale) `self.rom`.
     sprite_header_ext:         smwe_rom::level::sprite_header_ext::SpriteHeaderExtData,
     sprite_header_dirty:       bool,
+    /// Whether the user touched any LM 3.40 scroll-extension control
+    /// (Separate H/V, H/V scroll, Auto-Set Screens) since the level was
+    /// loaded. The `$06FA00` table is only installed on ROMs that lack it when
+    /// this is set — vanilla ROMs keep `$FF` and are never auto-resized
+    /// behind the user's back.
+    scroll_ext_dirty:          bool,
 
     /// Dialog state for the shared "ExAnimated Frames" window.
     exanim_dialog:         crate::ui::exanimation_dialog::ExAnimDialog,
@@ -740,6 +747,7 @@ impl UiLevelEditor {
             sprite_header_edits: HashMap::new(),
             sprite_header_ext,
             sprite_header_dirty: false,
+            scroll_ext_dirty: false,
             exanim_dialog: crate::ui::exanimation_dialog::ExAnimDialog::new(
                 crate::ui::exanimation_dialog::ExAnimList::Level,
             ),
@@ -795,6 +803,49 @@ impl UiLevelEditor {
         };
         editor.load_level();
         Ok(editor)
+    }
+
+    /// LM 3.40 "Auto-Set Number of Screens": the header length byte to write
+    /// on save, or `None` when auto-set does not apply.
+    ///
+    /// The per-level C bit of the `$06FA00` extension byte only takes effect
+    /// once the table is installed (or this save installs it because the
+    /// user touched the scroll-extension controls), so a vanilla ROM is never
+    /// resized by an untouched default.
+    fn auto_set_screens_len(&self, vertical: bool) -> Option<u8> {
+        let p = &self.level_properties;
+        if !auto_screens::auto_set_applies(p.layer2_scroll_ext_raw, self.scroll_ext_dirty, p.layer2_auto_set_screens) {
+            return None;
+        }
+        let used = self.layer1.read(|l1| {
+            self.sprites.read(|sprites| match &self.layer2_objects {
+                Some(l2) => l2.read(|l2l| auto_screens::screens_used(l1, Some(l2l), sprites, vertical)),
+                None => auto_screens::screens_used(l1, None, sprites, vertical),
+            })
+        });
+        Some((used - 1) as u8)
+    }
+
+    /// The `$06FA00` byte to write on save: the table is (re)installed when it
+    /// was already installed, separate H/V mode is on, or the user touched
+    /// any scroll-extension control since load; otherwise vanilla ROMs keep
+    /// `$FF` (never installed behind the user's back).
+    fn scroll_ext_save_byte(&self) -> u8 {
+        use smwe_rom::level::scroll::{Layer2ScrollExt, SCROLL_EXT_UNINSTALLED};
+        let p = &self.level_properties;
+        let install =
+            auto_screens::scroll_ext_installs(p.layer2_scroll_ext_raw, p.layer2_scroll_separate, self.scroll_ext_dirty);
+        if install {
+            Layer2ScrollExt {
+                separate:         p.layer2_scroll_separate,
+                h_auto:           p.layer2_hscroll_auto,
+                auto_set_screens: p.layer2_auto_set_screens,
+                vscroll:          p.layer2_vscroll,
+            }
+            .encode()
+        } else {
+            SCROLL_EXT_UNINSTALLED
+        }
     }
 }
 
@@ -882,9 +933,26 @@ impl DockableEditorTool for UiLevelEditor {
         let new_sprites = self.sprites.read(|s| s.serialize_bytes(vertical))?;
 
         // Reconstruct all 5 primary-header bytes from LevelProperties.
+        //
+        // LM 3.40 "Auto-Set Number of Screens": when the per-level C bit of
+        // the `$06FA00` extension byte is set (and the table is installed),
+        // the header's Number of Screens is rewritten on save to the screens
+        // actually occupied by the level's objects and sprites.
         let p = &self.level_properties;
+        let auto_len = self.auto_set_screens_len(vertical);
+        if let Some(auto_len) = auto_len {
+            if auto_len != p.level_length {
+                log::info!(
+                    "Level {:03X}: Auto-Set Number of Screens {} -> {} screens",
+                    self.level_num,
+                    p.level_length as u32 + 1,
+                    auto_len as u32 + 1
+                );
+            }
+        }
+        let level_length = auto_len.unwrap_or(p.level_length);
         let new_primary_header: [u8; PRIMARY_HEADER_SIZE] = [
-            (p.palette_bg << 5) | p.level_length,
+            (p.palette_bg << 5) | level_length,
             (p.back_area_color << 5) | p.level_mode,
             ((p.layer3_priority as u8) << 7) | (p.music << 4) | (p.sprite_gfx & 0x0F),
             (p.timer << 6) | (p.palette_sprite << 3) | p.palette_fg,
@@ -1114,23 +1182,13 @@ impl DockableEditorTool for UiLevelEditor {
         }
 
         // ── LM 3.40+ Layer 2 scroll extension ($06FA00, SHCvvvvv) ──────────────
-        // Preserve the raw byte when the table was never installed ($FF) and the
-        // user did not enable separate mode; otherwise encode the new settings.
+        // Preserve the raw byte when the table was never installed ($FF) and
+        // the user did not touch any scroll-extension control; otherwise
+        // encode the new settings. Touching the Auto-Set Screens checkbox
+        // alone installs the table, so the per-level setting actually
+        // persists (and takes effect) on vanilla ROMs.
         {
-            use smwe_rom::level::scroll::{Layer2ScrollExt, SCROLL_EXT_UNINSTALLED};
-            let p = &self.level_properties;
-            let raw = p.layer2_scroll_ext_raw;
-            let new_byte = if !Layer2ScrollExt::is_installed(raw) && !p.layer2_scroll_separate {
-                SCROLL_EXT_UNINSTALLED
-            } else {
-                Layer2ScrollExt {
-                    separate:         p.layer2_scroll_separate,
-                    h_auto:           p.layer2_hscroll_auto,
-                    auto_set_screens: p.layer2_auto_set_screens,
-                    vscroll:          p.layer2_vscroll,
-                }
-                .encode()
-            };
+            let new_byte = self.scroll_ext_save_byte();
             let t = AddrPc::try_from_lorom(AddrSnes(0x06FA00))?.as_index() + header_offset + level_idx;
             if let Some(b) = rom_bytes.get_mut(t) {
                 *b = new_byte;
@@ -1539,6 +1597,18 @@ impl DockableEditorTool for UiLevelEditor {
         self.secondary_exit_ext_dirty = false;
         self.sprite_header_dirty = false;
         self.dm16_dirty = false;
+        // ── LM 3.40 Auto-Set Number of Screens ────────────────────────────
+        // Sync the in-memory header state with what save_to_rom just wrote,
+        // so the Level Length slider shows the recomputed value and the
+        // auto-set gate sees the installed table on subsequent saves. The
+        // recompute is deterministic (same layers, same controls), so this
+        // matches the bytes already on the ROM.
+        let vertical = self.level_properties.is_vertical;
+        if let Some(auto_len) = self.auto_set_screens_len(vertical) {
+            self.level_properties.level_length = auto_len;
+        }
+        self.level_properties.layer2_scroll_ext_raw = self.scroll_ext_save_byte();
+        self.scroll_ext_dirty = false;
         let (spawn_x, spawn_y) = self.spawn_pos();
         self.initial_spawn_x = spawn_x;
         self.initial_spawn_y = spawn_y;
@@ -1686,6 +1756,7 @@ impl UiLevelEditor {
             self.sprite_header_edit =
                 self.sprite_header_edits.get(&self.level_num).cloned().unwrap_or_else(|| level.sprite_header.clone());
             self.sprite_header_dirty = false;
+            self.scroll_ext_dirty = false;
             let bg_bank = match &level.layer2 {
                 Layer2Data::Objects { objects, .. } => {
                     self.layer2_objects = Some(UndoableData::new(EditableObjectLayer::from_object_layer(

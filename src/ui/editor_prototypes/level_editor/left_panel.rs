@@ -653,6 +653,7 @@ impl UiLevelEditor {
 
             ui.separator();
             ui.strong("Secondary Header");
+            let mut scroll_ext_touched = false;
             egui::Grid::new("secondary_header_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                 let p = &mut self.level_properties;
 
@@ -698,7 +699,13 @@ impl UiLevelEditor {
                     }
                 }
                 ui.end_row();
-                row_check!("Separate H/V Scroll:", p.layer2_scroll_separate);
+                {
+                    let before = p.layer2_scroll_separate;
+                    row_check!("Separate H/V Scroll:", p.layer2_scroll_separate);
+                    if p.layer2_scroll_separate != before {
+                        scroll_ext_touched = true;
+                    }
+                }
                 if p.layer2_scroll_separate {
                     use smwe_rom::level::scroll::{hscroll_entry, HSCROLL_ENTRIES, VSCROLL_NAMES};
                     ui.label("H Scroll:");
@@ -720,6 +727,7 @@ impl UiLevelEditor {
                             });
                         if (p.layer2_hscroll_auto, p.layer2_scroll) != before_h {
                             changed = true;
+                            scroll_ext_touched = true;
                         }
                     }
                     ui.end_row();
@@ -735,11 +743,31 @@ impl UiLevelEditor {
                             });
                         if p.layer2_vscroll != before_v {
                             changed = true;
+                            scroll_ext_touched = true;
                         }
                     }
                     ui.end_row();
                 }
-                row_check!("Auto-Set Screens:", p.layer2_auto_set_screens);
+                ui.label("Auto-Set Screens:");
+                {
+                    let before = p.layer2_auto_set_screens;
+                    if ui
+                        .checkbox(&mut p.layer2_auto_set_screens, "")
+                        .on_hover_text(
+                            "Lunar Magic 3.40: when saving, the level's Number of Screens is \
+                             set to the screens actually used by its objects and sprites. \
+                             Touching this installs the per-level settings on ROMs that \
+                             don't have them yet.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if p.layer2_auto_set_screens != before {
+                        scroll_ext_touched = true;
+                    }
+                }
+                ui.end_row();
                 row_slider!("Layer 3:", p.layer3, 0..=3_i32);
                 ui.label("");
                 if ui.button("Layer 3 Settings…").on_hover_text(
@@ -779,6 +807,9 @@ impl UiLevelEditor {
 
             if changed {
                 self.mark_edited();
+            }
+            if scroll_ext_touched {
+                self.scroll_ext_dirty = true;
             }
             if rebuild_tiles {
                 self.rebuild_tiles();
