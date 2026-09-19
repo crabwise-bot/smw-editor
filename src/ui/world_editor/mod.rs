@@ -15,6 +15,7 @@ mod reveal_list_editor;
 mod se_teleport_editor;
 mod secret_exits;
 mod sprite_tool;
+mod submap_music;
 
 use std::{
     collections::HashMap,
@@ -235,6 +236,9 @@ pub(super) struct OverworldEditState {
     /// Mario's and Luigi's overworld starting positions (`$009EF0`, LM
     /// v1.60/v1.90). Undoable like everything else in this state.
     pub start_positions:      smwe_rom::overworld::start_positions::OverworldStartPositions,
+    /// Per-submap overworld music (`$048D8A` + mirror `$04DBC8`, LM v1.30
+    /// "Change Overworld Music"). Undoable like everything else in this state.
+    pub submap_music:         smwe_rom::overworld::submap_music::SubmapMusic,
 }
 
 impl Undo for OverworldEditState {
@@ -320,6 +324,19 @@ impl Undo for OverworldEditState {
                 &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
             )
         };
+        let music_bytes = take(&mut pos, smwe_rom::overworld::submap_music::SUBMAP_MUSIC_LEN);
+        let submap_music = if music_bytes.len() == smwe_rom::overworld::submap_music::SUBMAP_MUSIC_LEN {
+            let mut tracks = [0u8; smwe_rom::overworld::submap_music::SUBMAP_MUSIC_LEN];
+            tracks.copy_from_slice(&music_bytes);
+            smwe_rom::overworld::submap_music::SubmapMusic { tracks }
+        } else {
+            // Payloads written before submap music was undoable predate this
+            // tail; fall back to the vanilla table (can't happen for payloads
+            // this build writes).
+            smwe_rom::overworld::submap_music::SubmapMusic {
+                tracks: smwe_rom::overworld::submap_music::SubmapMusic::VANILLA,
+            }
+        };
         Self {
             layer1_tiles: l1,
             layer2_words,
@@ -331,6 +348,7 @@ impl Undo for OverworldEditState {
             secret_exits,
             reveal_list,
             start_positions,
+            submap_music,
         }
     }
 
@@ -368,6 +386,7 @@ impl Undo for OverworldEditState {
         out.extend_from_slice(&self.reveal_list.before);
         out.extend_from_slice(&self.reveal_list.after);
         out.extend_from_slice(&self.start_positions.encode());
+        out.extend_from_slice(&self.submap_music.encode());
         out
     }
 
@@ -387,6 +406,7 @@ impl Undo for OverworldEditState {
             + self.secret_exits.entries.len() * 4
             + smwe_rom::overworld::reveal_list::REVEAL_COUNT * 2
             + smwe_rom::overworld::start_positions::START_POSITIONS_LEN
+            + smwe_rom::overworld::submap_music::SUBMAP_MUSIC_LEN
     }
 }
 
@@ -535,6 +555,10 @@ pub struct UiWorldEditor {
     reveal_list_dirty:       bool,
     /// True once a start position has been edited (in-place save on Ctrl+S).
     start_positions_dirty:   bool,
+    /// True once a submap's music has been edited (in-place save on Ctrl+S).
+    submap_music_dirty:      bool,
+    /// LM v1.30 "Change Overworld Music" dialog visibility.
+    show_submap_music:       bool,
     /// Click-to-place arming for the Mario/Luigi start markers on the main
     /// map: while set, the next canvas click in Select mode moves that
     /// player's starting position instead of selecting a tile.
@@ -616,6 +640,16 @@ impl UiWorldEditor {
                     &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
                 )
             });
+        // Per-submap overworld music ($048D8A/$04DBC8, LM v1.30 "Change
+        // Overworld Music"); edited in place like the tables above, written
+        // back on save only when dirty.
+        let submap_music =
+            smwe_rom::overworld::submap_music::SubmapMusic::parse(rom.rom_bytes(), 0).unwrap_or_else(|e| {
+                log::warn!("Could not parse overworld submap music: {e}");
+                smwe_rom::overworld::submap_music::SubmapMusic {
+                    tracks: smwe_rom::overworld::submap_music::SubmapMusic::VANILLA,
+                }
+            });
         let edit_state = UndoableData::new(OverworldEditState {
             layer1_tiles: source_layer1_tiles,
             layer2_words: Vec::new(),
@@ -627,6 +661,7 @@ impl UiWorldEditor {
             secret_exits,
             reveal_list,
             start_positions,
+            submap_music,
         });
         // Decode vanilla level names before `rom` is moved into the struct.
         let vanilla_level_names =
@@ -711,6 +746,8 @@ impl UiWorldEditor {
             show_reveal_list_editor: false,
             reveal_list_dirty: false,
             start_positions_dirty: false,
+            submap_music_dirty: false,
+            show_submap_music: false,
             place_start_target: None,
         };
         editor.load_submap();
@@ -795,6 +832,7 @@ impl DockableEditorTool for UiWorldEditor {
         self.se_teleport_editor_window(ui.ctx());
         self.secret_exits_window(ui.ctx());
         self.reveal_list_editor_window(ui.ctx());
+        self.submap_music_window(ui.ctx());
     }
 
     fn on_closed(&mut self) {
@@ -812,6 +850,7 @@ impl DockableEditorTool for UiWorldEditor {
         self.se_teleports_dirty = false;
         self.reveal_list_dirty = false;
         self.start_positions_dirty = false;
+        self.submap_music_dirty = false;
         // The ROM now matches the edit state; future saves skip rewrites.
         self.sprites_at_load =
             self.edit_state.read(|s| (s.vanilla_sprites.clone(), s.custom_sprites.clone(), s.sprite_size_table));
@@ -940,6 +979,17 @@ impl DockableEditorTool for UiWorldEditor {
             let pos = self.edit_state.read(|s| s.start_positions);
             pos.apply_to_rom(rom_bytes, header_offset)
                 .map_err(|e| anyhow::anyhow!("Cannot apply start position edits: {e}"))?;
+        }
+
+        // ── Overworld submap music (LM v1.30 "Change Overworld Music") ────
+        // In-place write of the two 7-byte tables `$048D8A` (overworld init)
+        // and `$04DBC8` (submap swap), always together so the mirrors can't
+        // desync; only touches the ROM if the user actually changed a track.
+        if self.submap_music_dirty {
+            let music = self.edit_state.read(|s| s.submap_music);
+            music
+                .apply_to_rom(rom_bytes, header_offset)
+                .map_err(|e| anyhow::anyhow!("Cannot apply submap music edits: {e}"))?;
         }
 
         // ── Overworld ExAnimation (custom tile/palette animation) ────────────
@@ -1278,6 +1328,13 @@ impl UiWorldEditor {
             // ── Starting positions (LM v1.60 Mario / v1.90 Luigi parity) ────
             ui.separator();
             self.start_position_panel(ui);
+
+            // ── Submap music (LM v1.30 "Change Overworld Music" parity) ──
+            ui.separator();
+            if ui.button("Overworld Submap Music…").clicked() {
+                self.show_submap_music = true;
+            }
+            ui.small("Which music track each overworld submap plays.");
 
             // ── Editing mode toolbar ────────────────────────────────
             ui.separator();
@@ -2391,6 +2448,7 @@ mod tests {
             start_positions:      smwe_rom::overworld::start_positions::OverworldStartPositions::decode(
                 &[0u8; smwe_rom::overworld::start_positions::START_POSITIONS_LEN],
             ),
+            submap_music:         smwe_rom::overworld::submap_music::SubmapMusic { tracks: [9, 9, 9, 9, 9, 9, 9] },
         };
         let back = OverworldEditState::from_bytes(state.to_bytes());
         assert_eq!(back.layer1_tiles, state.layer1_tiles);
@@ -2405,6 +2463,7 @@ mod tests {
         assert_eq!(back.reveal_list.after, state.reveal_list.after);
         assert_eq!(back.start_positions.mario.pixel_x, state.start_positions.mario.pixel_x);
         assert_eq!(back.start_positions.luigi.tile_y, state.start_positions.luigi.tile_y);
+        assert_eq!(back.submap_music.tracks, state.submap_music.tracks);
     }
 
     /// Truncated buffers must not panic — `from_bytes` degrades gracefully.

@@ -12,6 +12,7 @@ pub mod reveal_list;
 pub mod secret_exits;
 pub mod sprites;
 pub mod start_positions;
+pub mod submap_music;
 
 use crate::snes_utils::{
     addr::{AddrPc, AddrSnes},
