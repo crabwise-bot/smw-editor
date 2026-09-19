@@ -171,6 +171,11 @@ impl UiLevelEditor {
 
         ui.separator();
         ui.label(format!("Level {:03X}", self.level_num));
+        // Lunar Magic v1.11 "Open Level from Address": the displayed level
+        // number stays the ordinary slot; show where Layer 1 came from.
+        if let Some(pc) = self.layer1_source_address {
+            ui.small(format!("Layer 1 ← PC 0x{pc:05X} (not in pointer table)"));
+        }
         let is_vertical = self.level_properties.is_vertical;
         {
             let props = self.level_properties;

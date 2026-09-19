@@ -28,4 +28,12 @@ pub trait DockableEditorTool {
     fn level_number(&self) -> Option<u16> {
         None
     }
+    /// Lunar Magic v1.11 "Open Level from Address": decode the Layer-1 object
+    /// stream at the given headerless PC address into this tool. Sprites,
+    /// entrances and background are intentionally not touched.
+    /// Returns `Ok(None)` when this tool is not a level editor, otherwise
+    /// `Ok(Some((object_count, bytes_consumed)))`.
+    fn open_layer1_from_address(&mut self, _pc: u32) -> Result<Option<(usize, usize)>> {
+        Ok(None)
+    }
 }

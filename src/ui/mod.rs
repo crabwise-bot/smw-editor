@@ -100,6 +100,13 @@ pub struct UiMainWindow {
     delete_levels_pending:     Option<Vec<u16>>,
     /// Status line shown in the delete-levels dialog.
     delete_levels_status:      Option<String>,
+    /// Open-Level-from-Address dialog (File > Open Level from Address...,
+    /// LM v1.11 parity).
+    show_level_addr_dialog:    bool,
+    /// Hex text of the PC address field in the from-address dialog.
+    level_addr_text:           String,
+    /// Generic dialog error toast (title "Error").
+    dialog_error:              Option<String>,
     /// Share-data dialog (File > Levels > Share Data Between Levels to Save Space...).
     show_share_data_dialog:    bool,
     /// Status line shown in the share-data dialog.
@@ -173,6 +180,9 @@ impl UiMainWindow {
             delete_levels_critical: Vec::new(),
             delete_levels_pending: None,
             delete_levels_status: None,
+            show_level_addr_dialog: false,
+            level_addr_text: String::new(),
+            dialog_error: None,
             show_share_data_dialog: false,
             share_data_status: None,
             show_exit_dialog: false,
@@ -261,6 +271,48 @@ impl eframe::App for UiMainWindow {
             });
             if !open {
                 self.save_error = None;
+            }
+        }
+
+        // Open Level from Address dialog (File > Open Level from Address...,
+        // Lunar Magic v1.11 parity).
+        if self.show_level_addr_dialog {
+            let mut open = true;
+            let mut confirmed = false;
+            Window::new("Open Level From Address (in hex)").open(&mut open).resizable(false).show(ctx, |ui| {
+                ui.label("PC address to open level (in hex)");
+                let resp = ui.text_edit_singleline(&mut self.level_addr_text);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_level_addr_dialog = false;
+                    }
+                });
+                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirmed = true;
+                }
+            });
+            if !open {
+                self.show_level_addr_dialog = false;
+            } else if confirmed {
+                self.show_level_addr_dialog = false;
+                self.confirm_open_level_address(rom.as_ref());
+            }
+        }
+
+        // Generic dialog error toast.
+        if let Some(err) = &self.dialog_error.clone() {
+            let mut open = true;
+            Window::new("Error").open(&mut open).show(ctx, |ui| {
+                ui.label(err);
+                if ui.button("OK").clicked() {
+                    self.dialog_error = None;
+                }
+            });
+            if !open {
+                self.dialog_error = None;
             }
         }
 
@@ -577,6 +629,60 @@ impl UiMainWindow {
                 self.pending_ips_export = Some(patch_dest);
             } else {
                 self.run_ips_export(rom, &patch_dest);
+            }
+        }
+    }
+
+    /// Confirm handler for the Open Level from Address dialog (Lunar Magic
+    /// v1.11 parity). Imports the Layer-1 object stream at the typed PC
+    /// address into the first open level editor tab, opening a level editor
+    /// first when none is open. The displayed level number stays the current
+    /// ordinary slot; sprites, entrances and background are not loaded from
+    /// the address; the next save inserts the imported Layer 1 into that
+    /// slot via the normal save path.
+    fn confirm_open_level_address(&mut self, rom: Option<&Arc<SmwRom>>) {
+        let text = self.level_addr_text.trim().to_string();
+        let hex = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(&text);
+        let pc = match u32::from_str_radix(hex, 16) {
+            Ok(pc) => pc,
+            Err(_) => {
+                self.dialog_error = Some(format!("\"{text}\" is not a valid hex address."));
+                return;
+            }
+        };
+        let Some(rom) = rom else {
+            self.dialog_error = Some("No ROM loaded.".to_string());
+            return;
+        };
+
+        let mut import_err: Option<anyhow::Error> = None;
+        let mut handled = false;
+        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
+            match tab.open_layer1_from_address(pc) {
+                Ok(Some((objects, bytes))) => {
+                    log::info!("Opened level from address 0x{pc:05X}: {objects} objects ({bytes} bytes)");
+                    handled = true;
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    import_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = import_err {
+            self.dialog_error = Some(format!("Could not open level from address 0x{pc:X}: {e:#}"));
+        } else if !handled {
+            let path = self.rom_path.clone().unwrap_or_default();
+            match UiLevelEditor::new(Arc::clone(&self.gl), Arc::clone(rom), path) {
+                Ok(mut editor) => match editor.open_layer1_from_address(pc) {
+                    Ok(_) => self.open_tool(editor),
+                    Err(e) => {
+                        self.dialog_error = Some(format!("Could not open level from address 0x{pc:X}: {e:#}"));
+                    }
+                },
+                Err(e) => self.dialog_error = Some(format!("Failed to open level editor: {e:#}")),
             }
         }
     }
@@ -1378,6 +1484,14 @@ impl UiMainWindow {
                         }
                         if ui.button("Save ROM As...").clicked() {
                             self.save_rom_as();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        // Lunar Magic v1.11 parity: open a Layer-1 object
+                        // stream from a raw PC address into the current level.
+                        if ui.button("Open Level from Address...").clicked() {
+                            self.show_level_addr_dialog = true;
+                            self.level_addr_text.clear();
                             ui.close_menu();
                         }
                         ui.separator();
