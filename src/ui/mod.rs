@@ -24,6 +24,7 @@ use egui_file_dialog::FileDialog;
 use egui_phosphor::Variant;
 use smwe_rom::{
     level_deletion::{delete_levels, level_modified_vs, GAMEPLAY_CRITICAL_LEVELS},
+    level_sharing::share_data_between_levels,
     overworld::level_number_for_index,
     rom_expansion::{expand_rom, expansion_targets, format_size, split_smc_header},
     snes_utils::rom::Rom,
@@ -99,6 +100,10 @@ pub struct UiMainWindow {
     delete_levels_pending:     Option<Vec<u16>>,
     /// Status line shown in the delete-levels dialog.
     delete_levels_status:      Option<String>,
+    /// Share-data dialog (File > Levels > Share Data Between Levels to Save Space...).
+    show_share_data_dialog:    bool,
+    /// Status line shown in the share-data dialog.
+    share_data_status:         Option<String>,
     /// Set when user tries to close the app with unsaved changes
     show_exit_dialog:          bool,
     /// Restore points + original-ROM reference copy (Restore menu, LM v1.80).
@@ -168,6 +173,8 @@ impl UiMainWindow {
             delete_levels_critical: Vec::new(),
             delete_levels_pending: None,
             delete_levels_status: None,
+            show_share_data_dialog: false,
+            share_data_status: None,
             show_exit_dialog: false,
             restore_manager: RestoreManager::new(),
             ips_apply_dialog: FileDialog::new(),
@@ -226,6 +233,10 @@ impl eframe::App for UiMainWindow {
         }
         if self.delete_levels_pending.is_some() {
             self.delete_levels_confirm_window(ctx);
+        }
+        // Share-data dialog (File > Levels > Share Data Between Levels to Save Space...).
+        if self.show_share_data_dialog {
+            self.share_data_window(ctx);
         }
         // IPS export same-directory warning (LM v1.80).
         self.show_ips_export_warning_dialog(ctx, rom.as_ref());
@@ -986,6 +997,83 @@ impl UiMainWindow {
         }
     }
 
+    /// File > Levels > Share Data Between Levels to Save Space... dialog.
+    /// Mirrors LM v3.50: scan all levels for byte-identical data blocks and
+    /// share one copy between them, reclaiming the freed blocks as free space.
+    fn share_data_window(&mut self, ctx: &Context) {
+        let mut open = true;
+        let mut close_requested = false;
+        let mut share_requested = false;
+        Window::new("Share Data Between Levels to Save Space").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(
+                "Scans all 512 levels for byte-identical Layer 1, sprite,\n\
+                     and Layer 2 data blocks. Levels holding identical blocks\n\
+                     are repointed at a single shared copy, and the freed\n\
+                     blocks are erased — reclaiming them as free space.",
+            );
+            ui.separator();
+            ui.label(
+                "Sharing is invisible to the game: every level loads\n\
+                     exactly the same data afterwards. A restore point is\n\
+                     created first, so you can undo from the Restore menu.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Share Data").clicked() {
+                    share_requested = true;
+                }
+                if ui.button("Close").clicked() {
+                    close_requested = true;
+                }
+            });
+            if let Some(status) = &self.share_data_status.clone() {
+                ui.separator();
+                ui.label(status);
+            }
+        });
+        if !open || close_requested {
+            self.show_share_data_dialog = false;
+            self.share_data_status = None;
+        } else if share_requested {
+            let ctx2 = ctx.clone();
+            self.perform_share_data(&ctx2);
+        }
+    }
+
+    /// Run the share pass on the current ROM image (unsaved tab edits are
+    /// merged in first), install the result atomically, and reload.
+    fn perform_share_data(&mut self, ctx: &Context) {
+        let result = (|| -> anyhow::Result<String> {
+            let mut rom_bytes = self.current_rom_image()?;
+            let has_smc_header = rom_bytes.len() % 0x400 == 0x200;
+            let header_offset = usize::from(has_smc_header) * 0x200;
+            // Keep the pre-share image for the restore point; only snapshotted
+            // when the pass actually changes something.
+            let before = rom_bytes.clone();
+            let report =
+                share_data_between_levels(&mut rom_bytes, header_offset).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if report.groups_merged == 0 {
+                return Ok("No duplicate level data found — nothing changed.".to_string());
+            }
+            self.restore_manager.create_point("Before share data".to_string(), before);
+            self.install_rom_image(ctx, &rom_bytes)?;
+            Ok(format!(
+                "Shared data across {} level(s): {} duplicate group(s) merged, {} block(s) erased, {} bytes \
+                 reclaimed as free space.",
+                report.levels_shared, report.groups_merged, report.blocks_erased, report.bytes_reclaimed
+            ))
+        })();
+        match result {
+            Ok(status) => {
+                self.share_data_status = Some(status.clone());
+                log::info!("{status}");
+            }
+            Err(e) => {
+                self.share_data_status = Some(format!("Share data failed: {e:#}"));
+            }
+        }
+    }
+
     // ── Restore menu (LM v1.80 parity) ──────────────────────────────
 
     /// Full current ROM image: the file on disk with all unsaved tab edits
@@ -1331,6 +1419,11 @@ impl UiMainWindow {
                             ui.separator();
                             if ui.button("Delete Levels from ROM...").clicked() {
                                 self.open_delete_levels_dialog(ctx);
+                                ui.close_menu();
+                            }
+                            if ui.button("Share Data Between Levels to Save Space...").clicked() {
+                                self.share_data_status = None;
+                                self.show_share_data_dialog = true;
                                 ui.close_menu();
                             }
                         });

@@ -973,13 +973,27 @@ impl DockableEditorTool for UiLevelEditor {
             let old_block = PRIMARY_HEADER_SIZE + level.layer1.as_bytes().len();
             let new_block = PRIMARY_HEADER_SIZE + new_l1.len();
 
-            let dest = if new_block <= old_block {
+            // Shared-block safety (Lunar Magic 3.50 "share data between
+            // levels"): when another level points at this block, never erase
+            // it or overwrite it in place — relocate the saved level to fresh
+            // space and leave the shared block intact. This also covers the
+            // vanilla ROM's already-shared blocks (e.g. the TEST levels).
+            let l1_shared = smwe_rom::level_sharing::block_shared_with_other_levels(
+                rom_bytes,
+                smwe_rom::level_sharing::BlockKind::L1,
+                old_snes,
+                self.level_num,
+                header_offset,
+            );
+            let dest = if new_block <= old_block && !l1_shared {
                 old_file
             } else {
                 let pc = find_free_space(rom_bytes, new_block, 0x008000, header_offset).ok_or_else(|| {
                     anyhow::anyhow!("No free space for level {:03X} layer 1 ({} bytes)", self.level_num, new_block)
                 })?;
-                rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                if !l1_shared {
+                    rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                }
                 let b = AddrSnes::try_from_lorom(AddrPc(pc as u32))?.0.to_le_bytes();
                 rom_bytes[ptr_off..ptr_off + 3].copy_from_slice(&b[..3]);
                 pc + header_offset
@@ -1015,7 +1029,16 @@ impl DockableEditorTool for UiLevelEditor {
             let old_block = 1 + level.sprite_layer.as_bytes().len();
             let new_block = 1 + new_sprites.len();
 
-            let dest = if new_block <= old_block {
+            // Shared-block safety: see the layer-1 block above. Sprite data
+            // must stay in bank $07 either way.
+            let sprites_shared = smwe_rom::level_sharing::block_shared_with_other_levels(
+                rom_bytes,
+                smwe_rom::level_sharing::BlockKind::Sprites,
+                old_snes.0,
+                self.level_num,
+                header_offset,
+            );
+            let dest = if new_block <= old_block && !sprites_shared {
                 old_file
             } else {
                 // Must stay in bank $07: SNES $078000-$07FFFF = PC $038000-$03FFFF.
@@ -1030,7 +1053,9 @@ impl DockableEditorTool for UiLevelEditor {
                         )
                     },
                 )?;
-                rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                if !sprites_shared {
+                    rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                }
                 let new_off = AddrSnes::try_from_lorom(AddrPc(pc as u32))?.0 as u16;
                 rom_bytes[ptr_off..ptr_off + 2].copy_from_slice(&new_off.to_le_bytes());
                 pc + header_offset
@@ -1093,7 +1118,15 @@ impl DockableEditorTool for UiLevelEditor {
                     let old_block = LAYER2_HEADER_SIZE + objects.as_bytes().len();
                     let new_block = LAYER2_HEADER_SIZE + new_l2.len();
 
-                    let dest = if new_block <= old_block {
+                    // Shared-block safety: see the layer-1 block above.
+                    let l2_shared = smwe_rom::level_sharing::block_shared_with_other_levels(
+                        rom_bytes,
+                        smwe_rom::level_sharing::BlockKind::L2,
+                        l2_raw,
+                        self.level_num,
+                        header_offset,
+                    );
+                    let dest = if new_block <= old_block && !l2_shared {
                         old_file
                     } else {
                         let pc = find_free_space(rom_bytes, new_block, 0x008000, header_offset).ok_or_else(|| {
@@ -1103,7 +1136,9 @@ impl DockableEditorTool for UiLevelEditor {
                                 new_block
                             )
                         })?;
-                        rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                        if !l2_shared {
+                            rom_bytes[old_file..old_file + old_block].fill(0xFF);
+                        }
                         let b = AddrSnes::try_from_lorom(AddrPc(pc as u32))?.0.to_le_bytes();
                         rom_bytes[ptr_off..ptr_off + 3].copy_from_slice(&b[..3]);
                         pc + header_offset
