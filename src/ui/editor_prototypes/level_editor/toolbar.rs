@@ -248,6 +248,14 @@ impl UiLevelEditor {
             ) {
                 self.show_xref_search = !self.show_xref_search;
             }
+            if tbtn(
+                ui,
+                icon::STACK_PLUS,
+                "Custom Collections of Objects (named groups of custom extended objects, LM 3.60)",
+                self.show_custom_collections,
+            ) {
+                self.show_custom_collections = !self.show_custom_collections;
+            }
             if tbtn(ui, icon::DOOR, "Secondary entrances", self.show_secondary_entrances) {
                 self.show_secondary_entrances = !self.show_secondary_entrances;
             }

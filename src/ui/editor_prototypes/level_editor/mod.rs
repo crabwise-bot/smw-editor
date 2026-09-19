@@ -2,6 +2,7 @@ mod background_layer;
 mod bg_tilemap_editor;
 mod boss_text_editor;
 mod central_panel;
+mod custom_collections_ui;
 mod custom_tooltips_ui;
 mod dm16_editor;
 mod edit_manual_dialog;
@@ -384,6 +385,27 @@ pub struct UiLevelEditor {
     edit_manual_bytes:  [String; 3],
     edit_manual_error:  Option<String>,
 
+    // Custom Collections of Objects (Lunar Magic v3.60): per-user named
+    // groups of custom extended objects. Editor configuration, not ROM
+    // data — persisted to the platform config dir as JSON on every change.
+    show_custom_collections: bool,
+    custom_collections:      crate::custom_collections::CustomCollections,
+    /// Selected collection in the manager window.
+    cc_selected:             Option<usize>,
+    cc_new_collection_name:  String,
+    cc_rename_mode:          bool,
+    cc_rename_buf:           String,
+    cc_new_entry_name:       String,
+    cc_new_entry_id:         String,
+    /// (collection, entry) being edited inline, with its text buffers.
+    cc_edit_entry:           Option<(usize, usize)>,
+    cc_edit_name:            String,
+    cc_edit_id:              String,
+    cc_status:               Option<String>,
+    /// (collection, entry) armed for canvas placement in Draw mode; the next
+    /// click places the custom extended object instead of the paint block.
+    draw_custom_entry:       Option<(usize, usize)>,
+
     // Custom object tooltips (Lunar Magic v3.60: user-settable tooltip text
     // for objects). Per-user store — never written to the ROM.
     custom_tooltips:      crate::custom_tooltips::CustomTooltips,
@@ -674,6 +696,21 @@ impl UiLevelEditor {
             edit_manual_target: None,
             edit_manual_bytes: [String::new(), String::new(), String::new()],
             edit_manual_error: None,
+            // Custom Collections of Objects (Lunar Magic v3.60).
+            show_custom_collections: false,
+            custom_collections: crate::custom_collections::CustomCollections::load(),
+            cc_selected: None,
+            cc_new_collection_name: String::new(),
+            cc_rename_mode: false,
+            cc_rename_buf: String::new(),
+            cc_new_entry_name: String::new(),
+            cc_new_entry_id: String::new(),
+            cc_edit_entry: None,
+            cc_edit_name: String::new(),
+            cc_edit_id: String::new(),
+            cc_status: None,
+            draw_custom_entry: None,
+            // Custom object tooltips (Lunar Magic v3.60).
             custom_tooltips: crate::custom_tooltips::CustomTooltips::load(),
             show_custom_tooltips: false,
             tooltip_kind: crate::custom_tooltips::ObjectKind::Standard,
@@ -777,6 +814,7 @@ impl DockableEditorTool for UiLevelEditor {
         }
         self.xref_search_window(&ctx);
         self.edit_manual_window(&ctx);
+        self.custom_collections_window(&ctx);
         self.custom_tooltips_window(&ctx);
         self.title_credits_editor_window(&ctx);
         self.bg_tilemap_editor_window(&ctx);
