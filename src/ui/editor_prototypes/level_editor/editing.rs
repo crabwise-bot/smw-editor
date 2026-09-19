@@ -427,7 +427,13 @@ impl UiLevelEditor {
         let target_px_y = rel.y.floor() * 16.0;
         let (min_dx, min_dy, _, _) = self.sprite_pixel_bounds(self.draw_sprite_id).unwrap_or((0, 0, 16, 16));
         let anchor_x = ((target_px_x - min_dx as f32) / 16.0).round().max(0.0) as u32;
-        let anchor_y = ((target_px_y - min_dy as f32) / 16.0).round().max(0.0) as u32;
+        // Same 5-bit Y limit as objects (LM v3.00 dynamic dimensions): the
+        // sprite stream wraps y mod 32 on save, so clamp placement to rows
+        // 0-31 in horizontal levels instead of silently wrapping.
+        let mut anchor_y = ((target_px_y - min_dy as f32) / 16.0).round().max(0.0) as u32;
+        if !self.level_properties.is_vertical {
+            anchor_y = anchor_y.min(31);
+        }
         let new_idx = self.sprites.read(|sprites| sprites.sprites.len());
         self.sprites.write(|sprites| {
             sprites.sprites.push(super::sprite_layer::EditableSprite {
@@ -534,7 +540,14 @@ impl UiLevelEditor {
     fn place_object_at(&mut self, pos: Pos2, origin: Pos2, tile_sz: f32) {
         let rel = (pos - origin) / tile_sz;
         let tx = rel.x.floor() as u32;
-        let ty = rel.y.floor() as u32;
+        let mut ty = rel.y.floor() as u32;
+        // Dynamic dimensions (LM v3.00): the vanilla object stream encodes a
+        // 5-bit Y, so horizontal levels can only place rows 0-31. Rows 32+
+        // need LM's 32-row band-jump format (ext 01/03), which this editor
+        // does not write — clamp instead of producing an unsavable object.
+        if !self.level_properties.is_vertical {
+            ty = ty.min(31);
+        }
 
         // Custom Collections of Objects (LM 3.60): an armed custom entry
         // places a 3-byte extended object and paints no tiles — these are
@@ -857,7 +870,7 @@ impl UiLevelEditor {
     /// Sets `suppress_click_select` for one frame when a drag ends with a
     /// change, so the release click doesn't re-trigger selection.
     pub(super) fn update_object_drag(
-        &mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32, level_w: u32, level_h: u32,
+        &mut self, resp: &egui::Response, origin: Pos2, tile_sz: f32, level_w: u32, level_h: u32, is_vertical: bool,
     ) {
         self.suppress_click_select = false;
         let primary = egui::PointerButton::Primary;
@@ -882,8 +895,17 @@ impl UiLevelEditor {
                     match d.handle {
                         None => {
                             // Body move: tile-snapped, clamped to the level.
+                            // Dynamic dimensions (LM v3.00): the vanilla
+                            // object stream encodes a 5-bit Y, so in
+                            // horizontal levels the origin can never go below
+                            // row 31 (rows 32+ need LM's 32-row band-jump
+                            // format). Clamp here so a drag can't produce an
+                            // unsavable object; the extent may still hang
+                            // below row 31 via the height setting.
+                            let max_y = level_h.saturating_sub(d.cur_h).max(0) as i32;
+                            let max_y = if is_vertical { max_y } else { max_y.min(31) };
                             d.cur_x = (tx - d.grab_dx).max(0).min(level_w.saturating_sub(d.cur_w).max(0) as i32) as u32;
-                            d.cur_y = (ty - d.grab_dy).max(0).min(level_h.saturating_sub(d.cur_h).max(0) as i32) as u32;
+                            d.cur_y = (ty - d.grab_dy).max(0).min(max_y) as u32;
                         }
                         Some(handle) => {
                             let (nx, ny, nw, nh) = apply_resize(d.orig_x, d.orig_y, d.orig_w, d.orig_h, handle, tx, ty);

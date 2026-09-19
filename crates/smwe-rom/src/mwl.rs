@@ -62,6 +62,7 @@ use crate::{
     exgfx,
     freespace,
     level::{
+        dimensions::VANILLA_HORIZONTAL_HEIGHT_TILES,
         headers::{SecondaryHeader, SECONDARY_HEADER_SIZE},
         Layer2Data,
         Level,
@@ -190,6 +191,8 @@ pub enum MwlError {
 
     #[error("Bad Direct Map16 section: {0}")]
     BadDirectMap16(#[from] direct_map16::Dm16Error),
+    #[error("Bad dynamic level height: {0}")]
+    BadLevelHeight(#[from] crate::level::dimensions::LevelHeightError),
     #[error("ROM error: {0}")]
     Rom(#[from] RomError),
 }
@@ -375,13 +378,18 @@ pub fn bg_descriptor(high_byte: u8) -> u32 {
 
 /// The 64-byte level-info section: level number `u16`, 4-byte secondary
 /// header, 1-byte flags, 4-byte midway fields, main-entrance X/Y,
-/// LM 3.40+ extension bytes at offsets 14-17 (`$06FC00`, `$06FE00`,
-/// expanded-level-format byte, `$06FA00` Layer 2 scroll extension),
-/// the rest reserved (zero).
-pub fn encode_level_info(level_num: u16, secondary: &SecondaryHeader) -> [u8; LEVEL_INFO_SIZE] {
+/// header, dynamic level height `u16` (bytes 6-7, 0 = vanilla/default 27
+/// tiles — LM v3.00 dynamic dimensions), LM 3.40+ extension bytes at
+/// offsets 14-17 (`$06FC00`, `$06FE00`, expanded-level-format byte,
+/// `$06FA00` Layer 2 scroll extension), the rest reserved (zero).
+pub fn encode_level_info(level_num: u16, secondary: &SecondaryHeader, height_tiles: u16) -> [u8; LEVEL_INFO_SIZE] {
     let mut out = [0u8; LEVEL_INFO_SIZE];
     out[0..2].copy_from_slice(&level_num.to_le_bytes());
     out[2..6].copy_from_slice(&secondary.bytes);
+    // 0 encodes the vanilla default so MWL files from before this field
+    // existed (all zeroes in the reserved area) keep meaning "default".
+    let stored = if height_tiles == VANILLA_HORIZONTAL_HEIGHT_TILES { 0 } else { height_tiles };
+    out[6..8].copy_from_slice(&stored.to_le_bytes());
     // Byte 17: LM 3.40+ Layer 2 scroll extension ($06FA00, SHCvvvvv).
     out[17] = secondary.scroll_ext;
     out
@@ -390,9 +398,12 @@ pub fn encode_level_info(level_num: u16, secondary: &SecondaryHeader) -> [u8; LE
 /// Decoded level-info section.
 #[derive(Debug, Clone)]
 pub struct LevelInfo {
-    pub level_num: u16,
-    pub secondary: SecondaryHeader,
-    pub raw:       [u8; LEVEL_INFO_SIZE],
+    pub level_num:    u16,
+    pub secondary:    SecondaryHeader,
+    /// Dynamic level height in tiles (LM v3.00); 0 in the file means the
+    /// vanilla default (27).
+    pub height_tiles: u16,
+    pub raw:          [u8; LEVEL_INFO_SIZE],
 }
 
 pub fn decode_level_info(section: &[u8]) -> Result<LevelInfo, MwlError> {
@@ -405,7 +416,8 @@ pub fn decode_level_info(section: &[u8]) -> Result<LevelInfo, MwlError> {
     let mut raw = [0u8; LEVEL_INFO_SIZE];
     raw.copy_from_slice(section);
     let secondary = SecondaryHeader { bytes: sec, scroll_ext: section[17] };
-    Ok(LevelInfo { level_num, secondary, raw })
+    let height_tiles = u16::from_le_bytes([section[6], section[7]]);
+    Ok(LevelInfo { level_num, secondary, height_tiles, raw })
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -427,7 +439,8 @@ pub fn export_level(rom: &SmwRom, level_num: u32) -> Result<MwlFile, MwlError> {
     let level: &Level = &rom.levels[level_num as usize];
 
     // --- Section 0: level info ---
-    let section0 = encode_level_info(level_num as u16, &level.secondary_header).to_vec();
+    let section0 =
+        encode_level_info(level_num as u16, &level.secondary_header, rom.level_heights.get(level_num as u16)).to_vec();
 
     // --- Section 1: Layer 1 ---
     let l1_ptr = read_pointer24(&rom.rom, AddrSnes(0x05E000 + level_num * 3))?;
@@ -601,6 +614,32 @@ pub fn import_level(
     }
     // LM 3.40+ Layer 2 scroll extension byte ($06FA00, SHCvvvvv).
     write_snes(rom_bytes, 0x06FA00 + target_level, &[info.secondary.scroll_ext], header_offset)?;
+
+    // --- Section 0 (continued): dynamic level height (LM v3.00) ---
+    // Stored in the level-info reserved bytes 6-7 (0 = vanilla/default).
+    // Merged into the "SMWLVLH1" RATS block like the editor's own save path.
+    // A default height (0/27) clears the target's entry so importing an old
+    // MWL over a customized level restores vanilla instead of leaving the
+    // stale custom height behind.
+    {
+        use crate::level::dimensions::{LevelHeights, VANILLA_HORIZONTAL_HEIGHT_TILES};
+        let height = info.height_tiles;
+        let mut heights = match LevelHeights::parse(rom_bytes) {
+            Ok(data) => data,
+            Err(crate::level::dimensions::LevelHeightError::NotFound) => LevelHeights::default(),
+            Err(e) => return Err(MwlError::BadLevelHeight(e)),
+        };
+        if height != 0 && height != VANILLA_HORIZONTAL_HEIGHT_TILES {
+            // The target level's screen count comes from the primary header
+            // at the start of the Layer 1 payload (byte 0, low 5 bits).
+            let (_, _, l1_payload) = decode_section(SECTION_LAYER1, &mwl.sections[SECTION_LAYER1])?;
+            let screens = l1_payload.first().map(|b| (b & 0x1F) as u32 + 1).unwrap_or(1);
+            heights.set(target_level as u16, height, screens)?;
+        } else {
+            heights.clear(target_level as u16);
+        }
+        heights.write_to_rom(rom_bytes, header_offset)?;
+    }
 
     // --- Section 1: Layer 1 (5-byte primary header + object stream) ---
     {
@@ -837,7 +876,7 @@ mod tests {
     #[test]
     fn level_info_round_trip() {
         let sec = SecondaryHeader { bytes: [0x1A, 0x2B, 0x3C, 0x4D], scroll_ext: 0xA5 };
-        let raw = encode_level_info(0x105, &sec);
+        let raw = encode_level_info(0x105, &sec, 40);
         assert_eq!(raw.len(), LEVEL_INFO_SIZE);
         // Byte 17 carries the LM 3.40+ Layer 2 scroll extension ($06FA00).
         assert_eq!(raw[17], 0xA5);
@@ -845,6 +884,12 @@ mod tests {
         assert_eq!(info.level_num, 0x105);
         assert_eq!(info.secondary.bytes, sec.bytes);
         assert_eq!(info.secondary.scroll_ext, 0xA5);
+        assert_eq!(info.height_tiles, 40);
+        // The vanilla default encodes as 0 so pre-existing MWL files (zeroed
+        // reserved bytes) keep decoding as "default".
+        let raw_default = encode_level_info(0x105, &sec, VANILLA_HORIZONTAL_HEIGHT_TILES);
+        assert_eq!(&raw_default[6..8], &[0, 0]);
+        assert_eq!(decode_level_info(&raw_default).unwrap().height_tiles, 0);
     }
 
     #[test]
@@ -1103,6 +1148,41 @@ mod tests {
         assert_eq!(objs[0].tiles, vec![0x130]);
         // Level 0x0 of the fresh copy has no DM16 data.
         assert!(rom2.direct_map16.objects_for(0x0).is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn import_default_height_clears_custom() {
+        use crate::level::dimensions::{LevelHeights, VANILLA_HORIZONTAL_HEIGHT_TILES};
+        // Level 0x9 uses Layer 2 objects, so its import needs no bank-$0C
+        // free space (the height RATS block allocator scans forward from
+        // PC 0x8000 and can fragment bank $0C's runs on a scratch ROM).
+        let rom = test_rom().expect("ROM_PATH must point at a headerless SMW ROM");
+        let screens = rom.levels[0x9].primary_header.level_length() as u32 + 1;
+
+        // Scratch ROM with a custom height stored for level 0x9.
+        let mut bytes = std::fs::read(std::env::var("ROM_PATH").unwrap()).unwrap();
+        let mut heights = LevelHeights::default();
+        heights.set(0x9, 40, screens).unwrap();
+        heights.write_to_rom(&mut bytes, 0).unwrap();
+        assert_eq!(LevelHeights::parse(&bytes).unwrap().get(0x9), 40);
+
+        // Export the level, then rewrite section 0 with a default (vanilla)
+        // height — as an old/zeroed MWL would carry — and import it.
+        let mut mwl = export_level(&rom, 0x9).unwrap();
+        let info = decode_level_info(&mwl.sections[SECTION_LEVEL_INFO]).unwrap();
+        mwl.sections[SECTION_LEVEL_INFO] =
+            encode_level_info(0x9, &info.secondary, VANILLA_HORIZONTAL_HEIGHT_TILES).to_vec();
+        import_level(&mut bytes, &mwl, 0x9, 0).unwrap();
+
+        // The stale custom height must be gone, not left behind. Clearing
+        // the only entry erases the RATS block entirely (`NotFound`), which
+        // also reads as vanilla.
+        match LevelHeights::parse(&bytes) {
+            Ok(h) => assert_eq!(h.get(0x9), VANILLA_HORIZONTAL_HEIGHT_TILES),
+            Err(crate::level::dimensions::LevelHeightError::NotFound) => {}
+            Err(e) => panic!("unexpected parse error: {e:?}"),
+        }
     }
 
     fn round_trip_level(level_num: u32) {

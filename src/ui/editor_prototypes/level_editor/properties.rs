@@ -43,10 +43,14 @@ pub(super) struct LevelProperties {
     // Layer 2 object-data header (5 bytes at the Layer 2 pointer, game-ignored).
     // Only meaningful when `has_layer2` is true.
     pub layer2_header: [u8; 5],
+
+    /// Level height in tiles for horizontal levels (LM v3.00 dynamic
+    /// dimensions; vanilla 27). Vertical levels ignore this.
+    pub level_height_tiles: u16,
 }
 
 impl LevelProperties {
-    pub fn from_level(level: &Level) -> Self {
+    pub fn from_level(level: &Level, level_height_tiles: u16) -> Self {
         let h = &level.primary_header;
         let s = &level.secondary_header;
         let is_vertical = s.vertical_level();
@@ -101,6 +105,7 @@ impl LevelProperties {
             layer2_auto_set_screens: ext.auto_set_screens,
             layer2_scroll_ext_raw: ext_raw,
             layer2_header,
+            level_height_tiles,
         }
     }
 
@@ -120,7 +125,7 @@ impl LevelProperties {
         if self.is_vertical {
             (32, 16)
         } else {
-            (16, 27)
+            (16, self.level_height_tiles.max(1) as u32)
         }
     }
 
