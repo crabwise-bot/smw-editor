@@ -83,6 +83,23 @@ pub fn specific_behavior(block_id: u16) -> Option<&'static str> {
     }
 }
 
+/// The act-as roots Lunar Magic v3.31's "Mark exit-enabled tiles" view
+/// option recognizes as exit-enabling: doors (0x01F, 0x020, 0x027, 0x028)
+/// and exit-enabled pipes (0x137, 0x138, 0x13F).
+pub const EXIT_ENABLED_ACTS_ROOTS: [u16; 7] = [0x01F, 0x020, 0x027, 0x028, 0x137, 0x138, 0x13F];
+
+/// Act-as root that only counts as exit-enabled in level mode 0x01.
+pub const EXIT_ENABLED_LEVEL_MODE_01_ONLY: u16 = 0x09C;
+
+/// Lunar Magic v3.31 "Mark exit-enabled tiles" predicate, evaluated on a
+/// tile's act-as root (follow `map16_expanded::act_as_of` first; the game's
+/// exit checks follow acts-like redirections). Known limitation: Lunar
+/// Magic additionally treats `.dsc`-flag bit 8 as exit-enabling; this crate
+/// has no `.dsc` parser so that case is not modeled here.
+pub fn is_exit_enabled(acts_root: u16, level_mode: u8) -> bool {
+    EXIT_ENABLED_ACTS_ROOTS.contains(&acts_root) || (acts_root == EXIT_ENABLED_LEVEL_MODE_01_ONLY && level_mode == 0x01)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +135,31 @@ mod tests {
         assert_eq!(specific_behavior(0x038), Some("Midway point"));
         assert_eq!(specific_behavior(0x132), Some("Brown block (activates block snakes when stepped on)"));
         assert_eq!(specific_behavior(0x050), None);
+    }
+
+    #[test]
+    fn exit_enabled_matches_lm_3_31_predicate() {
+        // Lunar Magic v3.31 "Mark exit-enabled tiles" view option, evaluated
+        // on the act-as root. Doors:
+        for door in [0x01F, 0x020, 0x027, 0x028] {
+            assert!(is_exit_enabled(door, 0x00), "door {door:#X} should be exit-enabled");
+        }
+        // Exit-enabled pipes:
+        for pipe in [0x137, 0x138, 0x13F] {
+            assert!(is_exit_enabled(pipe, 0x0B), "pipe {pipe:#X} should be exit-enabled");
+        }
+        // 0x09C only in level mode 0x01:
+        assert!(is_exit_enabled(0x09C, 0x01));
+        assert!(!is_exit_enabled(0x09C, 0x00));
+        assert!(!is_exit_enabled(0x09C, 0x02));
+        // Ordinary tiles are not exit-enabled:
+        assert!(!is_exit_enabled(0x000, 0x01));
+        assert!(!is_exit_enabled(0x025, 0x01));
+        assert!(!is_exit_enabled(0x1FF, 0x01));
+        assert!(!is_exit_enabled(0x2A0, 0x01));
+        // The predicate must not panic anywhere in the vanilla space.
+        for id in 0x000..=0x1FFu16 {
+            let _ = is_exit_enabled(id, 0x01);
+        }
     }
 }
