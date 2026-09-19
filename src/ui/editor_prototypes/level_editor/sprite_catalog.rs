@@ -205,6 +205,15 @@ pub(super) fn sprite_name(id: u8) -> &'static str {
     }
 }
 
+/// Display name including the extra-bit variant, if any (e.g. the LM v3.00
+/// Secret Exit 2/3 goal tapes).
+pub(super) fn sprite_display_name(id: u8, extra_bits: u8) -> String {
+    match sprite_variant_name(id, extra_bits) {
+        Some(variant) => format!("{} — {variant}", sprite_name(id)),
+        None => sprite_name(id).to_string(),
+    }
+}
+
 pub(super) fn sprite_matches_search(id: u8, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
@@ -214,7 +223,31 @@ pub(super) fn sprite_matches_search(id: u8, query: &str) -> bool {
     let hex = format!("{id:02X}").to_ascii_lowercase();
     let name = sprite_name(id);
     let q = query.to_ascii_lowercase();
-    hex.contains(&q) || name.to_ascii_lowercase().contains(&q)
+    if hex.contains(&q) || name.to_ascii_lowercase().contains(&q) {
+        return true;
+    }
+    // Extra-bit variants (e.g. the LM v3.00 Secret Exit 2/3 goal tapes) are
+    // searchable too, so "secret exit" finds sprite $7B.
+    (0..=3).any(|extra| sprite_variant_name(id, extra).is_some_and(|v| v.to_ascii_lowercase().contains(&q)))
+}
+
+/// Extra-bit variant names for sprites whose extra bits select a distinct
+/// Lunar Magic feature. The goal tape's exit mode is `extra_bits + 1`
+/// (SMWDisX `bank_00.asm`: `SecretGoalTape = extra_bits`,
+/// `OWLevelExitMode = SecretGoalTape + 1`), and LM v3.00 added the Secret
+/// Exit 2 and Secret Exit 3 goal point tape sprites to its sprite list —
+/// these are sprite `$7B` with extra bits 2 and 3.
+///
+/// Stock-ROM note: the vanilla game has no real Secret Exit 2/3 behavior;
+/// extra bits 2/3 on a goal tape hit vanilla's quirky exit-mode paths, so
+/// the exits only work in-game with LM v3.00's ASM (not installed by this
+/// editor).
+pub(super) fn sprite_variant_name(id: u8, extra_bits: u8) -> Option<&'static str> {
+    match (id, extra_bits & 0x03) {
+        (0x7B, 2) => Some("Goal Point (Secret Exit 2)"),
+        (0x7B, 3) => Some("Goal Point (Secret Exit 3)"),
+        _ => None,
+    }
 }
 
 pub(super) fn preview_sprite_tileset(id: u8) -> Option<u8> {
@@ -248,13 +281,28 @@ pub(super) fn preview_sprite_tileset(id: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_sprite_tileset, sprite_matches_search, sprite_name};
+    use super::{preview_sprite_tileset, sprite_matches_search, sprite_name, sprite_variant_name};
 
     #[test]
     fn names_cover_common_sprites() {
         assert_eq!(sprite_name(0x0F), "Goomba");
         assert_eq!(sprite_name(0xAB), "Rex");
         assert_eq!(sprite_name(0xA2), "MechaKoopa");
+    }
+
+    #[test]
+    fn secret_exit_goal_tape_variants() {
+        // LM v3.00 added the Secret Exit 2/3 goal point tape sprites to its
+        // sprite list: sprite $7B with extra bits 2/3 (exit mode = bits + 1).
+        assert_eq!(sprite_variant_name(0x7B, 2), Some("Goal Point (Secret Exit 2)"));
+        assert_eq!(sprite_variant_name(0x7B, 3), Some("Goal Point (Secret Exit 3)"));
+        assert_eq!(sprite_variant_name(0x7B, 0), None);
+        assert_eq!(sprite_variant_name(0x7B, 1), None);
+        assert_eq!(sprite_variant_name(0x0F, 2), None);
+        // Searchable so "secret exit" finds $7B in the sprite picker.
+        assert!(sprite_matches_search(0x7B, "secret exit"));
+        assert!(sprite_matches_search(0x7B, "secret exit 3"));
+        assert!(!sprite_matches_search(0x0F, "secret exit"));
     }
 
     #[test]
