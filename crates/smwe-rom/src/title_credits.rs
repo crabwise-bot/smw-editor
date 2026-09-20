@@ -107,6 +107,23 @@ impl TitleCreditsRegion {
         }
     }
 
+    /// Region code used in the `.smwtm` title-moves file header.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Us => 0,
+            Self::Japanese => 1,
+        }
+    }
+
+    /// Inverse of [`Self::code`]; `None` on an unknown code.
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Us),
+            1 => Some(Self::Japanese),
+            _ => None,
+        }
+    }
+
     /// The fixed-slot layout for this region.
     pub fn layout(&self) -> &'static TitleCreditsLayout {
         match self {
@@ -221,6 +238,100 @@ pub const LAYOUT_JP: TitleCreditsLayout = TitleCreditsLayout {
 pub struct TitleDemoInput {
     pub buttons:  u8,
     pub duration: u8,
+}
+
+/// The `.smwtm` file format (Lunar Magic v1.91 "Export Title Moves Playback
+/// Data" parity).
+///
+/// The format is editor-native (LM is Windows-only and its exact export
+/// container was not recoverable), so every field is documented here:
+/// ```text
+/// offset  size  content
+/// 0       7     ASCII magic "SMWTMV1"
+/// 7       1     region code: 0 = U.S., 1 = Japanese
+/// 8       4     payload length, u32 little-endian
+/// 12      N     payload: the raw $FF-terminated title-input-sequence bytes
+///               (buttons,duration pairs + FF) exactly as they sit in the
+///               ROM's fixed slot
+/// ```
+/// The payload is byte-identical to what `TitleCreditsData::title_input_bytes`
+/// produces, so a file round-trips to the identical ROM bytes. LM v2.30's
+/// Snes9x-savestate *recording* is deliberately not implemented (that needs
+/// an external emulator integration); the playback-data format itself is
+/// what this covers.
+pub const TITLE_MOVES_MAGIC: &[u8; 7] = b"SMWTMV1";
+pub const TITLE_MOVES_FILE_EXT: &str = "smwtm";
+
+/// Decoded title-moves playback file: the inputs plus the region of the ROM
+/// they were exported from. A region mismatch against the target ROM is not
+/// a hard error (the payload is just (buttons,duration) pairs), but callers
+/// should warn since the source and target slot sizes differ.
+#[derive(Debug, Clone)]
+pub struct TitleMovesPlayback {
+    pub region: TitleCreditsRegion,
+    pub inputs: Vec<TitleDemoInput>,
+}
+
+/// Encode the current title demo inputs as a `.smwtm` file (raw
+/// `$FF`-terminated input-sequence bytes wrapped in the documented header).
+pub fn encode_title_moves_file(region: TitleCreditsRegion, inputs: &[TitleDemoInput]) -> anyhow::Result<Vec<u8>> {
+    let payload = TitleCreditsData { region, ..dummy_inputs(inputs) }.title_input_bytes()?;
+    let mut out = Vec::with_capacity(TITLE_MOVES_MAGIC.len() + 1 + 4 + payload.len());
+    out.extend_from_slice(TITLE_MOVES_MAGIC);
+    out.push(region.code());
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+/// Decode a `.smwtm` file, validating magic, version, length prefix, and the
+/// payload's `$FF`-terminated (buttons,duration) structure.
+pub fn decode_title_moves_file(bytes: &[u8]) -> anyhow::Result<TitleMovesPlayback> {
+    let header_len = TITLE_MOVES_MAGIC.len() + 1 + 4;
+    if bytes.len() < header_len {
+        anyhow::bail!("Not a title-moves file: {} bytes, shorter than the {}-byte header", bytes.len(), header_len);
+    }
+    if &bytes[..TITLE_MOVES_MAGIC.len()] != TITLE_MOVES_MAGIC {
+        anyhow::bail!("Not a title-moves file: bad magic (expected \"SMWTMV1\")");
+    }
+    let region = TitleCreditsRegion::from_code(bytes[7])
+        .ok_or_else(|| anyhow::anyhow!("Title-moves file has unknown region code {}", bytes[7]))?;
+    let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let payload = bytes.get(12..12 + len).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Title-moves file is truncated: header claims {len} payload bytes, file has {}",
+            bytes.len() - 12
+        )
+    })?;
+    let mut inputs = Vec::new();
+    let mut i = 0;
+    while i < payload.len() {
+        if payload[i] == 0xFF {
+            break;
+        }
+        if i + 1 >= payload.len() {
+            anyhow::bail!("Title-moves payload is malformed: duration byte missing at offset {i}");
+        }
+        inputs.push(TitleDemoInput { buttons: payload[i], duration: payload[i + 1] });
+        i += 2;
+    }
+    if i >= payload.len() {
+        anyhow::bail!("Title-moves payload is missing its $FF terminator");
+    }
+    Ok(TitleMovesPlayback { region, inputs })
+}
+
+/// Minimal `TitleCreditsData` scaffolding so `encode_title_moves_file` can
+/// reuse the real `title_input_bytes` encode path (and its slot-size check).
+fn dummy_inputs(inputs: &[TitleDemoInput]) -> TitleCreditsData {
+    TitleCreditsData {
+        region:               TitleCreditsRegion::Us, // overwritten by caller
+        title_submap:         0,
+        title_demo_inputs:    inputs.to_vec(),
+        title_screen_stripe:  vec![0xFF],
+        player_select_stripe: vec![0xFF],
+        enemy_name_stripes:   vec![Vec::new(); ENEMY_NAME_COUNT],
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +449,20 @@ impl TitleCreditsData {
 
     pub fn enemy_name_slot_size(&self, index: usize) -> usize {
         self.layout().enemy_name_slot_size(index)
+    }
+
+    /// Replace the demo inputs with playback from a `.smwtm` file.
+    /// Over-budget playback is refused so a save can never emit corrupt
+    /// bytes; region mismatches are the caller's responsibility to warn
+    /// about (the payload is just (buttons,duration) pairs).
+    pub fn apply_title_moves(&mut self, playback: &TitleMovesPlayback) -> anyhow::Result<()> {
+        let max = self.layout().title_input_seq_max;
+        let bytes = playback.inputs.len() * 2 + 1;
+        if bytes > max {
+            anyhow::bail!("Title moves are {bytes} bytes but this ROM's fixed slot is only {max} bytes");
+        }
+        self.title_demo_inputs = playback.inputs.clone();
+        Ok(())
     }
 
     pub fn validate_enemy_name_stripe(&self, index: usize, bytes: &[u8]) -> anyhow::Result<()> {
@@ -619,5 +744,87 @@ mod tests {
         assert_eq!(data.enemy_name_label(0), "Scene 00");
         let us = TitleCreditsData::empty(TitleCreditsRegion::Us);
         assert_eq!(us.enemy_name_label(0), "Lakitu / Para-bombs");
+    }
+
+    #[test]
+    fn title_moves_file_round_trips() {
+        let inputs =
+            vec![TitleDemoInput { buttons: 0x41, duration: 0x0F }, TitleDemoInput { buttons: 0x00, duration: 0x10 }];
+        let bytes = encode_title_moves_file(TitleCreditsRegion::Us, &inputs).unwrap();
+        assert_eq!(&bytes[..7], b"SMWTMV1");
+        assert_eq!(bytes[7], 0); // region code: U.S.
+        let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert_eq!(len, 5); // 2 inputs x 2 bytes + FF
+                            // Payload is byte-identical to the ROM slot encoding.
+        assert_eq!(&bytes[12..], &[0x41, 0x0F, 0x00, 0x10, 0xFF]);
+        let back = decode_title_moves_file(&bytes).unwrap();
+        assert_eq!(back.region, TitleCreditsRegion::Us);
+        assert_eq!(back.inputs.len(), 2);
+        assert_eq!(back.inputs[0].buttons, 0x41);
+        assert_eq!(back.inputs[1].duration, 0x10);
+    }
+
+    #[test]
+    fn title_moves_file_rejects_garbage() {
+        // Empty / truncated.
+        assert!(decode_title_moves_file(&[]).is_err());
+        assert!(decode_title_moves_file(b"SMWTMV1").is_err());
+        // Bad magic.
+        let mut bytes = encode_title_moves_file(TitleCreditsRegion::Us, &[]).unwrap();
+        bytes[0] = b'X';
+        assert!(decode_title_moves_file(&bytes).is_err());
+        // Unknown region code.
+        let mut bytes = encode_title_moves_file(TitleCreditsRegion::Us, &[]).unwrap();
+        bytes[7] = 7;
+        assert!(decode_title_moves_file(&bytes).is_err());
+        // Truncated payload per the length prefix.
+        let mut bytes = encode_title_moves_file(TitleCreditsRegion::Us, &[]).unwrap();
+        bytes.truncate(bytes.len() - 1);
+        assert!(decode_title_moves_file(&bytes).is_err());
+        // Missing $FF terminator.
+        let mut bytes = encode_title_moves_file(TitleCreditsRegion::Us, &[]).unwrap();
+        *bytes.last_mut().unwrap() = 0x00;
+        assert!(decode_title_moves_file(&bytes).is_err());
+        // Odd byte count before terminator.
+        let odd = {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"SMWTMV1");
+            out.push(0);
+            out.extend_from_slice(&2u32.to_le_bytes());
+            out.extend_from_slice(&[0x41, 0xFF]);
+            out
+        };
+        assert!(decode_title_moves_file(&odd).is_err());
+    }
+
+    #[test]
+    fn title_moves_apply_refuses_over_budget() {
+        let mut data = TitleCreditsData::empty(TitleCreditsRegion::Us);
+        let max = data.layout().title_input_seq_max;
+        let too_many = (max / 2) + 1; // (n*2+1) bytes > max
+        let playback = TitleMovesPlayback {
+            region: TitleCreditsRegion::Us,
+            inputs: vec![TitleDemoInput { buttons: 0, duration: 0 }; too_many],
+        };
+        assert!(data.apply_title_moves(&playback).is_err());
+        // An exact-fit payload is accepted and lands verbatim.
+        let ok = TitleMovesPlayback {
+            region: TitleCreditsRegion::Us,
+            inputs: vec![TitleDemoInput { buttons: 0x08, duration: 0x20 }],
+        };
+        data.apply_title_moves(&ok).unwrap();
+        assert_eq!(data.title_demo_inputs.len(), 1);
+        assert_eq!(data.title_demo_inputs[0].buttons, 0x08);
+        // …and it still encodes byte-identically through the save path.
+        assert_eq!(data.title_input_bytes().unwrap(), vec![0x08, 0x20, 0xFF]);
+    }
+
+    #[test]
+    fn title_moves_region_codes_round_trip() {
+        assert_eq!(TitleCreditsRegion::Us.code(), 0);
+        assert_eq!(TitleCreditsRegion::Japanese.code(), 1);
+        assert_eq!(TitleCreditsRegion::from_code(0), Some(TitleCreditsRegion::Us));
+        assert_eq!(TitleCreditsRegion::from_code(1), Some(TitleCreditsRegion::Japanese));
+        assert_eq!(TitleCreditsRegion::from_code(2), None);
     }
 }

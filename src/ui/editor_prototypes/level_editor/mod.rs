@@ -525,6 +525,8 @@ pub struct UiLevelEditor {
     title_credits:             smwe_rom::title_credits::TitleCreditsData,
     title_credits_dirty:       bool,
     show_title_credits_editor: bool,
+    /// Last title-moves export/import status: (is_error, message).
+    title_moves_msg:           Option<(bool, String)>,
     credits_editor_selected:   usize,
     // Credits WYSIWYG editor: per-scene L3 text grid, preserved non-L3
     // commands, and render cache. The grid is 64x64 but only rows
@@ -819,6 +821,7 @@ impl UiLevelEditor {
             title_credits,
             title_credits_dirty: false,
             show_title_credits_editor: false,
+            title_moves_msg: None,
             credits_editor_selected: 0,
             credits_grid: None,
             credits_non_l3: Vec::new(),

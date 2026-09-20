@@ -1,6 +1,6 @@
 use egui::{ColorImage, Context, DragValue, Slider};
 use smwe_rom::{
-    title_credits::{self, ENEMY_NAME_COUNT},
+    title_credits::{self, decode_title_moves_file, encode_title_moves_file, ENEMY_NAME_COUNT, TITLE_MOVES_FILE_EXT},
     title_stripe::{
         encode_credits_stripe,
         encode_player_select_stripe,
@@ -75,7 +75,98 @@ impl UiLevelEditor {
                         self.title_credits_dirty = true;
                         self.has_edits = true;
                     }
+                    // Lunar Magic v1.91 parity: "Export Title Moves Playback
+                    // Data" — save/load the demo input sequence to a `.smwtm`
+                    // file (documented format in `title_credits.rs`; payload is
+                    // the raw $FF-terminated input-sequence bytes).
+                    if ui.button("Export title moves…").clicked() {
+                        match encode_title_moves_file(
+                            self.title_credits.region,
+                            &self.title_credits.title_demo_inputs,
+                        ) {
+                            Ok(bytes) => {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("SMW title moves", &[TITLE_MOVES_FILE_EXT])
+                                    .set_file_name("title-moves.smwtm")
+                                    .save_file()
+                                {
+                                    match std::fs::write(&path, &bytes) {
+                                        Ok(()) => {
+                                            self.title_moves_msg = Some((
+                                                false,
+                                                format!(
+                                                    "Exported {} demo steps ({} bytes) to {}",
+                                                    self.title_credits.title_demo_inputs.len(),
+                                                    bytes.len(),
+                                                    path.display()
+                                                ),
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            self.title_moves_msg =
+                                                Some((true, format!("Export failed: {e}")));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => self.title_moves_msg = Some((true, format!("Export failed: {e}"))),
+                        }
+                    }
+                    if ui.button("Import title moves…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SMW title moves", &[TITLE_MOVES_FILE_EXT])
+                            .pick_file()
+                        {
+                            let decoded = std::fs::read(&path)
+                                .map_err(|e| anyhow::anyhow!("{e}"))
+                                .and_then(|b| decode_title_moves_file(&b));
+                            match decoded {
+                                Ok(playback) => {
+                                    let region_note = if playback.region != self.title_credits.region {
+                                        Some(format!(
+                                            "Note: file was exported from a {} ROM; applying to a {} ROM.",
+                                            playback.region.label(),
+                                            self.title_credits.region.label()
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                    match self.title_credits.apply_title_moves(&playback) {
+                                        Ok(()) => {
+                                            self.title_credits_dirty = true;
+                                            self.has_edits = true;
+                                            let mut msg = format!(
+                                                "Imported {} demo steps from {}",
+                                                playback.inputs.len(),
+                                                path.display()
+                                            );
+                                            if let Some(note) = region_note {
+                                                msg.push(' ');
+                                                msg.push_str(&note);
+                                            }
+                                            self.title_moves_msg = Some((false, msg));
+                                        }
+                                        Err(e) => {
+                                            self.title_moves_msg =
+                                                Some((true, format!("Import refused: {e}")));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.title_moves_msg = Some((true, format!("Import failed: {e}")));
+                                }
+                            }
+                        }
+                    }
                 });
+                if let Some((is_err, msg)) = self.title_moves_msg.clone() {
+                    let color = if is_err {
+                        egui::Color32::from_rgb(220, 80, 70)
+                    } else {
+                        egui::Color32::from_rgb(150, 200, 150)
+                    };
+                    ui.colored_label(color, msg);
+                }
 
                 egui::ScrollArea::vertical().max_height(150.0).id_salt("title_demo_inputs").show(ui, |ui| {
                     egui::Grid::new("title_demo_input_grid").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
