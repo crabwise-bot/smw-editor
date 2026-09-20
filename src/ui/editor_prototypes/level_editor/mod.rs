@@ -122,15 +122,19 @@ pub struct UiLevelEditor {
     cpu:            Cpu,
     level_renderer: Arc<Mutex<LevelRenderer>>,
 
-    level_num:           u16,
-    offset:              Vec2,
-    zoom:                f32,
-    always_show_grid:    bool,
-    show_object_overlay: bool,
-    show_sprite_overlay: bool,
-    show_object_labels:  bool,
-    mark_exit_tiles:     bool, // LM v3.31 view option: mark exit-enabled tiles
-    selected_tile:       Option<(u32, u32)>,
+    level_num:             u16,
+    /// Headerless PC address the current Layer-1 objects were imported from
+    /// via Lunar Magic v1.11 "Open Level from Address" (`None` = the level's
+    /// own pointer-table entry). Cleared on every normal level load.
+    layer1_source_address: Option<u32>,
+    offset:                Vec2,
+    zoom:                  f32,
+    always_show_grid:      bool,
+    show_object_overlay:   bool,
+    show_sprite_overlay:   bool,
+    show_object_labels:    bool,
+    mark_exit_tiles:       bool, // LM v3.31 view option: mark exit-enabled tiles
+    selected_tile:         Option<(u32, u32)>,
 
     level_properties:        LevelProperties,
     layer1:                  UndoableData<EditableObjectLayer>,
@@ -593,6 +597,7 @@ impl UiLevelEditor {
             cpu,
             level_renderer,
             level_num: 0x105,
+            layer1_source_address: None,
             offset: Vec2::ZERO,
             zoom: 1.0,
             always_show_grid: false,
@@ -947,6 +952,10 @@ impl DockableEditorTool for UiLevelEditor {
 
     fn level_number(&self) -> Option<u16> {
         Some(self.level_num)
+    }
+
+    fn open_layer1_from_address(&mut self, pc: u32) -> anyhow::Result<Option<(usize, usize)>> {
+        self.import_layer1_from_address(pc).map(Some)
     }
 
     /// "Change Layer 3 Settings" dialog window.
@@ -2088,6 +2097,79 @@ impl UiLevelEditor {
 
         // Mark as clean (no unsaved edits)
         self.has_edits = false;
+        // A normal level load discards any from-address import state.
+        self.layer1_source_address = None;
+    }
+
+    /// Lunar Magic v1.11 "Open Level from Address": decode the Layer-1 object
+    /// stream at headerless PC address `pc` and show it in the current level
+    /// slot. Sprites, entrances and background are intentionally left alone
+    /// (LM loads none of them from the address); the displayed level number
+    /// stays the current ordinary slot, and the next save inserts the
+    /// imported Layer 1 into that slot via the normal save path. The source
+    /// address itself is never modified.
+    ///
+    /// Returns `(object_count, bytes_consumed)`.
+    pub(super) fn import_layer1_from_address(&mut self, pc: u32) -> anyhow::Result<(usize, usize)> {
+        let level_idx = self.level_num as usize;
+        if level_idx >= self.rom.levels.len() {
+            anyhow::bail!("Level {:#X} out of range", self.level_num);
+        }
+
+        // `SmwRom` keeps the ROM headerless, exactly like LM's PC addresses.
+        let imported = crate::level_address::parse_layer1_from_address(self.rom.rom_bytes(), pc)?;
+
+        // Splice the imported stream into a scratch copy of the ROM as this
+        // slot's Layer-1 block, then decompress it with the real game code so
+        // the canvas shows the same tiles LM would render from the stream.
+        let primary_header = self.rom.levels[level_idx].primary_header.0;
+        let mut scratch = self.rom.rom_bytes().to_vec();
+        crate::level_address::splice_layer1_into_slot(
+            &mut scratch,
+            self.level_num as u32,
+            &primary_header,
+            imported.layer.as_bytes(),
+        )?;
+        let mut emu_rom = EmuRom::new(scratch);
+        emu_rom.load_symbols(include_str!("../../../../symbols/SMW_U.sym"));
+        let old_cart = std::mem::replace(&mut self.cpu.mem.cart, Arc::new(emu_rom));
+
+        // Same reset + decompress + upload sequence as `load_level`, so the
+        // imported objects render exactly like a natively loaded level. The
+        // original cart is restored afterwards; only WRAM/VRAM/CGRAM keep the
+        // freshly decompressed state.
+        self.cpu.mem.wram.fill(0);
+        self.cpu.mem.vram.fill(0);
+        self.cpu.mem.cgram.fill(0);
+        self.cpu.mem.regs.fill(0);
+        smwe_emu::emu::decompress_sublevel(&mut self.cpu, self.level_num);
+        smwe_emu::emu::fetch_anim_frame(&mut self.cpu);
+        self.cpu.mem.cart = old_cart;
+
+        {
+            let mut renderer = self.level_renderer.lock().expect("Cannot lock level_renderer");
+            renderer.upload_palette(&self.gl, &self.cpu.mem.cgram);
+            renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+            renderer.upload_level(&self.gl, &mut self.cpu, &self.rom, self.level_properties.fg_bg_gfx);
+        }
+
+        // Swap the editable Layer-1 state; everything else (sprites,
+        // entrances, background, headers) stays from the current level.
+        let vertical = self.rom.levels[level_idx].secondary_header.vertical_level();
+        self.layer1 = UndoableData::new(EditableObjectLayer::from_object_layer(&imported.layer, vertical));
+        self.layer1_source_address = Some(pc);
+        self.offset = Vec2::ZERO;
+        self.selected_object_indices.clear();
+        self.selected_tile = None;
+        self.mark_edited();
+
+        let object_count = imported.layer.objects().len();
+        log::info!(
+            "Imported Layer 1 from PC 0x{pc:05X} into level {:03X}: {object_count} objects ({} bytes)",
+            self.level_num,
+            imported.bytes_consumed
+        );
+        Ok((object_count, imported.bytes_consumed))
     }
 
     /// Resolve a Lunar Magic extended Map16 block only when the editor needs
