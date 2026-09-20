@@ -8,7 +8,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
-use smw_editor::render_util::{fill_rect_raw, render_layer, stroke_rect};
+use smw_editor::{
+    level_png_export::{block_at, level_geom_of, LevelGeom, BLOCK_MAP_BASE},
+    render_util::{fill_rect_raw, render_layer, stroke_rect},
+};
 use smwe_emu::{emu::CheckedMem, rom::Rom as EmuRom, Cpu};
 use smwe_rom::{block_behavior::is_exit_enabled, map16_expanded::act_as_of};
 
@@ -26,54 +29,12 @@ fn has_arg(name: &str) -> bool {
     std::env::args().any(|a| a == name)
 }
 
-struct LevelGeom {
-    vertical:   bool,
-    has_layer2: bool,
-    scr_len:    u32,
-    scr_size:   u32,
-    width:      u32,
-    height:     u32,
-    level_mode: u8,
-}
-
 fn load_cpu(rom_bytes: &[u8], level: u16) -> Cpu {
     let mut emu_rom = EmuRom::new(rom_bytes.to_vec());
     emu_rom.load_symbols(include_str!("../../symbols/SMW_U.sym"));
     let mut cpu = Cpu::new(CheckedMem::new(Arc::new(emu_rom)));
     smwe_emu::emu::decompress_sublevel(&mut cpu, level);
     cpu
-}
-
-fn geom_of(cpu: &mut Cpu) -> LevelGeom {
-    let vertical = cpu.mem.load_u8(0x5B) & 1 != 0;
-    let level_mode = cpu.mem.load_u8(0x1925);
-    let renderer_table = cpu.mem.cart.resolve("CODE_058955").unwrap() + 9;
-    let renderer = cpu.mem.load_u24(renderer_table + (level_mode as u32) * 3);
-    let l2_renderers = [cpu.mem.cart.resolve("CODE_058B8D"), cpu.mem.cart.resolve("CODE_058C71")];
-    let has_layer2 = l2_renderers.contains(&Some(renderer));
-    let scr_len = match (vertical, has_layer2) {
-        (false, false) => 0x20,
-        (true, false) => 0x1C,
-        (false, true) => 0x10,
-        (true, true) => 0x0E,
-    } as u32;
-    let scr_size = if vertical { 16 * 32 } else { 16 * 27 };
-    let (width, height) = if vertical { (32 * 16, scr_len * 16 * 16) } else { (scr_len * 16 * 16, 27 * 16) };
-    LevelGeom { vertical, has_layer2, scr_len, scr_size, width, height, level_mode }
-}
-
-/// Map16 block ID at tile (tx, ty) on the block map starting at `lo_base`
-/// (hi plane is 0x10000 above). Same screen/tile math the editor uses.
-fn block_at(cpu: &mut Cpu, g: &LevelGeom, tx: u32, ty: u32, lo_base: u32) -> u16 {
-    let idx = if g.vertical {
-        let sub_x = tx / 16;
-        let sub_y = ty / 32;
-        let screen = sub_y * 2 + sub_x;
-        screen * g.scr_size + (ty % 32) * 16 + (tx % 16)
-    } else {
-        (tx / 16) * g.scr_size + ty * 16 + (tx % 16)
-    };
-    cpu.mem.load_u8(lo_base + idx) as u16 | (((cpu.mem.load_u8(lo_base + 0x10000 + idx) as u16) & 0x3F) << 8)
 }
 
 /// All exit-enabled tiles in the level, in tile coordinates.
@@ -84,13 +45,13 @@ fn exit_tiles(cpu: &mut Cpu, acts: &HashMap<u16, u16>, g: &LevelGeom) -> Vec<(u3
     let mut out = Vec::new();
     for ty in 0..th {
         for tx in 0..tw {
-            let id = block_at(cpu, g, tx, ty, 0x7EC800);
+            let id = block_at(cpu, g, tx, ty, BLOCK_MAP_BASE);
             if id != 0 && is_exit_enabled(act_as_of(acts, id), g.level_mode) {
                 out.push((tx, ty));
                 continue;
             }
             if l2_active {
-                let id2 = block_at(cpu, g, tx, ty, 0x7EC800 + l2_off);
+                let id2 = block_at(cpu, g, tx, ty, BLOCK_MAP_BASE + l2_off);
                 if id2 != 0 && is_exit_enabled(act_as_of(acts, id2), g.level_mode) {
                     out.push((tx, ty));
                 }
@@ -118,7 +79,7 @@ fn main() -> anyhow::Result<()> {
         let mut best: Option<(u16, f32)> = None;
         for lvl in 0x000..=0x1FFu16 {
             let mut cpu = load_cpu(&rom_bytes, lvl);
-            let g = geom_of(&mut cpu);
+            let g = level_geom_of(&mut cpu);
             let marked = exit_tiles(&mut cpu, &acts, &g);
             if marked.len() < min {
                 continue;
@@ -146,13 +107,23 @@ fn main() -> anyhow::Result<()> {
 
     // ── Render the level (same WRAM state the editor overlay reads) ──
     let mut cpu = load_cpu(&rom_bytes, level);
-    let g = geom_of(&mut cpu);
+    let g = level_geom_of(&mut cpu);
     let marked = exit_tiles(&mut cpu, &acts, &g);
     eprintln!("level {level:#05X}: {} exit-enabled tiles", marked.len());
     if std::env::args().any(|a| a == "--dump") {
+        let l2_active = g.level_mode == 0x01 && g.has_layer2;
+        let l2_off = g.scr_len * g.scr_size;
         for &(tx, ty) in &marked {
-            let id = block_at(&mut cpu, &g, tx, ty, 0x7EC800);
-            eprintln!("  tile ({tx},{ty}): block {id:#05X} act-as {:#05X}", act_as_of(&acts, id));
+            let id = block_at(&mut cpu, &g, tx, ty, BLOCK_MAP_BASE);
+            let l1_on = id != 0 && is_exit_enabled(act_as_of(&acts, id), g.level_mode);
+            let id2 = if l2_active { block_at(&mut cpu, &g, tx, ty, BLOCK_MAP_BASE + l2_off) } else { 0 };
+            eprintln!(
+                "  tile ({tx},{ty}): L1 block {id:#05X} act-as {:#05X}{} / L2 block {id2:#05X} act-as {:#05X}{}",
+                act_as_of(&acts, id),
+                if l1_on { " EXIT" } else { "" },
+                act_as_of(&acts, id2),
+                if !l1_on && id2 != 0 && is_exit_enabled(act_as_of(&acts, id2), g.level_mode) { " EXIT" } else { "" },
+            );
         }
     }
     if marked.is_empty() {
