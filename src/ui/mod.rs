@@ -10,6 +10,7 @@ mod world_editor;
 
 pub mod clipboard;
 pub mod restore;
+pub mod user_toolbar;
 
 use std::{
     path::{Path, PathBuf},
@@ -40,6 +41,7 @@ use crate::{
         restore::RestoreManager,
         tab_viewer::EditorToolTabViewer,
         tool::DockableEditorTool,
+        user_toolbar::{ToolbarAction, UserToolbarState},
         world_editor::UiWorldEditor,
     },
 };
@@ -129,6 +131,10 @@ pub struct UiMainWindow {
     pending_ips_export:        Option<PathBuf>,
     /// Status line for restore/IPS actions (shown in the Restore menu area).
     restore_status:            Option<String>,
+    /// Lunar Magic-style custom user toolbar (LM v2.31+): second toolbar
+    /// strip built from `usertoolbar.txt`, with external scripting buttons,
+    /// internal `LM_…` commands, and keyboard shortcuts.
+    user_toolbar:              UserToolbarState,
 }
 
 /// An IPS patch the user picked, applied in-memory to the current ROM image,
@@ -194,6 +200,7 @@ impl UiMainWindow {
             pending_ips_apply: None,
             pending_ips_export: None,
             restore_status: None,
+            user_toolbar: UserToolbarState::load(),
         }
     }
 }
@@ -209,8 +216,45 @@ impl eframe::App for UiMainWindow {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
 
+        // Lunar Magic-style custom user toolbar (v2.31+): poll shortcuts first
+        // so user-defined shortcuts win over built-ins, then render the strip
+        // below the menu bar.
+        let rom_path_str = self.rom_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let has_rom = rom.is_some();
+        let mut toolbar_actions = self.user_toolbar.poll_shortcuts(ctx, rom_path_str.as_deref(), has_rom);
+        self.user_toolbar.reap_children();
+
         // Menu bar always on top.
         self.main_menu_bar(ctx, rom.as_ref());
+
+        // Second toolbar strip built from usertoolbar.txt.
+        toolbar_actions.extend(self.user_toolbar.show_strip(ctx, rom_path_str.as_deref(), has_rom));
+        for action in toolbar_actions {
+            match action {
+                ToolbarAction::OpenWorldEditor => {
+                    if let Some(r) = rom.as_ref() {
+                        if let Some(path) = self.rom_path.clone() {
+                            self.open_tool(UiWorldEditor::new(Arc::clone(&self.gl), Arc::clone(r), path));
+                        } else {
+                            self.save_error = Some("No ROM path available for emulator-backed overworld view.".into());
+                        }
+                    }
+                }
+                ToolbarAction::OpenDeleteLevels => self.open_delete_levels_dialog(ctx),
+                ToolbarAction::OpenBatchPngExport => {
+                    self.batch_from = "000".to_string();
+                    self.batch_to = format!("{:03X}", LEVEL_COUNT - 1);
+                    self.batch_include_l1 = true;
+                    self.batch_include_l2 = true;
+                    self.batch_include_sprites = true;
+                    self.batch_status = None;
+                    self.show_batch_export_dialog = true;
+                }
+            }
+        }
+
+        // User-toolbar parse/launch errors (capped at LM_DISPLAY_ERRORS).
+        self.user_toolbar.show_error_window(ctx);
 
         // Open dialog.
         self.show_open_dialog(ctx);

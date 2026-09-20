@@ -7,6 +7,7 @@ members = [
     "crates/smwe-widgets",
     "crates/smwe-bps",
     "crates/smwe-ips",
+    "crates/smwe-usertoolbar",
     "crates/wdc65816",
     "crates/smwe-emu",
 ]
@@ -28,6 +29,7 @@ smwe-widgets = { path = "crates/smwe-widgets" }
 smwe-emu = { path = "crates/smwe-emu" }
 smwe-bps = { path = "crates/smwe-bps" }
 smwe-ips = { path = "crates/smwe-ips" }
+smwe-usertoolbar = { path = "crates/smwe-usertoolbar" }
 
 anyhow = "1.0"
 ab_glyph = "0.2"
