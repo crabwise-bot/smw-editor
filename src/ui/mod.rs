@@ -34,7 +34,9 @@ use smwe_rom::{
 };
 
 use crate::{
+    editor_options::EditorOptions,
     level_png_export::{level_export_filename, level_png_bytes, LevelPngOptions, LEVEL_COUNT},
+    placement_check::{format_issue, PlacementIssue},
     project::Project,
     ui::{
         dev_utils::address_converter::UiAddressConverter,
@@ -140,6 +142,32 @@ pub struct UiMainWindow {
     /// strip built from `usertoolbar.txt`, with external scripting buttons,
     /// internal `LM_…` commands, and keyboard shortcuts.
     user_toolbar:              UserToolbarState,
+    /// Lunar Magic v1.91 "Check Object Placement on Save" (Options menu).
+    /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
+    check_placement_on_save:   bool,
+    /// A save deferred by the placement-warning dialog, awaiting the user's
+    /// answer ("Save anyway" resumes it; "Cancel" drops it).
+    pending_placement_warning: Option<PendingPlacementWarning>,
+    /// One-shot: set when the user answered "Save anyway", consumed by the
+    /// next save so the check does not immediately re-trigger the dialog.
+    placement_save_confirmed:  bool,
+}
+
+/// A save deferred by the LM v1.91 placement-warning dialog.
+#[derive(Debug, Clone)]
+enum DeferredSave {
+    /// Normal save (Ctrl+S / File > Save ROM).
+    Save,
+    /// Save As with the picked destination.
+    SaveAs(PathBuf),
+}
+
+/// Placement issues found by the LM v1.91 on-save check, awaiting the user's
+/// answer in the warning dialog.
+#[derive(Debug, Clone)]
+struct PendingPlacementWarning {
+    issues:   Vec<PlacementIssue>,
+    deferred: DeferredSave,
 }
 
 /// An IPS patch the user picked, applied in-memory to the current ROM image,
@@ -208,6 +236,9 @@ impl UiMainWindow {
             pending_ips_export: None,
             restore_status: None,
             user_toolbar: UserToolbarState::load(),
+            check_placement_on_save: EditorOptions::load().check_placement_on_save,
+            pending_placement_warning: None,
+            placement_save_confirmed: false,
         }
     }
 }
@@ -314,6 +345,10 @@ impl eframe::App for UiMainWindow {
 
         // Revert-to-restore-point confirmation (Restore menu).
         self.show_revert_confirm_dialog(ctx);
+
+        // Object-placement warning dialog (LM v1.91 "Check Object Placement
+        // on Save"): deferred saves wait here for the user's answer.
+        self.show_placement_warning_dialog(ctx);
 
         // Save error toast.
         if let Some(err) = &self.save_error.clone() {
@@ -542,6 +577,12 @@ impl UiMainWindow {
             self.save_error = Some("No ROM loaded.".into());
             return;
         };
+        // Lunar Magic v1.91 "Check Object Placement on Save": check the
+        // current tab edit states before writing; warn (don't block) when
+        // anything sits outside the level boundaries.
+        if !self.placement_check_passes(DeferredSave::Save) {
+            return;
+        }
         self.maybe_auto_restore_point(&path);
         match self.write_rom_to_path(&path, &path) {
             Ok(()) => {
@@ -552,6 +593,77 @@ impl UiMainWindow {
                 }
             }
             Err(e) => self.save_error = Some(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Collect placement issues from every open tab's current (unsaved) edit
+    /// state (LM v1.91 "Check Object Placement on Save").
+    fn collect_placement_issues(&self) -> Vec<PlacementIssue> {
+        self.dock_state.iter_all_tabs().flat_map(|(_, tab)| tab.placement_issues()).collect()
+    }
+
+    /// Run the LM v1.91 on-save placement check. Returns `true` when the save
+    /// may proceed; returns `false` and stashes the issues in
+    /// `pending_placement_warning` when the warning dialog must ask the user
+    /// first. A "Save anyway" answer sets `placement_save_confirmed`, which
+    /// is consumed here so the resumed save does not re-trigger the dialog.
+    fn placement_check_passes(&mut self, deferred: DeferredSave) -> bool {
+        if !self.check_placement_on_save {
+            return true;
+        }
+        if self.placement_save_confirmed {
+            self.placement_save_confirmed = false;
+            return true;
+        }
+        let issues = self.collect_placement_issues();
+        if issues.is_empty() {
+            return true;
+        }
+        self.pending_placement_warning = Some(PendingPlacementWarning { issues, deferred });
+        false
+    }
+
+    /// "Object Placement Warning" dialog (LM v1.91): lists what the on-save
+    /// check found and lets the user save anyway or cancel. LM warns, it
+    /// does not block.
+    fn show_placement_warning_dialog(&mut self, ctx: &Context) {
+        if self.pending_placement_warning.is_none() {
+            return;
+        }
+        let mut open = true;
+        let mut save_anyway = false;
+        let mut cancel = false;
+        let issues = self.pending_placement_warning.as_ref().map(|p| p.issues.clone()).unwrap_or_default();
+        let heading = crate::placement_check::warning_heading(issues.len());
+        Window::new("Object Placement Warning").open(&mut open).resizable(true).show(ctx, |ui| {
+            ui.label(RichText::new(&heading));
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for issue in &issues {
+                    ui.label(format!("⚠ {}", format_issue(issue)));
+                }
+            });
+            ui.label(RichText::new(crate::placement_check::SAVE_KEEPS_HINT).small().italics());
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save anyway").clicked() {
+                    save_anyway = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if save_anyway {
+            if let Some(pending) = self.pending_placement_warning.take() {
+                self.placement_save_confirmed = true;
+                match pending.deferred {
+                    DeferredSave::Save => self.save_rom(ctx),
+                    DeferredSave::SaveAs(dest) => self.finish_save_as(ctx, &dest),
+                }
+            }
+        } else if !open || cancel {
+            self.pending_placement_warning = None;
+            self.placement_save_confirmed = false;
         }
     }
 
@@ -612,20 +724,29 @@ impl UiMainWindow {
     fn show_save_as_dialog(&mut self, ctx: &Context) {
         self.save_as_dialog.update(ctx);
         if let Some(dest) = self.save_as_dialog.take_picked() {
-            let Some(src) = self.rom_path.clone() else {
+            // LM v1.91 "Check Object Placement on Save" applies to Save As
+            // too; the picked destination rides along in the deferred save.
+            if !self.placement_check_passes(DeferredSave::SaveAs(dest.clone())) {
                 return;
-            };
-            match self.write_rom_to_path(&src, &dest) {
-                Ok(_) => {
-                    log::info!("Saved ROM as {}", dest.display());
-                    if let Err(e) = self.reload_rom_into_context(ctx, &dest) {
-                        self.save_error = Some(format!("Saved ROM As, but reload failed: {e}"));
-                        return;
-                    }
-                    self.rom_path = Some(dest.to_path_buf());
-                }
-                Err(e) => self.save_error = Some(format!("Save As failed: {e}")),
             }
+            self.finish_save_as(ctx, &dest);
+        }
+    }
+
+    fn finish_save_as(&mut self, ctx: &Context, dest: &std::path::Path) {
+        let Some(src) = self.rom_path.clone() else {
+            return;
+        };
+        match self.write_rom_to_path(&src, dest) {
+            Ok(_) => {
+                log::info!("Saved ROM as {}", dest.display());
+                if let Err(e) = self.reload_rom_into_context(ctx, dest) {
+                    self.save_error = Some(format!("Saved ROM As, but reload failed: {e}"));
+                    return;
+                }
+                self.rom_path = Some(dest.to_path_buf());
+            }
+            Err(e) => self.save_error = Some(format!("Save As failed: {e}")),
         }
     }
 
@@ -1693,6 +1814,20 @@ impl UiMainWindow {
                     if ui.button("Scan for Undefined Exits...").clicked() {
                         self.open_exit_scan();
                         ui.close_menu();
+                    }
+                });
+
+                // ── Options (LM v1.91 parity) ──
+                ui.menu_button("Options", |ui| {
+                    if ui
+                        .checkbox(&mut self.check_placement_on_save, "Check Object Placement on Save")
+                        .on_hover_text(
+                            "When enabled, saving to the ROM warns about objects and sprites \
+                             placed outside the level boundaries (Lunar Magic v1.91).",
+                        )
+                        .changed()
+                    {
+                        EditorOptions { check_placement_on_save: self.check_placement_on_save }.save();
                     }
                 });
 
