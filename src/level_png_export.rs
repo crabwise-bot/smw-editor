@@ -52,8 +52,7 @@ pub fn level_export_filename(level: u16) -> String {
     format!("level_{level:03X}.png")
 }
 
-/// Build an emulator CPU with `level` decompressed, ready to render.
-///
+/// Build an emulator CPU with `level` decompressed, ready to render.///
 /// Shared by the export pipeline and the headless `render_level` binary
 /// (which needs the CPU for its `--inspect=` debug mode).
 pub fn load_level_cpu(rom_bytes: &[u8], level: u16) -> Result<Cpu> {
@@ -147,6 +146,68 @@ fn render_sprites(cpu: &mut Cpu, width: u32, pixels: &mut [u8]) {
         }
     }
 }
+
+// ── Shared level geometry (block-map tile math) ─────────────────────────────
+// Extracted from the `render_exit_tiles` headless binary so the undefined-
+// exit scan and any future block-map consumer share one implementation —
+// the two can never drift apart.
+
+/// Screen/tile geometry of a decompressed level: the same screen-length
+/// table and vertical-layout math the editor and the render binaries use.
+#[derive(Debug, Clone, Copy)]
+pub struct LevelGeom {
+    pub vertical:   bool,
+    pub has_layer2: bool,
+    pub scr_len:    u32,
+    pub scr_size:   u32,
+    pub width:      u32,
+    pub height:     u32,
+    pub level_mode: u8,
+}
+
+/// Read [`LevelGeom`] from a CPU with the level already decompressed
+/// (see [`load_level_cpu`]).
+pub fn level_geom_of(cpu: &mut Cpu) -> LevelGeom {
+    let vertical = cpu.mem.load_u8(0x5B) & 1 != 0;
+    let level_mode = cpu.mem.load_u8(0x1925);
+    let renderer_table = cpu.mem.cart.resolve("CODE_058955").unwrap() + 9;
+    let renderer = cpu.mem.load_u24(renderer_table + (level_mode as u32) * 3);
+    let l2_renderers = [cpu.mem.cart.resolve("CODE_058B8D"), cpu.mem.cart.resolve("CODE_058C71")];
+    let has_layer2 = l2_renderers.contains(&Some(renderer));
+    let scr_len = match (vertical, has_layer2) {
+        (false, false) => 0x20,
+        (true, false) => 0x1C,
+        (false, true) => 0x10,
+        (true, true) => 0x0E,
+    } as u32;
+    let scr_size = if vertical { 16 * 32 } else { 16 * 27 };
+    let (width, height) = if vertical { (32 * 16, scr_len * 16 * 16) } else { (scr_len * 16 * 16, 27 * 16) };
+    LevelGeom { vertical, has_layer2, scr_len, scr_size, width, height, level_mode }
+}
+
+/// Map16 block ID at tile (tx, ty) on the block map starting at `lo_base`
+/// (the hi plane is 0x10000 above). Same screen/tile math the editor uses.
+pub fn block_at(cpu: &mut Cpu, g: &LevelGeom, tx: u32, ty: u32, lo_base: u32) -> u16 {
+    let idx = if g.vertical {
+        let sub_x = tx / 16;
+        let sub_y = ty / 32;
+        let screen = sub_y * 2 + sub_x;
+        screen * g.scr_size + (ty % 32) * 16 + (tx % 16)
+    } else {
+        (tx / 16) * g.scr_size + ty * 16 + (tx % 16)
+    };
+    cpu.mem.load_u8(lo_base + idx) as u16 | (((cpu.mem.load_u8(lo_base + 0x10000 + idx) as u16) & 0x3F) << 8)
+}
+
+/// Screen number containing tile (tx, ty): the same basis the 4-byte
+/// screen-exit objects use for their `screen_number` field.
+pub fn screen_at(g: &LevelGeom, tx: u32, ty: u32) -> u8 {
+    (if g.vertical { (ty / 32) * 2 + tx / 16 } else { tx / 16 }) as u8
+}
+
+/// Base of the Layer 1 block map in WRAM (Layer 2 follows at
+/// `+ scr_len * scr_size` when the level has one).
+pub const BLOCK_MAP_BASE: u32 = 0x7EC800;
 
 #[cfg(test)]
 mod tests {

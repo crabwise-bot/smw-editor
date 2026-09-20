@@ -6,6 +6,7 @@ pub mod compression;
 pub mod direct_map16;
 pub mod exanimation;
 pub mod exgfx;
+pub mod exit_scan;
 
 pub mod font_map;
 pub mod freespace;

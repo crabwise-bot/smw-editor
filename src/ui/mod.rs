@@ -2,6 +2,7 @@ mod dev_utils;
 mod editing_mode;
 mod editor_prototypes;
 mod exanimation_dialog;
+mod exit_scan_dialog;
 mod style;
 mod tab_viewer;
 mod tool;
@@ -113,6 +114,10 @@ pub struct UiMainWindow {
     show_share_data_dialog:    bool,
     /// Status line shown in the share-data dialog.
     share_data_status:         Option<String>,
+    /// Exit-scan dialog (Tools > Scan for Undefined Exits..., LM v1.50/v1.60
+    /// parity). The scan runs on a worker thread; this owns its state.
+    show_exit_scan_dialog:     bool,
+    exit_scan:                 exit_scan_dialog::ExitScanUi,
     /// Set when user tries to close the app with unsaved changes
     show_exit_dialog:          bool,
     /// Restore points + original-ROM reference copy (Restore menu, LM v1.80).
@@ -191,6 +196,8 @@ impl UiMainWindow {
             dialog_error: None,
             show_share_data_dialog: false,
             share_data_status: None,
+            show_exit_scan_dialog: false,
+            exit_scan: exit_scan_dialog::ExitScanUi::new(),
             show_exit_dialog: false,
             restore_manager: RestoreManager::new(),
             ips_apply_dialog: FileDialog::new(),
@@ -291,6 +298,10 @@ impl eframe::App for UiMainWindow {
         // Share-data dialog (File > Levels > Share Data Between Levels to Save Space...).
         if self.show_share_data_dialog {
             self.share_data_window(ctx);
+        }
+        // Exit-scan dialog (Tools > Scan for Undefined Exits..., LM v1.50/v1.60 parity).
+        if self.show_exit_scan_dialog {
+            self.exit_scan_window(ctx);
         }
         // IPS export same-directory warning (LM v1.80).
         self.show_ips_export_warning_dialog(ctx, rom.as_ref());
@@ -1677,6 +1688,10 @@ impl UiMainWindow {
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Address Converter").clicked() {
                         self.open_tool(UiAddressConverter::default());
+                        ui.close_menu();
+                    }
+                    if ui.button("Scan for Undefined Exits...").clicked() {
+                        self.open_exit_scan();
                         ui.close_menu();
                     }
                 });
