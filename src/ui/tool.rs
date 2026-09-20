@@ -28,6 +28,13 @@ pub trait DockableEditorTool {
     fn level_number(&self) -> Option<u16> {
         None
     }
+    /// Lunar Magic v1.91 "Check Object Placement on Save": placement issues
+    /// found in this tab's current (unsaved) edit state, using the same
+    /// effective screen count the save path writes. Only level editor tabs
+    /// return issues.
+    fn placement_issues(&self) -> Vec<crate::placement_check::PlacementIssue> {
+        Vec::new()
+    }
     /// Lunar Magic v1.11 "Open Level from Address": decode the Layer-1 object
     /// stream at the given headerless PC address into this tool. Sprites,
     /// entrances and background are intentionally not touched.

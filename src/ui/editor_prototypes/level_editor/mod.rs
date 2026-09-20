@@ -964,6 +964,68 @@ impl DockableEditorTool for UiLevelEditor {
         Some(self.level_num)
     }
 
+    /// Lunar Magic v1.91 "Check Object Placement on Save": scan this tab's
+    /// current (unsaved) edit state for objects and sprites placed outside
+    /// the level boundaries. Editor coords are already absolute tiles, so no
+    /// screen tracking is needed; the screen count is the same effective
+    /// value the save path writes (Auto-Set Number of Screens recompute
+    /// applied), so the check never warns about what the save itself fixes.
+    /// Screen exits are control records, not placed objects, and are not
+    /// checked.
+    fn placement_issues(&self) -> Vec<crate::placement_check::PlacementIssue> {
+        use crate::placement_check::{check_items, PlacedItem, PlacementItemKind};
+
+        let vertical = self
+            .rom
+            .levels
+            .get(usize::from(self.level_num))
+            .map(|l| l.secondary_header.vertical_level())
+            .unwrap_or(false);
+        let screens = u32::from(self.auto_set_screens_len(vertical).unwrap_or(self.level_properties.level_length)) + 1;
+
+        let mut items = Vec::new();
+        self.layer1.read(|l1| {
+            for o in &l1.objects {
+                let label = if o.is_extended {
+                    format!("extended object ${:02X}", o.settings)
+                } else {
+                    format!("object ${:02X}", o.id)
+                };
+                items.push(PlacedItem::at(o.x, o.y, PlacementItemKind::Object, label));
+            }
+        });
+        if let Some(l2) = &self.layer2_objects {
+            l2.read(|l2l| {
+                for o in &l2l.objects {
+                    let label = if o.is_extended {
+                        format!("extended object ${:02X}", o.settings)
+                    } else {
+                        format!("object ${:02X}", o.id)
+                    };
+                    items.push(PlacedItem::at(o.x, o.y, PlacementItemKind::Object, label));
+                }
+            });
+        }
+        self.sprites.read(|sprites| {
+            for s in &sprites.sprites {
+                items.push(PlacedItem::at(s.x, s.y, PlacementItemKind::Sprite, format!("sprite ${:02X}", s.sprite_id)));
+            }
+        });
+        self.direct_map16.read(|dm| {
+            for d in &dm.objects {
+                items.push(PlacedItem::rect(
+                    d.x,
+                    d.y,
+                    d.w,
+                    d.h,
+                    PlacementItemKind::DirectMap16,
+                    "direct Map16 object".to_string(),
+                ));
+            }
+        });
+        check_items(self.level_num, vertical, screens, &items)
+    }
+
     fn open_layer1_from_address(&mut self, pc: u32) -> anyhow::Result<Option<(usize, usize)>> {
         self.import_layer1_from_address(pc).map(Some)
     }
