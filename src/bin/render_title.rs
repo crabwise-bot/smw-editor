@@ -13,8 +13,9 @@
 //!    (fills VRAM words $5000-$5FFF with `!EmptyTile` = `$38FC`) before the
 //!    stripe upload. Without this, the tilemap still holds level 0xEB's Layer
 //!    3 data and renders as repeating garbage behind the logo.
-//! 4. The title stripe image (`TITLE_SCREEN_STRIPE_SNES`) is parsed and applied
-//!    to a byte-level VRAM mirror with the exact `LoadStripeImage` DMA
+//! 4. The title stripe image (`TitleCreditsData::title_screen_stripe`, parsed
+//!    from the region's fixed slot — U.S. `TITLE_SCREEN_STRIPE_SNES`, Japanese
+//!    `$05AF2C`) is applied to a byte-level VRAM mirror with the exact `LoadStripeImage` DMA
 //!    semantics (SMWDisX bank_00.asm): 3-byte header `[dest-hi][dest-lo]`
 //!    (VRAM word address) + `[flags]` (bit 7 = vertical → +32-word stride,
 //!    bit 6 = RLE) + `[len-lo]`, 14-bit payload byte count − 1 across the

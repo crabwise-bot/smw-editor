@@ -1,6 +1,6 @@
 use egui::{ColorImage, Context, DragValue, Slider};
 use smwe_rom::{
-    title_credits::{self, ENEMY_NAME_COUNT, ENEMY_NAME_LABELS},
+    title_credits::{self, ENEMY_NAME_COUNT},
     title_stripe::{
         encode_credits_stripe,
         encode_player_select_stripe,
@@ -33,10 +33,14 @@ impl UiLevelEditor {
         }
 
         let mut open = self.show_title_credits_editor;
-        egui::Window::new("Title Screen / Credits").open(&mut open).resizable(true).default_size([620.0, 520.0]).show(
-            ctx,
-            |ui| {
+        let region_label = self.title_credits.region.label();
+        egui::Window::new(format!("Title Screen / Credits ({region_label})"))
+            .open(&mut open)
+            .resizable(true)
+            .default_size([620.0, 520.0])
+            .show(ctx, |ui| {
                 ui.label("Edits here are global and use vanilla fixed-size data slots.");
+                ui.label(format!("ROM region: {region_label} — all slots below use the {region_label} layout."));
                 ui.separator();
 
                 ui.heading("Title screen");
@@ -51,13 +55,14 @@ impl UiLevelEditor {
                 });
 
                 ui.horizontal(|ui| {
+                    let input_max = self.title_credits.layout().title_input_seq_max;
                     ui.label(format!(
                         "Demo input: {} / {} bytes",
                         self.title_credits.title_demo_inputs.len() * 2 + 1,
-                        title_credits::TITLE_INPUT_SEQ_MAX_SIZE
+                        input_max
                     ));
                     if ui.button("+ Step").clicked()
-                        && self.title_credits.title_demo_inputs.len() * 2 + 3 <= title_credits::TITLE_INPUT_SEQ_MAX_SIZE
+                        && self.title_credits.title_demo_inputs.len() * 2 + 3 <= input_max
                     {
                         self.title_credits
                             .title_demo_inputs
@@ -172,14 +177,14 @@ impl UiLevelEditor {
                     }
                     // Budget meters: logo stripe and player-select menu stripe.
                     let logo_used = self.title_credits.title_screen_stripe.len();
-                    let logo_max = title_credits::TITLE_SCREEN_STRIPE_MAX_SIZE;
+                    let logo_max = self.title_credits.layout().title_stripe_max;
                     ui.horizontal(|ui| {
                         ui.label(format!("Logo stripe: {logo_used} / {logo_max} bytes"));
                         let frac = logo_used as f32 / logo_max as f32;
                         ui.add(egui::ProgressBar::new(frac).desired_width(200.0));
                     });
                     let menu_used = self.title_credits.player_select_stripe.len();
-                    let menu_max = title_credits::PLAYER_SELECT_STRIPE_MAX_SIZE;
+                    let menu_max = self.title_credits.layout().player_select_stripe_max;
                     ui.horizontal(|ui| {
                         ui.label(format!("Menu stripe: {menu_used} / {menu_max} bytes"));
                         let frac = menu_used as f32 / menu_max as f32;
@@ -269,11 +274,12 @@ impl UiLevelEditor {
                         egui::ScrollArea::vertical().max_height(240.0).id_salt("credits_enemy_list").show(ui, |ui| {
                             for i in 0..ENEMY_NAME_COUNT {
                                 let used = self.title_credits.enemy_name_stripes[i].len();
-                                let max = title_credits::TitleCreditsData::enemy_name_slot_size(i);
+                                let max = self.title_credits.enemy_name_slot_size(i);
+                                let label = self.title_credits.enemy_name_label(i);
                                 ui.selectable_value(
                                     &mut self.credits_editor_selected,
                                     i,
-                                    format!("{i:02X} {} ({used}/{max} B)", ENEMY_NAME_LABELS[i]),
+                                    format!("{i:02X} {label} ({used}/{max} B)"),
                                 );
                             }
                         });
@@ -281,7 +287,7 @@ impl UiLevelEditor {
                     ui.separator();
                     ui.vertical(|ui| {
                         let i = self.credits_editor_selected.min(ENEMY_NAME_COUNT - 1);
-                        let slot_size = title_credits::TitleCreditsData::enemy_name_slot_size(i);
+                        let slot_size = self.title_credits.enemy_name_slot_size(i);
                         // Ensure the grid and GFX are loaded.
                         self.ensure_credits_gfx();
                         self.ensure_credits_grid();
@@ -651,7 +657,7 @@ impl UiLevelEditor {
             return;
         }
         let scene = self.credits_editor_selected.min(ENEMY_NAME_COUNT - 1);
-        let slot_size = title_credits::TitleCreditsData::enemy_name_slot_size(scene);
+        let slot_size = self.title_credits.enemy_name_slot_size(scene);
         let grid = match self.credits_grid.as_mut() {
             Some(g) => g,
             None => return,
