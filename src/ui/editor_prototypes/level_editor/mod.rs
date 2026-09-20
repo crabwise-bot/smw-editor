@@ -260,6 +260,14 @@ pub struct UiLevelEditor {
     // Lunar Magic v1.80's palette editors.
     palettes:                   UndoableData<palette_editor::EditablePalettes>,
     palette_dirty:              bool,
+    /// Which of the 24 shared palette rows (0–7 BG, 8–15 FG, 16–23 sprite)
+    /// this tab has modified. The save path merges only dirty rows into the
+    /// ROM (merge-on-save), so another tab's already-saved shared-palette
+    /// edits are never clobbered by this tab writing back stale rows.
+    shared_rows_dirty:          [bool; 24],
+    /// Status line for the palette file interchange buttons (shared-palette
+    /// extract/insert, `.mw3` export/import).
+    palette_file_status:        Option<String>,
     selected_palette_group:     u8,
     selected_palette_idx:       usize,
     // Pre-drag snapshot for gesture-style color edits (see
@@ -679,6 +687,8 @@ impl UiLevelEditor {
             se_goto_text: String::new(),
             palettes: UndoableData::new(palette_editor::EditablePalettes::default()),
             palette_dirty: false,
+            shared_rows_dirty: [false; 24],
+            palette_file_status: None,
             selected_palette_group: 3, // none
             selected_palette_idx: 0,
             palette_gesture_before: None,
@@ -1564,7 +1574,17 @@ impl DockableEditorTool for UiLevelEditor {
                         .map_err(|e| anyhow::anyhow!("Custom-palette erase failed: {e}"))?;
                 }
                 if self.palette_dirty {
-                    let p = &self.level_properties;
+                    // Snapshot the dirty shared rows out of the undo state
+                    // first, so the ROM-writing closure below has exclusive
+                    // access to `rom_bytes`. Only rows this tab modified are
+                    // written (merge-on-save): the app applies every tab's
+                    // `save_to_rom` sequentially onto one buffer
+                    // (`src/ui/mod.rs`), so writing back stale rows would
+                    // clobber another tab's already-saved shared-palette
+                    // edits.
+                    let dirty: Vec<(usize, [u16; 12])> = self.palettes.read(|pal| {
+                        (0..24).filter(|&r| self.shared_rows_dirty[r]).map(|r| (r, *pal.shared.row(r))).collect()
+                    });
                     let write_palette =
                         |rom_bytes: &mut [u8], snes_addr: u32, colors: &[u16; 12]| -> anyhow::Result<()> {
                             let pc = AddrPc::try_from_lorom(AddrSnes(snes_addr))?.as_index() + header_offset;
@@ -1577,10 +1597,14 @@ impl DockableEditorTool for UiLevelEditor {
                             }
                             Ok(())
                         };
-                    let (bg, fg, sprite) = self.palettes.read(|pal| (pal.bg, pal.fg, pal.sprite));
-                    write_palette(rom_bytes, 0x00B0B0 + p.palette_bg as u32 * 0x18, &bg)?;
-                    write_palette(rom_bytes, 0x00B190 + p.palette_fg as u32 * 0x18, &fg)?;
-                    write_palette(rom_bytes, 0x00B318 + p.palette_sprite as u32 * 0x18, &sprite)?;
+                    for (row, colors) in &dirty {
+                        let snes_addr = match row / 8 {
+                            0 => 0x00B0B0,
+                            1 => 0x00B190,
+                            _ => 0x00B318,
+                        } + (row % 8) as u32 * 0x18;
+                        write_palette(rom_bytes, snes_addr, colors)?;
+                    }
                 }
             }
         }
@@ -1734,6 +1758,7 @@ impl DockableEditorTool for UiLevelEditor {
     fn on_save_succeeded(&mut self) {
         self.has_edits = false;
         self.palette_dirty = false;
+        self.shared_rows_dirty = [false; 24];
         self.custom_palette_dirty = false;
         self.title_credits_dirty = false;
         self.exanimation_dirty = false;
@@ -2063,19 +2088,26 @@ impl UiLevelEditor {
             // next level switch.
             self.custom_palette_enabled = self.custom_palettes.get(self.level_num).is_some();
             self.custom_palette_dirty = false;
-            let shared = palette_editor::EditablePalettes {
-                bg:     read_palette(0x00B0B0 + p.palette_bg() as u32 * 0x18),
-                fg:     read_palette(0x00B190 + p.palette_fg() as u32 * 0x18),
-                sprite: read_palette(0x00B318 + p.palette_sprite() as u32 * 0x18),
-            };
+            let mut shared = crate::palette_files::SharedPaletteTables::default();
+            for i in 0..8 {
+                shared.bg[i] = read_palette(0x00B0B0 + i as u32 * 0x18);
+                shared.fg[i] = read_palette(0x00B190 + i as u32 * 0x18);
+                shared.sprite[i] = read_palette(0x00B318 + i as u32 * 0x18);
+            }
             let editable = match self.custom_palettes.get(self.level_num) {
                 Some(custom) => {
-                    palette_editor::EditablePalettes { bg: custom.bg, fg: custom.fg, sprite: custom.sprite }
+                    palette_editor::EditablePalettes { bg: custom.bg, fg: custom.fg, sprite: custom.sprite, shared }
                 }
-                None => shared,
+                None => palette_editor::EditablePalettes {
+                    bg: shared.bg[p.palette_bg() as usize],
+                    fg: shared.fg[p.palette_fg() as usize],
+                    sprite: shared.sprite[p.palette_sprite() as usize],
+                    shared,
+                },
             };
             self.palettes = UndoableData::new(editable);
             self.palette_dirty = false;
+            self.shared_rows_dirty = [false; 24];
             self.palette_gesture_before = None;
         }
 

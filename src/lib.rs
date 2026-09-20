@@ -3,6 +3,7 @@ pub mod custom_tooltips;
 pub mod edit_manual;
 pub mod level_address;
 pub mod level_png_export;
+pub mod palette_files;
 pub mod project;
 pub mod render_util;
 pub mod rom_freespace;
