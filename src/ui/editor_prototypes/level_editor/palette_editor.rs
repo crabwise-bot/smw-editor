@@ -1,22 +1,37 @@
+use anyhow::Context as _;
 use egui::{vec2, Color32, Context, Rect, Sense, Ui, Vec2};
 use egui_phosphor::regular as icon;
 
 use super::UiLevelEditor;
-use crate::undo::Undo;
+use crate::{
+    palette_files::{LevelPalette36, SharedPaletteTables, SHARED_PALETTE_BYTES},
+    undo::Undo,
+};
 
 const CELL_SIZE: f32 = 20.0;
 const COLS: usize = 12;
 
-/// The three 12-color palettes the level palette editor edits (BG, FG,
-/// sprite). Wrapped in [`UndoableData`] for Lunar Magic v1.80-style
-/// undo/redo. Serialization is a fixed 72-byte little-endian u16 sequence
-/// (bg, fg, sprite), so undo deltas are deterministic.
+/// The palette editor's undoable state: the 36 colors on screen (BG, FG,
+/// sprite) plus the full shared palette tables behind them, so
+/// "Insert Shared Palette from File" is a single undo step like every
+/// other palette edit.
+///
+/// Invariant: while the custom palette is off, `bg`/`fg`/`sprite` equal
+/// `shared`'s rows at the level's palette indices. Color edits update both
+/// sides in one undo step; disabling the custom palette copies the private
+/// colors into the shared rows (the adopt behavior); the save path writes
+/// only rows flagged in `UiLevelEditor::shared_rows_dirty`.
 #[derive(Clone, Debug, Default)]
 pub(super) struct EditablePalettes {
     pub bg:     [u16; 12],
     pub fg:     [u16; 12],
     pub sprite: [u16; 12],
+    pub shared: SharedPaletteTables,
 }
+
+/// Serialized undo size: 72 bytes of on-screen colors + 576 bytes of
+/// shared tables.
+pub(super) const EDITABLE_PALETTES_BYTES: usize = 72 + crate::palette_files::SHARED_PALETTE_BYTES;
 
 impl EditablePalettes {
     fn group(&self, group: usize) -> &[u16; 12] {
@@ -34,28 +49,48 @@ impl EditablePalettes {
             _ => &mut self.sprite,
         }
     }
+
+    /// Shared-table rows for a group (0=BG, 1=FG, 2=sprite): 8 rows of 12
+    /// colors each.
+    fn shared_group_mut(&mut self, group: usize) -> &mut [[u16; 12]; 8] {
+        match group {
+            0 => &mut self.shared.bg,
+            1 => &mut self.shared.fg,
+            _ => &mut self.shared.sprite,
+        }
+    }
 }
 
 impl Undo for EditablePalettes {
     fn from_bytes(bytes: Vec<u8>) -> Self {
         let mut palettes = Self::default();
-        for (i, chunk) in bytes.chunks_exact(2).enumerate().take(36) {
-            let v = u16::from_le_bytes([chunk[0], chunk[1]]);
-            palettes.group_mut(i / 12)[i % 12] = v;
+        let mut words = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]));
+        for i in 0..36 {
+            if let Some(w) = words.next() {
+                palettes.group_mut(i / 12)[i % 12] = w;
+            }
+        }
+        // The remaining 576 bytes are the shared tables (BG, FG, sprite).
+        // A short/truncated tail (never produced by `to_bytes`) keeps the
+        // default tables rather than failing the whole undo step.
+        let rest: Vec<u8> = words.flat_map(|w| w.to_le_bytes()).collect();
+        if let Ok(shared) = SharedPaletteTables::from_bytes(&rest) {
+            palettes.shared = shared;
         }
         palettes
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(72);
+        let mut bytes = Vec::with_capacity(EDITABLE_PALETTES_BYTES);
         for &v in self.bg.iter().chain(self.fg.iter()).chain(self.sprite.iter()) {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
+        bytes.extend_from_slice(&self.shared.to_bytes());
         bytes
     }
 
     fn size_bytes(&self) -> usize {
-        72
+        EDITABLE_PALETTES_BYTES
     }
 }
 
@@ -150,6 +185,8 @@ impl UiLevelEditor {
             self.palette_group(ui, "FG Palette", 1);
             ui.separator();
             self.palette_group(ui, "Sprite Palette", 2);
+            ui.separator();
+            self.palette_files_section(ui);
         });
         self.show_palette_editor = open;
 
@@ -220,6 +257,19 @@ impl UiLevelEditor {
             self.sync_custom_palette_entry();
         } else {
             self.custom_palettes.clear(self.level_num);
+            // Adopt-on-disable (existing behavior): the private on-screen
+            // colors move into the shared-table rows at this level's indices.
+            // Direct mutation, no undo step — like the toggle itself.
+            let (bg_idx, fg_idx, sp_idx) =
+                (self.palette_row_index(0), self.palette_row_index(1), self.palette_row_index(2));
+            let pal = self.palettes.data_mut();
+            let (bg, fg, sprite) = (pal.bg, pal.fg, pal.sprite);
+            pal.shared.bg[bg_idx] = bg;
+            pal.shared.fg[fg_idx] = fg;
+            pal.shared.sprite[sp_idx] = sprite;
+            self.shared_rows_dirty[bg_idx] = true;
+            self.shared_rows_dirty[8 + fg_idx] = true;
+            self.shared_rows_dirty[16 + sp_idx] = true;
         }
         self.custom_palette_dirty = true;
         self.mark_edited();
@@ -264,7 +314,20 @@ impl UiLevelEditor {
         let g5 = (g as u16 * 31 / 255) & 0x1F;
         let b5 = (b as u16 * 31 / 255) & 0x1F;
         let new_raw = r5 | (g5 << 5) | (b5 << 10);
-        self.palettes.write(|pal| pal.group_mut(group)[col] = new_raw);
+        let custom = self.custom_palette_enabled;
+        let row_idx = self.palette_row_index(group);
+        self.palettes.write(|pal| {
+            pal.group_mut(group)[col] = new_raw;
+            if !custom {
+                // Non-custom mode edits the shared tables: keep the shared
+                // row (and the save-path dirty flag) in sync, in the same
+                // undo step.
+                pal.shared_group_mut(group)[row_idx][col] = new_raw;
+            }
+        });
+        if !custom {
+            self.shared_rows_dirty[group * 8 + row_idx] = true;
+        }
         self.palette_dirty = true;
         self.mark_edited();
         self.sync_custom_palette_entry();
@@ -277,6 +340,187 @@ impl UiLevelEditor {
         if let Some(before) = self.palette_gesture_before.take() {
             self.palettes.commit_change(&before);
         }
+    }
+
+    /// This level's shared-table row index for a palette group (0=BG, 1=FG,
+    /// 2=sprite): the level header's palette indices into the shared tables.
+    fn palette_row_index(&self, group: usize) -> usize {
+        match group {
+            0 => self.level_properties.palette_bg as usize,
+            1 => self.level_properties.palette_fg as usize,
+            _ => self.level_properties.palette_sprite as usize,
+        }
+    }
+
+    /// Palette file interchange (Lunar Magic's Palette Editor file buttons):
+    /// shared-palette extract/insert plus `.mw3` custom-palette
+    /// export/import.
+    fn palette_files_section(&mut self, ui: &mut Ui) {
+        ui.label("Palette files");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Extract Shared Palette…")
+                .on_hover_text(
+                    "Save the shared palette tables (BG/FG/sprite groups, 8 rows × 12 colors each) \
+                     to a .spal file — byte-identical to the ROM",
+                )
+                .clicked()
+            {
+                self.extract_shared_palette();
+            }
+            if ui
+                .button("Insert Shared Palette…")
+                .on_hover_text(
+                    "Load a .spal file into the shared palette tables as one undo step (affects \
+                     every level that uses the shared tables)",
+                )
+                .clicked()
+            {
+                self.insert_shared_palette();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Export Custom Palette (.mw3)…")
+                .on_hover_text("Save this level's 36 palette colors to a Lunar Magic .mw3 file (514 bytes)")
+                .clicked()
+            {
+                self.export_mw3();
+            }
+            if ui
+                .button("Import Custom Palette (.mw3)…")
+                .on_hover_text(
+                    "Load a Lunar Magic .mw3 file into this level's palette as one undo step \
+                     (auto-enables the custom palette, like LM)",
+                )
+                .clicked()
+            {
+                self.import_mw3();
+            }
+        });
+        if let Some(status) = self.palette_file_status.clone() {
+            ui.label(egui::RichText::new(status).small().italics());
+        }
+    }
+
+    /// Lunar Magic "Extract Shared Palette to File": save the shared palette
+    /// tables (the editor's working state, so unsaved edits are included) to
+    /// a `.spal` file — 576 bytes, byte-identical to the ROM ranges.
+    fn extract_shared_palette(&mut self) {
+        let Some(path) =
+            rfd::FileDialog::new().add_filter("Shared palette", &["spal"]).set_file_name("shared.spal").save_file()
+        else {
+            return;
+        };
+        let bytes = self.palettes.read(|pal| pal.shared.to_bytes());
+        self.palette_file_status = Some(match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                let msg = format!("Extracted shared palette ({} bytes) → {}", SHARED_PALETTE_BYTES, path.display());
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Shared-palette extract failed: {e:#}"),
+        });
+    }
+
+    /// Lunar Magic "Insert Shared Palette from File": load a `.spal` file
+    /// into the shared palette tables as one undo step. The file must be
+    /// exactly 576 bytes — anything else is rejected without touching the
+    /// palette, so a truncated or foreign file can never half-apply. In
+    /// custom-palette mode the on-screen colors are the level's private
+    /// palette, so they are left alone while the shared tables update
+    /// underneath.
+    fn insert_shared_palette(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Shared palette", &["spal", "bin"]).pick_file() else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<String> {
+            let bytes = std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+            let tables = SharedPaletteTables::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let custom = self.custom_palette_enabled;
+            let (bg_idx, fg_idx, sp_idx) =
+                (self.palette_row_index(0), self.palette_row_index(1), self.palette_row_index(2));
+            self.palettes.write(|pal| {
+                pal.shared = tables;
+                if !custom {
+                    // Keep the on-screen colors (and the shared invariant) in sync.
+                    pal.bg = pal.shared.bg[bg_idx];
+                    pal.fg = pal.shared.fg[fg_idx];
+                    pal.sprite = pal.shared.sprite[sp_idx];
+                }
+            });
+            self.shared_rows_dirty = [true; 24];
+            self.palette_dirty = true;
+            self.mark_edited();
+            Ok(format!("Inserted shared palette ← {} (undo with Ctrl+Z)", path.display()))
+        })();
+        self.palette_file_status = Some(match result {
+            Ok(msg) => {
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Shared-palette insert failed: {e:#}"),
+        });
+    }
+
+    /// Export this level's 36 palette colors to a Lunar Magic `.mw3`
+    /// custom-palette file (514 bytes; Lunar Magic v1.40 File-menu parity —
+    /// here in the palette window next to the other file buttons).
+    fn export_mw3(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Lunar Magic custom palette", &["mw3"])
+            .set_file_name(format!("level_{:03X}.mw3", self.level_num))
+            .save_file()
+        else {
+            return;
+        };
+        let bytes = self.palettes.read(|pal| {
+            crate::palette_files::write_mw3(&LevelPalette36 { bg: pal.bg, fg: pal.fg, sprite: pal.sprite })
+        });
+        self.palette_file_status = Some(match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                let msg = format!("Exported custom palette (514 bytes) → {}", path.display());
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Custom-palette export failed: {e:#}"),
+        });
+    }
+
+    /// Import a Lunar Magic `.mw3` file into this level's palette as one
+    /// undo step. A `.mw3` is a *custom* palette file, so the level's custom
+    /// palette is auto-enabled first (Lunar Magic v3.30 auto-enable
+    /// semantics) and the import lands in the private palette, never the
+    /// shared tables. The file must be exactly 514 bytes or it is rejected
+    /// without touching the palette.
+    fn import_mw3(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Lunar Magic custom palette", &["mw3"]).pick_file() else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<String> {
+            let bytes = std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+            let pal = crate::palette_files::read_mw3(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if !self.custom_palette_enabled {
+                self.set_custom_palette_enabled(true);
+            }
+            let (bg, fg, sprite) = (pal.bg, pal.fg, pal.sprite);
+            self.palettes.write(|p| {
+                p.bg = bg;
+                p.fg = fg;
+                p.sprite = sprite;
+            });
+            self.palette_dirty = true;
+            self.mark_edited();
+            self.sync_custom_palette_entry();
+            Ok(format!("Imported custom palette ← {} (undo with Ctrl+Z)", path.display()))
+        })();
+        self.palette_file_status = Some(match result {
+            Ok(msg) => {
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Custom-palette import failed: {e:#}"),
+        });
     }
 
     fn palette_group(&mut self, ui: &mut Ui, label: &str, group: usize) {
@@ -364,7 +608,21 @@ impl UiLevelEditor {
                     if self.palette_gesture_before.is_none() {
                         self.palette_gesture_before = Some(self.palettes.read(|pal| pal.clone()));
                     }
-                    self.palettes.data_mut().group_mut(group)[col] = new_raw;
+                    let custom = self.custom_palette_enabled;
+                    let row_idx = self.palette_row_index(group);
+                    {
+                        let pal = self.palettes.data_mut();
+                        pal.group_mut(group)[col] = new_raw;
+                        if !custom {
+                            // Non-custom mode edits the shared tables: keep
+                            // the shared row (and the save-path dirty flag)
+                            // in sync. The gesture commits as one undo step.
+                            pal.shared_group_mut(group)[row_idx][col] = new_raw;
+                        }
+                    }
+                    if !custom {
+                        self.shared_rows_dirty[group * 8 + row_idx] = true;
+                    }
                     changed = true;
                 }
                 let raw2 = self.palettes.read(|pal| pal.group(group)[col]);
@@ -456,10 +714,49 @@ mod tests {
         let mut p = EditablePalettes::default();
         p.bg[0] = 0x1234;
         p.sprite[11] = 0x7FFF;
+        p.shared.bg[3][5] = 0x03E0;
+        p.shared.sprite[7][11] = 0x001F;
         let bytes = p.to_bytes();
-        assert_eq!(bytes.len(), 72);
+        assert_eq!(bytes.len(), EDITABLE_PALETTES_BYTES);
         let back = EditablePalettes::from_bytes(bytes);
         assert_eq!(back.to_bytes(), p.to_bytes());
+        assert_eq!(back.shared.bg[3][5], 0x03E0);
+        assert_eq!(back.shared.sprite[7][11], 0x001F);
+    }
+
+    #[test]
+    fn palette_from_bytes_keeps_shared_tables_after_undo_round_trip() {
+        // An insert-shared-palette undo step must restore both the visible
+        // colors and the shared tables.
+        let mut palettes = UndoableData::new(EditablePalettes::default());
+        let mut tables = SharedPaletteTables::default();
+        tables.bg[0] = [0x001F; 12];
+        tables.fg[1] = [0x03E0; 12];
+        palettes.write(|p| {
+            p.shared = tables.clone();
+            p.bg = tables.bg[0];
+        });
+        palettes.undo();
+        let (bg0, shared_bg0) = palettes.read(|p| (p.bg[0], p.shared.bg[0][0]));
+        assert_eq!(bg0, 0);
+        assert_eq!(shared_bg0, 0);
+        palettes.redo();
+        let (bg0, shared_bg0) = palettes.read(|p| (p.bg[0], p.shared.bg[0][0]));
+        assert_eq!(bg0, 0x001F);
+        assert_eq!(shared_bg0, 0x001F);
+    }
+
+    #[test]
+    fn palette_from_bytes_tolerates_truncated_tail() {
+        // Defensive: a 72-byte undo record (pre-shared-table era) still
+        // restores the colors; the shared tables stay defaulted.
+        let mut p = EditablePalettes::default();
+        p.bg[0] = 0x1234;
+        let mut bytes = p.to_bytes();
+        bytes.truncate(72);
+        let back = EditablePalettes::from_bytes(bytes);
+        assert_eq!(back.bg[0], 0x1234);
+        assert_eq!(back.shared.bg[0][0], 0);
     }
 
     #[test]
