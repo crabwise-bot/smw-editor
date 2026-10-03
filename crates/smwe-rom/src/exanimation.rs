@@ -506,6 +506,37 @@ impl ExAnimationData {
     }
 }
 
+/// Remap VRAM word addresses across an animation list (LM v3.32 "Remap"
+/// button parity).
+///
+/// After the user moves tiles around in VRAM, every exact occurrence of
+/// `old` is rewritten to `new`:
+/// - in the source-tile payloads of line frames (when `frames` is set), and
+/// - in the VRAM destinations of line frames (when `dests` is set).
+///
+/// Palette frames are untouched: their payloads are SNES colors and their
+/// destinations are CGRAM word addresses, not VRAM tile addresses. Returns
+/// the number of references rewritten.
+pub fn remap_addresses(anim: &mut ExAnimation, old: u16, new: u16, frames: bool, dests: bool) -> usize {
+    let mut n = 0usize;
+    for frame in &mut anim.frames {
+        if !frame.kind.is_line() {
+            continue;
+        }
+        if dests && frame.dest == old {
+            frame.dest = new;
+            n += 1;
+        }
+        if frames {
+            for p in frame.payload.iter_mut().filter(|p| **p == old) {
+                *p = new;
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 // -------------------------------------------------------------------------------------------------
 // Preview: apply one tick to VRAM/CGRAM
 // -------------------------------------------------------------------------------------------------
@@ -795,6 +826,79 @@ mod tests {
         apply_tick(&anim, 1, &mut vram, &mut cgram);
         assert_eq!(u16::from_le_bytes([cgram[0x60], cgram[0x61]]), 0x0002);
         assert_eq!(u16::from_le_bytes([cgram[0x64], cgram[0x65]]), 0x0001);
+    }
+
+    #[test]
+    fn remap_addresses_rewrites_payloads_and_dests() {
+        let mut anim = ExAnimation {
+            frames:           vec![
+                ExAnimFrame {
+                    kind:            ExAnimFrameKind::Line8x8,
+                    dest:            0x1000,
+                    speed:           0,
+                    trigger:         ExAnimTrigger::Always,
+                    frames:          2,
+                    units_per_frame: 2,
+                    payload:         vec![0x2000, 0x2010, 0x2000, 0x2020],
+                },
+                ExAnimFrame {
+                    kind:            ExAnimFrameKind::Line8x8,
+                    dest:            0x2000, // a destination that also matches `old`
+                    speed:           0,
+                    trigger:         ExAnimTrigger::Always,
+                    frames:          1,
+                    units_per_frame: 1,
+                    payload:         vec![0x3000],
+                },
+                ExAnimFrame {
+                    kind:            ExAnimFrameKind::Palette,
+                    dest:            0x2000, // CGRAM address: must NOT be remapped
+                    speed:           0,
+                    trigger:         ExAnimTrigger::Always,
+                    frames:          1,
+                    units_per_frame: 1,
+                    payload:         vec![0x2000], // a color, not an address: untouched
+                },
+            ],
+            disable_original: false,
+        };
+        let n = remap_addresses(&mut anim, 0x2000, 0x4000, true, true);
+        // Two payload hits in frame 0 + frame 1's dest = 3 rewrites.
+        assert_eq!(n, 3);
+        assert_eq!(anim.frames[0].payload, vec![0x4000, 0x2010, 0x4000, 0x2020]);
+        assert_eq!(anim.frames[0].dest, 0x1000);
+        assert_eq!(anim.frames[1].dest, 0x4000);
+        assert_eq!(anim.frames[1].payload, vec![0x3000]);
+        // Palette frame untouched.
+        assert_eq!(anim.frames[2].dest, 0x2000);
+        assert_eq!(anim.frames[2].payload, vec![0x2000]);
+    }
+
+    #[test]
+    fn remap_addresses_scope_flags() {
+        let mut anim = ExAnimation {
+            frames:           vec![ExAnimFrame {
+                kind:            ExAnimFrameKind::Line16x16,
+                dest:            0x1000,
+                speed:           0,
+                trigger:         ExAnimTrigger::Always,
+                frames:          1,
+                units_per_frame: 1,
+                payload:         vec![0x1000],
+            }],
+            disable_original: false,
+        };
+        // Destinations only: payload keeps the old address.
+        assert_eq!(remap_addresses(&mut anim, 0x1000, 0x1100, false, true), 1);
+        assert_eq!(anim.frames[0].dest, 0x1100);
+        assert_eq!(anim.frames[0].payload, vec![0x1000]);
+        // Frames only: the payload matches, the destination is left alone.
+        assert_eq!(remap_addresses(&mut anim, 0x1000, 0x1200, true, false), 1);
+        assert_eq!(anim.frames[0].payload, vec![0x1200]);
+        assert_eq!(anim.frames[0].dest, 0x1100);
+        // Both scopes off: no-op.
+        assert_eq!(remap_addresses(&mut anim, 0x1100, 0x1300, false, false), 0);
+        assert_eq!(anim.frames[0].dest, 0x1100);
     }
 
     #[test]
