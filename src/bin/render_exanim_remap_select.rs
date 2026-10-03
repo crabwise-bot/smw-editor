@@ -239,9 +239,8 @@ fn main() -> anyhow::Result<()> {
     y += 40;
     x = field(&mut img, &sans, ex, y, "VRAM dest", "$1000");
     // The ◎ target button, shown because 8x8 Select is on.
-    let (bx, by, bw, bh) = button(&mut img, &sans, x + 12, y - 1, "◎", true);
-    let _ = (bx, by, bw, bh);
-    x = field(&mut img, &sans, x + 96, y, "Speed (ticks/step)", "4");
+    let (_, _, bw, _) = button(&mut img, &sans, x + 12, y - 1, "◎", true);
+    field(&mut img, &sans, x + bw + 96, y, "Speed (ticks/step)", "4");
     y += 40;
     x = field(&mut img, &sans, ex, y, "Steps", "2");
     field(&mut img, &sans, x + 18, y, "Tiles/step", "4");
@@ -364,9 +363,8 @@ fn main() -> anyhow::Result<()> {
         Rgb([200, 200, 200]),
     );
     wyy += 32;
-    let mut wxx = field(&mut img, &sans, wx + 14, wyy, "Old VRAM address", "$2000");
+    let wxx = field(&mut img, &sans, wx + 14, wyy, "Old VRAM address", "$2000");
     field(&mut img, &sans, wxx + 16, wyy, "New VRAM address", "$4000");
-    let _ = wxx;
     wyy += 40;
     draw_text(&mut img, &sans, "☑ Frame source tiles", wx as i32 + 14, wyy as i32, 15.0, Rgb([220, 220, 220]));
     wyy += 28;
