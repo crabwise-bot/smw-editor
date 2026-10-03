@@ -824,6 +824,9 @@ impl DockableEditorTool for UiWorldEditor {
                 None, // single overworld list: no Level/Global tabs
             );
             self.show_exanimation_editor = open;
+            if !open {
+                self.exanim_dialog.disarm_select();
+            }
             if changed {
                 self.exanimation_dirty = true;
                 self.has_edits = true;

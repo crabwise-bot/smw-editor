@@ -279,6 +279,14 @@ pub struct UiLevelEditor {
     // (optional leading `#`) as one undo step.
     palette_hex_input:          String,
     palette_hex_invalid:        bool,
+    // Lunar Magic v3.33 ExAnimation link: per-group CGRAM word addresses of
+    // the three palette-editor rows, found by scanning the emulator's CGRAM
+    // after level load (`scan_palette_cgram_bases`). `None` when the row
+    // wasn't found there (custom palettes, animated regions).
+    palette_cgram_base:         [Option<u16>; 3],
+    // Status line for the ExAnimation palette link (copy-row confirmations,
+    // destination selections).
+    palette_link_status:        Option<String>,
     // Per-level custom palette (Lunar Magic v3.30 "Auto-Enable custom
     // palette on edit" parity): local mutable copy of the editor-owned
     // RATS block. `custom_palette_enabled` tells whether the current level
@@ -696,6 +704,8 @@ impl UiLevelEditor {
             palette_gesture_before: None,
             palette_hex_input: String::new(),
             palette_hex_invalid: false,
+            palette_cgram_base: [None; 3],
+            palette_link_status: None,
             custom_palettes,
             custom_palette_dirty: false,
             custom_palette_enabled: false,
@@ -933,6 +943,10 @@ impl DockableEditorTool for UiLevelEditor {
                 Some(self.level_num),
             );
             self.show_exanimation_editor = open;
+            if !open {
+                // A closed dialog can't keep a stale point-and-click arm.
+                self.exanim_dialog.disarm_select();
+            }
             if changed {
                 self.exanimation_dirty = true;
                 self.has_edits = true;
@@ -2192,6 +2206,10 @@ impl UiLevelEditor {
             self.palette_dirty = false;
             self.shared_rows_dirty = [false; 24];
             self.palette_gesture_before = None;
+            // Locate the three palette rows in CGRAM for the LM v3.33
+            // ExAnimation destination features (after the emulator's real
+            // palette upload above).
+            self.scan_palette_cgram_bases();
         }
 
         // ── Map16 block pointers ─────────────────────────────────────────────

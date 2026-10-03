@@ -23,6 +23,9 @@
 //! - `map16words` — one Map16 block's four tile words (Block Editor).
 //! - `tile8x8` — one 8x8 tile's 64 color indices + source GFX file.
 //! - `owtiles` — overworld layer-1 tile IDs, rectangular region.
+//! - `palrow` — one row of SNES RGB555 palette colors (Lunar Magic v3.61:
+//!   pasting a whole row of palette colors from the palette editors into
+//!   the ExAnimation dialogs).
 
 /// Magic prefix + format version. Bump the version if the grammar changes.
 const MAGIC: &str = "smwclip";
@@ -71,6 +74,10 @@ pub enum ClipboardPayload {
     Tile8x8 { file: u8, pixels: [u8; 64] },
     /// Overworld editor: layer-1 tile IDs, rectangular region, row-major.
     OverworldTiles { cols: u32, rows: u32, ids: Vec<u8> },
+    /// Palette editor: one row of SNES RGB555 colors (the palette editor's
+    /// groups are 12 colors each; Lunar Magic's rows are 16 — the decode
+    /// accepts any 1..=64 so rows from either layout round-trip).
+    PaletteRow { colors: Vec<u16> },
 }
 
 fn hex_u16(v: u16) -> String {
@@ -134,6 +141,10 @@ impl ClipboardPayload {
                 let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
                 format!("{MAGIC}:{VERSION}:owtiles:{cols},{rows}:{list}")
             }
+            ClipboardPayload::PaletteRow { colors } => {
+                let list = colors.iter().map(|c| hex_u16(*c)).collect::<Vec<_>>().join(",");
+                format!("{MAGIC}:{VERSION}:palrow:{list}")
+            }
         }
     }
 
@@ -154,9 +165,23 @@ impl ClipboardPayload {
             "map16words" => decode_map16words(rest),
             "tile8x8" => decode_tile8x8(rest),
             "owtiles" => decode_owtiles(rest),
+            "palrow" => decode_palrow(rest),
             _ => None,
         }
     }
+}
+
+/// Maximum colors in a pasted palette row (sanity cap; the editors copy
+/// 12-color rows, LM copies 16).
+const PALROW_MAX: usize = 64;
+
+fn decode_palrow(rest: &str) -> Option<ClipboardPayload> {
+    let colors: Option<Vec<u16>> = rest.split(',').map(parse_hex_u16).collect();
+    let colors = colors?;
+    if colors.is_empty() || colors.len() > PALROW_MAX {
+        return None;
+    }
+    Some(ClipboardPayload::PaletteRow { colors })
 }
 
 fn decode_objects(rest: &str) -> Option<ClipboardPayload> {
@@ -400,6 +425,28 @@ mod tests {
     fn owtiles_roundtrip() {
         let p = ClipboardPayload::OverworldTiles { cols: 3, rows: 1, ids: vec![5, 0, 255] };
         assert_eq!(ClipboardPayload::decode(&p.encode()), Some(p));
+    }
+
+    #[test]
+    fn palrow_roundtrip() {
+        // Lunar Magic v3.61: a whole row of palette colors.
+        let colors: Vec<u16> = (0..12).map(|i| (i as u16 * 0x1111) & 0x7FFF).collect();
+        let p = ClipboardPayload::PaletteRow { colors };
+        let text = p.encode();
+        assert!(text.starts_with("smwclip:1:palrow:"));
+        // Human-readable hex, like LM's text clipboard payloads.
+        assert!(text.contains("1111"));
+        assert_eq!(ClipboardPayload::decode(&text), Some(p));
+    }
+
+    #[test]
+    fn palrow_decode_rejects_garbage() {
+        assert_eq!(ClipboardPayload::decode("smwclip:1:palrow:"), None);
+        assert_eq!(ClipboardPayload::decode("smwclip:1:palrow:ZZZZ"), None);
+        assert_eq!(ClipboardPayload::decode("smwclip:1:palrow:001F,"), None);
+        // Over the sanity cap.
+        let long = "smwclip:1:palrow:".to_string() + &vec!["0000"; 65].join(",");
+        assert_eq!(ClipboardPayload::decode(&long), None);
     }
 
     #[test]
