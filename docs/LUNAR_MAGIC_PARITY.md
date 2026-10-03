@@ -152,6 +152,7 @@ search — "find all references" for sprites, objects, tiles, music, and exits.)
 | Graphics editor | ⛔ | README lists as "Planned" |
 | ASM code editor | ⛔ | README lists as "Planned" |
 | Music editor | ⛔ | README lists as "Planned" |
+| ExAnimation frame insert/delete/rotate gestures (LM v3.50) | ✅ | Shared "ExAnimated Frames" dialog (level/global/overworld): holding **Ctrl** while clicking the ▲/▼ frame-group buttons moves the selected frame's *values* one step — ▲ deletes the first step (values shift left), ▼ inserts a blank step at the start (values shift right) — and **Ctrl+Shift** circular-rotates the values one step left/right, length unchanged (Lunar Magic v3.50 parity). Implemented as `ExAnimFrame::{insert_frame_at_start, delete_frame_at_start, rotate_steps_right, rotate_steps_left}` in `crates/smwe-rom/src/exanimation.rs` (unit-tested across line/palette/palette-rotate kinds, incl. the 0x100-step cap and 1-step no-ops; the rotate ring grows/shrinks by one blank color since LM documents no exact ring semantics); the dialog adds modifier-aware ▲/▼ handlers with tooltips, resets the armed tile-picker slot, and marks the data save-dirty. Honest limit: LM's exact Remap-style semantics aren't public, so the mapping (▲=left/delete, ▼=right/insert) follows the button direction, documented in the tooltip. See `docs/screenshots/exanim-gestures.png` |
 
 ## Known correctness gaps affecting parity work
 

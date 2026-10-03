@@ -204,6 +204,85 @@ impl ExAnimFrame {
         }
         Ok(())
     }
+
+    /// Number of payload `u16`s that make up one animation step: one group of
+    /// `units_per_frame` for line/palette frames; a single ring color for
+    /// [`ExAnimFrameKind::PaletteRotate`] (whose payload IS the ring).
+    fn step_width(&self) -> usize {
+        if self.kind == ExAnimFrameKind::PaletteRotate {
+            1
+        } else {
+            self.units_per_frame as usize
+        }
+    }
+
+    /// LM v3.50 parity (Ctrl + frame-group button): shift every step's values
+    /// one step to the right, inserting a blank (zero) step at the start —
+    /// "effectively inserting a frame at the start of the animation". No-op
+    /// when the frame is already at the 0x100-step cap. For palette-rotate
+    /// frames the color ring grows by one blank color (LM has no documented
+    /// semantics beyond "insert"; growing the ring is the honest analog).
+    pub fn insert_frame_at_start(&mut self) {
+        if self.kind == ExAnimFrameKind::PaletteRotate {
+            if self.units_per_frame as usize >= EXANIM_MAX_UNITS_PER_FRAME || self.frames >= EXANIM_MAX_FRAMES {
+                return;
+            }
+            self.units_per_frame += 1;
+            self.frames += 1;
+            self.payload.insert(0, 0);
+        } else {
+            if self.frames >= EXANIM_MAX_FRAMES {
+                return;
+            }
+            self.frames += 1;
+            let w = self.units_per_frame as usize;
+            self.payload.splice(..0, std::iter::repeat_n(0, w));
+        }
+    }
+
+    /// LM v3.50 parity (Ctrl + frame-group button): drop the first step's
+    /// values, shifting the rest one step left — "effectively deleting a
+    /// frame at the start". No-op when only one step (or one ring color)
+    /// remains.
+    pub fn delete_frame_at_start(&mut self) {
+        if self.kind == ExAnimFrameKind::PaletteRotate {
+            if self.units_per_frame <= 1 || self.frames <= 1 {
+                return;
+            }
+            self.units_per_frame -= 1;
+            self.frames -= 1;
+            if !self.payload.is_empty() {
+                self.payload.remove(0);
+            }
+        } else {
+            if self.frames <= 1 {
+                return;
+            }
+            self.frames -= 1;
+            let w = self.units_per_frame as usize;
+            self.payload.drain(..w.min(self.payload.len()));
+        }
+    }
+
+    /// LM v3.50 parity (Ctrl+Shift + frame-group button): circular-rotate the
+    /// step values right by one step — the last step's values wrap to the
+    /// start. Length is unchanged.
+    pub fn rotate_steps_right(&mut self) {
+        let w = self.step_width();
+        if w > 0 {
+            self.payload.rotate_right(w);
+        }
+    }
+
+    /// LM v3.50 parity (Ctrl+Shift + frame-group button): circular-rotate the
+    /// step values left by one step — the first step's values wrap to the
+    /// end. Length is unchanged.
+    pub fn rotate_steps_left(&mut self) {
+        let w = self.step_width();
+        if w > 0 {
+            self.payload.rotate_left(w);
+        }
+    }
 }
 
 impl Default for ExAnimFrame {
@@ -917,6 +996,135 @@ mod tests {
         let mut cgram = vec![0u8; 0x200];
         apply_tick(&anim, 0, &mut vram, &mut cgram);
         apply_tick(&anim, 999, &mut vram, &mut cgram);
+    }
+
+    #[test]
+    fn insert_frame_at_start_shifts_values_right() {
+        // 3 steps of 2 tiles each.
+        let mut frame = ExAnimFrame {
+            kind:            ExAnimFrameKind::Line8x8,
+            dest:            0x1000,
+            speed:           1,
+            trigger:         ExAnimTrigger::Always,
+            frames:          3,
+            units_per_frame: 2,
+            payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
+        };
+        frame.insert_frame_at_start();
+        assert_eq!(frame.frames, 4);
+        assert_eq!(frame.payload, vec![0, 0, 0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1]);
+        assert_eq!(frame.payload.len(), frame.payload_len());
+    }
+
+    #[test]
+    fn delete_frame_at_start_drops_step_zero() {
+        let mut frame = ExAnimFrame {
+            kind:            ExAnimFrameKind::Palette,
+            dest:            0x10,
+            speed:           1,
+            trigger:         ExAnimTrigger::Always,
+            frames:          3,
+            units_per_frame: 2,
+            payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
+        };
+        frame.delete_frame_at_start();
+        assert_eq!(frame.frames, 2);
+        assert_eq!(frame.payload, vec![0xB0, 0xB1, 0xC0, 0xC1]);
+        assert_eq!(frame.payload.len(), frame.payload_len());
+    }
+
+    #[test]
+    fn rotate_steps_wraps_values_circularly() {
+        let mut frame = ExAnimFrame {
+            kind:            ExAnimFrameKind::Line8x8,
+            dest:            0x1000,
+            speed:           1,
+            trigger:         ExAnimTrigger::Always,
+            frames:          3,
+            units_per_frame: 2,
+            payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
+        };
+        frame.rotate_steps_right();
+        assert_eq!(frame.payload, vec![0xC0, 0xC1, 0xA0, 0xA1, 0xB0, 0xB1]);
+        frame.rotate_steps_left();
+        assert_eq!(frame.payload, vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1]);
+        frame.rotate_steps_left();
+        assert_eq!(frame.payload, vec![0xB0, 0xB1, 0xC0, 0xC1, 0xA0, 0xA1]);
+        // Length never changes.
+        assert_eq!(frame.frames, 3);
+        assert_eq!(frame.payload.len(), frame.payload_len());
+    }
+
+    #[test]
+    fn insert_delete_at_caps_are_noops() {
+        let mut full = ExAnimFrame {
+            kind:            ExAnimFrameKind::Line8x8,
+            dest:            0,
+            speed:           0,
+            trigger:         ExAnimTrigger::Always,
+            frames:          EXANIM_MAX_FRAMES,
+            units_per_frame: 1,
+            payload:         vec![0; EXANIM_MAX_FRAMES as usize],
+        };
+        full.insert_frame_at_start();
+        assert_eq!(full.frames, EXANIM_MAX_FRAMES);
+        assert_eq!(full.payload.len(), EXANIM_MAX_FRAMES as usize);
+
+        let mut single = ExAnimFrame {
+            kind:            ExAnimFrameKind::Line8x8,
+            dest:            0,
+            speed:           0,
+            trigger:         ExAnimTrigger::Always,
+            frames:          1,
+            units_per_frame: 2,
+            payload:         vec![0xA0, 0xA1],
+        };
+        single.delete_frame_at_start();
+        assert_eq!(single.frames, 1);
+        assert_eq!(single.payload, vec![0xA0, 0xA1]);
+    }
+
+    #[test]
+    fn rotate_gestures_move_the_palette_rotate_ring() {
+        let mut ring = ExAnimFrame {
+            kind:            ExAnimFrameKind::PaletteRotate,
+            dest:            0x20,
+            speed:           1,
+            trigger:         ExAnimTrigger::Always,
+            frames:          3,
+            units_per_frame: 3,
+            payload:         vec![0x0001, 0x0002, 0x0003],
+        };
+        ring.rotate_steps_right();
+        assert_eq!(ring.payload, vec![0x0003, 0x0001, 0x0002]);
+        ring.rotate_steps_left();
+        assert_eq!(ring.payload, vec![0x0001, 0x0002, 0x0003]);
+
+        ring.insert_frame_at_start();
+        assert_eq!(ring.units_per_frame, 4);
+        assert_eq!(ring.frames, 4);
+        assert_eq!(ring.payload, vec![0, 0x0001, 0x0002, 0x0003]);
+        ring.delete_frame_at_start();
+        assert_eq!(ring.units_per_frame, 3);
+        assert_eq!(ring.frames, 3);
+        assert_eq!(ring.payload, vec![0x0001, 0x0002, 0x0003]);
+    }
+
+    #[test]
+    fn insert_delete_round_trip_restores_payload() {
+        let orig = ExAnimFrame {
+            kind:            ExAnimFrameKind::Palette,
+            dest:            0x10,
+            speed:           2,
+            trigger:         ExAnimTrigger::OnOff,
+            frames:          4,
+            units_per_frame: 3,
+            payload:         (1..=12).map(|i| i * 0x111).collect(),
+        };
+        let mut frame = orig.clone();
+        frame.insert_frame_at_start();
+        frame.delete_frame_at_start();
+        assert_eq!(frame, orig);
     }
 
     /// Real-ROM test: write the block into a scratch *copy* of the real ROM

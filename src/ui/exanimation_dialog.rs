@@ -56,6 +56,23 @@ pub enum ExAnimList {
     Level,
 }
 
+/// LM v3.50 parity: the Ctrl / Ctrl+Shift gestures on the frame-group
+/// buttons, which move the selected frame's *values* instead of reordering
+/// the frame list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameGesture {
+    /// Ctrl+▼: shift values right one step, inserting a blank step at the
+    /// start ("effectively inserting a frame at the start").
+    InsertAtStart,
+    /// Ctrl+▲: shift values left one step, dropping the first step
+    /// ("effectively deleting a frame at the start").
+    DeleteAtStart,
+    /// Ctrl+Shift+▲: circular-rotate the values left by one step.
+    RotateLeft,
+    /// Ctrl+Shift+▼: circular-rotate the values right by one step.
+    RotateRight,
+}
+
 /// SNES RGB555 → egui color.
 fn snes555_to_color32(c: u16) -> Color32 {
     let r = ((c & 0x1F) as u32 * 255 / 31) as u8;
@@ -246,6 +263,32 @@ impl ExAnimDialog {
         changed
     }
 
+    /// LM v3.50 parity: apply a Ctrl / Ctrl+Shift frame-value gesture to the
+    /// selected frame (the ▲/▼ buttons move *values* instead of reordering
+    /// the list while a modifier is held). Returns true when the data
+    /// changed, so the host marks its save-dirty flags.
+    fn apply_frame_gesture(
+        &mut self, data: &mut ExAnimationData, level_num: Option<u16>, sel: usize, gesture: FrameGesture,
+    ) -> bool {
+        let anim = self.anim_mut(data, level_num);
+        let Some(frame) = anim.frames.get_mut(sel) else { return false };
+        let before = (frame.frames, frame.units_per_frame, frame.payload.clone());
+        match gesture {
+            FrameGesture::InsertAtStart => frame.insert_frame_at_start(),
+            FrameGesture::DeleteAtStart => frame.delete_frame_at_start(),
+            FrameGesture::RotateLeft => frame.rotate_steps_left(),
+            FrameGesture::RotateRight => frame.rotate_steps_right(),
+        }
+        let changed = (frame.frames, frame.units_per_frame, frame.payload.clone()) != before;
+        if changed {
+            // Payload indices shifted or wrapped — drop any armed
+            // tile-picker slot, whose (step, unit) no longer points at the
+            // same value.
+            self.pick_slot = None;
+        }
+        changed
+    }
+
     /// Build (or reuse) the VRAM tile atlas texture from the host's clean
     /// post-load VRAM snapshot.
     fn atlas(&mut self, ctx: &Context, base_vram: &[u8], cgram: &[u8], vram_id: u64) -> egui::TextureHandle {
@@ -347,21 +390,44 @@ impl ExAnimDialog {
                     });
                     ui.horizontal(|ui| {
                         let sel = self.selected;
-                        if ui.button("▲").clicked() && sel > 0 {
-                            let anim = self.anim_mut(data, level_num);
-                            if sel < anim.frames.len() {
-                                anim.frames.swap(sel - 1, sel);
-                                self.selected = sel - 1;
-                                changed = true;
+                        // LM v3.50 parity: with Ctrl / Ctrl+Shift held, the
+                        // ▲/▼ frame-group buttons move the selected frame's
+                        // *values* instead of reordering the frame list.
+                        let mods = ui.ctx().input(|i| i.modifiers);
+                        let up = ui.button("▲").on_hover_text(
+                            "Move frame up — hold Ctrl to delete the first animation step (shift frame values \
+                                 left), Ctrl+Shift to rotate the frame values left (Lunar Magic v3.50)",
+                        );
+                        if up.clicked() {
+                            if mods.ctrl && mods.shift {
+                                changed |= self.apply_frame_gesture(data, level_num, sel, FrameGesture::RotateLeft);
+                            } else if mods.ctrl {
+                                changed |= self.apply_frame_gesture(data, level_num, sel, FrameGesture::DeleteAtStart);
+                            } else if sel > 0 {
+                                let anim = self.anim_mut(data, level_num);
+                                if sel < anim.frames.len() {
+                                    anim.frames.swap(sel - 1, sel);
+                                    self.selected = sel - 1;
+                                    changed = true;
+                                }
                             }
                         }
-                        if ui.button("▼").clicked() {
-                            let sel = self.selected;
-                            let anim = self.anim_mut(data, level_num);
-                            if sel + 1 < anim.frames.len() {
-                                anim.frames.swap(sel, sel + 1);
-                                self.selected += 1;
-                                changed = true;
+                        let down = ui.button("▼").on_hover_text(
+                            "Move frame down — hold Ctrl to insert a blank animation step at the start (shift \
+                                 frame values right), Ctrl+Shift to rotate the frame values right (Lunar Magic v3.50)",
+                        );
+                        if down.clicked() {
+                            if mods.ctrl && mods.shift {
+                                changed |= self.apply_frame_gesture(data, level_num, sel, FrameGesture::RotateRight);
+                            } else if mods.ctrl {
+                                changed |= self.apply_frame_gesture(data, level_num, sel, FrameGesture::InsertAtStart);
+                            } else {
+                                let anim = self.anim_mut(data, level_num);
+                                if sel + 1 < anim.frames.len() {
+                                    anim.frames.swap(sel, sel + 1);
+                                    self.selected += 1;
+                                    changed = true;
+                                }
                             }
                         }
                     });
