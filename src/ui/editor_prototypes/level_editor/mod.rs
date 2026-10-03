@@ -1028,6 +1028,7 @@ impl DockableEditorTool for UiLevelEditor {
         });
         check_items(self.level_num, vertical, screens, &items)
     }
+
     /// Ask a level-editor tab to open `level`, reusing its unsaved-changes
     /// confirmation flow. No-op for tabs that are not level editors. Used by
     /// Tools > Analyze Resources in Levels... for its jump links.

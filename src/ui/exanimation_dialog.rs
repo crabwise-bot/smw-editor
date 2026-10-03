@@ -14,6 +14,7 @@
 use egui::{Color32, Context, ScrollArea};
 use smwe_rom::{
     exanimation::{
+        remap_addresses,
         ExAnimFrame,
         ExAnimFrameKind,
         ExAnimTrigger,
@@ -29,6 +30,19 @@ use smwe_rom::{
 const ATLAS_COLS: usize = 64;
 /// VRAM words per 4bpp 8x8 tile.
 const TILE_WORDS: u16 = 16;
+/// Tiles shown in the browser atlas.
+const ATLAS_TILES: usize = 2048;
+/// How long (seconds) a double-clicked tile stays highlighted in the browser.
+const REVEAL_SECS: f64 = 2.0;
+
+/// LM v3.32 "8x8 Select" point-and-click target: the field the next browser
+/// click fills. After each click the target auto-advances to the next field
+/// (destination → step 0/tile 0 → … → wraps back to the destination).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectTarget {
+    Dest,
+    Slot(usize, usize),
+}
 
 /// Which animation list the dialog edits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,17 +76,46 @@ fn color32_to_snes555(c: Color32) -> u16 {
 pub struct ExAnimDialog {
     /// Which list is being edited. The world-map editor pins this to
     /// [`ExAnimList::Overworld`]; the level editor offers Level/Global tabs.
-    pub list:  ExAnimList,
-    selected:  usize,
-    pick_slot: Option<(usize, usize)>,
-    pal_row:   usize,
-    atlas_tex: Option<egui::TextureHandle>,
-    atlas_for: Option<(u64, usize)>,
+    pub list:      ExAnimList,
+    selected:      usize,
+    pick_slot:     Option<(usize, usize)>,
+    pal_row:       usize,
+    atlas_tex:     Option<egui::TextureHandle>,
+    atlas_for:     Option<(u64, usize)>,
+    /// LM v3.32 "8x8 Select" point-and-click mode: the field the next tile-
+    /// browser click fills (`None` = mode off).
+    select_target: Option<SelectTarget>,
+    /// LM v3.32 "Remap" window state.
+    remap_open:    bool,
+    remap_old:     u16,
+    remap_new:     u16,
+    remap_frames:  bool,
+    remap_dests:   bool,
+    remap_status:  Option<String>,
+    /// Tile index the browser should scroll to and flash (double-click a
+    /// frame/destination value to reveal its tile), with the egui timestamp
+    /// of the request.
+    reveal:        Option<(usize, f64)>,
 }
 
 impl ExAnimDialog {
     pub fn new(list: ExAnimList) -> Self {
-        Self { list, selected: 0, pick_slot: None, pal_row: 0, atlas_tex: None, atlas_for: None }
+        Self {
+            list,
+            selected: 0,
+            pick_slot: None,
+            pal_row: 0,
+            atlas_tex: None,
+            atlas_for: None,
+            select_target: None,
+            remap_open: false,
+            remap_old: 0,
+            remap_new: 0,
+            remap_frames: true,
+            remap_dests: true,
+            remap_status: None,
+            reveal: None,
+        }
     }
 
     /// Drop the cached tile-browser atlas (call after the host reloads VRAM).
@@ -105,6 +148,102 @@ impl ExAnimDialog {
 
     fn view_frames<'a>(&self, data: &'a ExAnimationData, level_num: Option<u16>) -> &'a [ExAnimFrame] {
         self.anim(data, level_num).map(|a| a.frames.as_slice()).unwrap_or(&[])
+    }
+
+    /// The 8x8 Select field after `cur`: destination → slots in step/tile
+    /// order → wraps back to the destination (LM v3.32 auto-advance).
+    fn next_target(
+        &self, data: &ExAnimationData, level_num: Option<u16>, sel: usize, cur: SelectTarget,
+    ) -> SelectTarget {
+        let (frames, units) = {
+            let f = &self.view_frames(data, level_num)[sel];
+            (f.frames as usize, f.units_per_frame as usize)
+        };
+        match cur {
+            SelectTarget::Dest => {
+                if frames > 0 && units > 0 {
+                    SelectTarget::Slot(0, 0)
+                } else {
+                    SelectTarget::Dest
+                }
+            }
+            SelectTarget::Slot(f, u) => {
+                if u + 1 < units {
+                    SelectTarget::Slot(f, u + 1)
+                } else if f + 1 < frames {
+                    SelectTarget::Slot(f + 1, 0)
+                } else {
+                    SelectTarget::Dest
+                }
+            }
+        }
+    }
+
+    /// Human-readable label for the current 8x8 Select target.
+    fn target_label(&self, data: &ExAnimationData, level_num: Option<u16>, sel: usize) -> String {
+        match self.select_target {
+            None => "off".to_owned(),
+            Some(SelectTarget::Dest) => {
+                let d = self.view_frames(data, level_num)[sel].dest;
+                format!("VRAM dest (now ${d:04X})")
+            }
+            Some(SelectTarget::Slot(f, u)) => format!("step {f} tile {u}"),
+        }
+    }
+
+    /// LM v3.32 "Remap" window: old→new VRAM word addresses across the
+    /// current animation list. Returns true if the data was modified.
+    fn remap_window(&mut self, ctx: &Context, data: &mut ExAnimationData, level_num: Option<u16>) -> bool {
+        let mut changed = false;
+        let mut open = self.remap_open;
+        let mut apply = false;
+        let mut cancel = false;
+        egui::Window::new("Remap ExAnimation tiles").open(&mut open).show(ctx, |ui| {
+            ui.small(
+                "After moving tiles around in VRAM, re-point every frame source tile and destination \
+                 at the new addresses (LM v3.32 \"Remap\"). Only exact address matches are rewritten.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Old VRAM address");
+                let mut old = self.remap_old as i32;
+                ui.add(egui::DragValue::new(&mut old).hexadecimal(4, false, true).range(0..=0x7FFF));
+                self.remap_old = old as u16;
+                ui.label("New VRAM address");
+                let mut new = self.remap_new as i32;
+                ui.add(egui::DragValue::new(&mut new).hexadecimal(4, false, true).range(0..=0x7FFF));
+                self.remap_new = new as u16;
+            });
+            ui.checkbox(&mut self.remap_frames, "Frame source tiles");
+            ui.checkbox(&mut self.remap_dests, "Destinations");
+            ui.small("Palette frames are never touched (colors and CGRAM addresses, not VRAM tiles).");
+            ui.horizontal(|ui| {
+                if ui.button("Apply remap").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            if let Some(s) = &self.remap_status {
+                ui.small(s);
+            }
+        });
+        if cancel {
+            open = false;
+        }
+        self.remap_open = open;
+        if apply {
+            let n = remap_addresses(
+                self.anim_mut(data, level_num),
+                self.remap_old,
+                self.remap_new,
+                self.remap_frames,
+                self.remap_dests,
+            );
+            self.remap_status = Some(format!("Remapped {n} reference(s)."));
+            changed = n > 0;
+        }
+        changed
     }
 
     /// Build (or reuse) the VRAM tile atlas texture from the host's clean
@@ -255,6 +394,9 @@ impl ExAnimDialog {
                      Lunar Magic's ExAnimation ASM hack — the editor does not install it.",
             );
         });
+        if self.remap_open {
+            changed |= self.remap_window(ctx, data, level_num);
+        }
         *open = open_flag;
         changed
     }
@@ -319,10 +461,29 @@ impl ExAnimDialog {
         ui.horizontal(|ui| {
             ui.label(dest_label);
             let mut dest = e.dest.min(dest_max) as i32;
-            if ui.add(egui::DragValue::new(&mut dest).hexadecimal(4, false, true).range(0..=dest_max as i32)).changed()
-            {
+            let dest_resp =
+                ui.add(egui::DragValue::new(&mut dest).hexadecimal(4, false, true).range(0..=dest_max as i32));
+            if e.kind.is_line() && dest_resp.double_clicked() {
+                // LM v3.32: double-clicking a destination value shows its
+                // tile in the 8x8 selector.
+                let tile = e.dest as usize / TILE_WORDS as usize;
+                if tile < ATLAS_TILES {
+                    self.reveal = Some((tile, ui.ctx().input(|i| i.time)));
+                }
+            }
+            if dest_resp.changed() {
                 e.dest = dest as u16;
                 changed = true;
+            }
+            if e.kind.is_line() && self.select_target.is_some() {
+                let is_target = self.select_target == Some(SelectTarget::Dest);
+                if ui
+                    .add(egui::Button::new("◎").selected(is_target))
+                    .on_hover_text("8x8 Select: make the destination the click target")
+                    .clicked()
+                {
+                    self.select_target = Some(SelectTarget::Dest);
+                }
             }
             ui.label("Speed (ticks/step)");
             let mut speed = e.speed as i32;
@@ -386,6 +547,34 @@ impl ExAnimDialog {
             (f.frames as usize, f.units_per_frame as usize)
         };
         ui.label("Source tiles per step (click a slot, then a tile below):");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Remap…")
+                .on_hover_text("LM v3.32: re-point frame tiles and destinations after moving tiles in VRAM")
+                .clicked()
+            {
+                self.remap_open = true;
+                self.remap_status = None;
+            }
+            let active = self.select_target.is_some();
+            if ui
+                .add(egui::Button::new(if active { "■ 8x8 Select" } else { "8x8 Select" }).selected(active))
+                .on_hover_text(
+                    "LM v3.32: click tiles in the browser to fill the target field — \
+                     auto-advances to the next field. Double-click a value to find its tile.",
+                )
+                .clicked()
+            {
+                self.select_target = if active { None } else { Some(SelectTarget::Dest) };
+                self.pick_slot = None;
+            }
+        });
+        if self.select_target.is_some() {
+            ui.small(format!(
+                "8x8 Select → filling {}; click a tile below (advances automatically), or click any slot to retarget.",
+                self.target_label(data, level_num, sel)
+            ));
+        }
         ScrollArea::vertical().max_height(180.0).id_salt("exanim_line_payload").show(ui, |ui| {
             for f in 0..frames {
                 ui.horizontal(|ui| {
@@ -393,10 +582,25 @@ impl ExAnimDialog {
                     for u in 0..units {
                         let src = self.view_frames(data, level_num)[sel].payload[f * units + u];
                         let armed = self.pick_slot == Some((f, u));
-                        let btn =
-                            egui::Button::new(format!("${src:04X}")).selected(armed).min_size([52.0, 18.0].into());
-                        if ui.add(btn).clicked() {
-                            self.pick_slot = if armed { None } else { Some((f, u)) };
+                        let targeted = self.select_target == Some(SelectTarget::Slot(f, u));
+                        let btn = egui::Button::new(format!("${src:04X}"))
+                            .selected(armed || targeted)
+                            .min_size([52.0, 18.0].into());
+                        let resp = ui.add(btn);
+                        if resp.double_clicked() {
+                            // LM v3.32: double-clicking a frame value shows
+                            // its tile in the 8x8 selector.
+                            let tile = src as usize / TILE_WORDS as usize;
+                            if tile < ATLAS_TILES {
+                                self.reveal = Some((tile, ui.ctx().input(|i| i.time)));
+                            }
+                            self.pick_slot = None;
+                        } else if resp.clicked() {
+                            if self.select_target.is_some() {
+                                self.select_target = Some(SelectTarget::Slot(f, u));
+                            } else {
+                                self.pick_slot = if armed { None } else { Some((f, u)) };
+                            }
                         }
                     }
                 });
@@ -414,22 +618,41 @@ impl ExAnimDialog {
             }
         });
         let tex = self.atlas(ui.ctx(), base_vram, cgram, vram_id);
-        let (w, h) = (ATLAS_COLS * 8, (2048usize.div_ceil(ATLAS_COLS)) * 8);
+        let (w, h) = (ATLAS_COLS * 8, (ATLAS_TILES.div_ceil(ATLAS_COLS)) * 8);
         // Show at 1x; scroll both ways.
         ScrollArea::both().max_height(220.0).id_salt("exanim_atlas").show(ui, |ui| {
             let resp = ui.add(egui::Image::new((tex.id(), egui::vec2(w as f32, h as f32))).sense(egui::Sense::click()));
             if resp.clicked() {
-                if let Some((slot_f, slot_u)) = self.pick_slot {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let rel = pos - resp.rect.min;
-                        let col = (rel.x / 8.0) as usize;
-                        let row = (rel.y / 8.0) as usize;
-                        let tile = row * ATLAS_COLS + col;
-                        if tile < 2048 && col < ATLAS_COLS {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let rel = pos - resp.rect.min;
+                    let col = (rel.x / 8.0) as usize;
+                    let row = (rel.y / 8.0) as usize;
+                    let tile = row * ATLAS_COLS + col;
+                    if tile < ATLAS_TILES && col < ATLAS_COLS {
+                        let word = tile as u16 * TILE_WORDS;
+                        if let Some(target) = self.select_target {
+                            // 8x8 Select: fill the target field, then
+                            // auto-advance to the next one.
+                            match target {
+                                SelectTarget::Dest => {
+                                    self.anim_mut(data, level_num).frames[sel].dest = word;
+                                }
+                                SelectTarget::Slot(sf, su) => {
+                                    let units = self.view_frames(data, level_num)[sel].units_per_frame as usize;
+                                    if let Some(p) =
+                                        self.anim_mut(data, level_num).frames[sel].payload.get_mut(sf * units + su)
+                                    {
+                                        *p = word;
+                                    }
+                                }
+                            }
+                            self.select_target = Some(self.next_target(data, level_num, sel, target));
+                            changed = true;
+                        } else if let Some((slot_f, slot_u)) = self.pick_slot {
                             let units = self.view_frames(data, level_num)[sel].units_per_frame as usize;
                             let frame = &mut self.anim_mut(data, level_num).frames[sel];
                             if let Some(p) = frame.payload.get_mut(slot_f * units + slot_u) {
-                                *p = tile as u16 * TILE_WORDS;
+                                *p = word;
                                 changed = true;
                             }
                             self.pick_slot = None;
@@ -437,10 +660,31 @@ impl ExAnimDialog {
                     }
                 }
             }
+            // Double-click reveal (LM v3.32): scroll the browser to the tile
+            // and flash it so the user can see where the value points.
+            if let Some((tile, t0)) = self.reveal {
+                let now = ui.ctx().input(|i| i.time);
+                if now - t0 < REVEAL_SECS && tile < ATLAS_TILES {
+                    let r = egui::Rect::from_min_size(
+                        resp.rect.min + egui::vec2((tile % ATLAS_COLS) as f32 * 8.0, (tile / ATLAS_COLS) as f32 * 8.0),
+                        egui::vec2(8.0, 8.0),
+                    );
+                    ui.scroll_to_rect(r, Some(egui::Align::Center));
+                    ui.painter().rect_stroke(
+                        r.expand(2.0),
+                        0.0,
+                        egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
+                        egui::StrokeKind::Middle,
+                    );
+                    ui.ctx().request_repaint();
+                } else {
+                    self.reveal = None;
+                }
+            }
         });
         if self.pick_slot.is_some() {
             ui.small("Pick a source tile above — click any tile in the browser.");
-        } else {
+        } else if self.select_target.is_none() {
             ui.small("Tile numbers are VRAM word addresses ($0010 = 8x8 tile 1).");
         }
         changed
