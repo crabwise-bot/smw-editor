@@ -38,10 +38,18 @@ const REVEAL_SECS: f64 = 2.0;
 /// LM v3.32 "8x8 Select" point-and-click target: the field the next browser
 /// click fills. After each click the target auto-advances to the next field
 /// (destination → step 0/tile 0 → … → wraps back to the destination).
+///
+/// LM v3.33 extends the same mode to palette frames: with a palette frame
+/// selected, the target is a color field instead, filled by
+/// Ctrl+Left-Clicking a color in the palette editor (or by pasting a
+/// palette row, LM v3.61).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectTarget {
     Dest,
     Slot(usize, usize),
+    /// Palette-frame color field: (step, unit). PaletteRotate frames store
+    /// a single ring, so step is always 0 for them.
+    ColorSlot(usize, usize),
 }
 
 /// Which animation list the dialog edits.
@@ -113,6 +121,11 @@ pub struct ExAnimDialog {
     /// frame/destination value to reveal its tile), with the egui timestamp
     /// of the request.
     reveal:        Option<(usize, f64)>,
+    /// LM v3.61: a "Paste row" click asked the integration for the system
+    /// clipboard; the answer arrives as `Event::Paste` on the next frame.
+    paste_pending: bool,
+    /// LM v3.61: outcome of the last palette-row paste.
+    paste_status:  Option<String>,
 }
 
 impl ExAnimDialog {
@@ -132,6 +145,8 @@ impl ExAnimDialog {
             remap_dests: true,
             remap_status: None,
             reveal: None,
+            paste_pending: false,
+            paste_status: None,
         }
     }
 
@@ -139,6 +154,72 @@ impl ExAnimDialog {
     pub fn reset_atlas(&mut self) {
         self.atlas_tex = None;
         self.atlas_for = None;
+    }
+
+    /// Clear any armed 8x8/Palette Select target (the host calls this when
+    /// the window closes, so a stale arm can't swallow palette clicks).
+    pub fn disarm_select(&mut self) {
+        self.select_target = None;
+    }
+
+    /// Select a frame in the list (LM v3.33: Ctrl+Shift+Left-Click in the
+    /// palette editor on an ExAnimated color destination).
+    pub fn select_frame(&mut self, idx: usize) {
+        self.selected = idx;
+        self.pick_slot = None;
+    }
+
+    /// LM v3.33: is Palette Select armed — the window's point-and-click
+    /// mode is on, the armed target is a color field, and the selected
+    /// frame is a palette kind? The palette editor uses this to route
+    /// Ctrl+Left-Clicks into the armed color field.
+    pub fn palette_select_armed(&self, data: &ExAnimationData, level_num: Option<u16>) -> bool {
+        if !matches!(self.select_target, Some(SelectTarget::ColorSlot(_, _))) {
+            return false;
+        }
+        let frames = self.view_frames(data, level_num);
+        self.selected < frames.len() && frames[self.selected].kind.is_palette()
+    }
+
+    /// LM v3.33: fill the armed Palette-Select color field with a SNES
+    /// RGB555 color (from a Ctrl+Left-Click in the palette editor) and
+    /// auto-advance the arm to the next color field. Returns true when a
+    /// slot was filled, so the host marks its save-dirty flags.
+    pub fn fill_armed_color(&mut self, data: &mut ExAnimationData, level_num: Option<u16>, color: u16) -> bool {
+        if !self.palette_select_armed(data, level_num) {
+            return false;
+        }
+        let sel = self.selected;
+        let Some(SelectTarget::ColorSlot(f, u)) = self.select_target else { return false };
+        let idx = {
+            let frame = &self.view_frames(data, level_num)[sel];
+            let units = frame.units_per_frame as usize;
+            let steps = if frame.kind == ExAnimFrameKind::PaletteRotate { 1 } else { frame.frames as usize };
+            if f >= steps || u >= units {
+                return false;
+            }
+            f * units + u
+        };
+        let filled = self.anim_mut(data, level_num).frames[sel].payload.get_mut(idx).is_some_and(|p| {
+            *p = color;
+            true
+        });
+        if filled {
+            self.select_target = Some(self.next_color_target(data, level_num, sel, f, u));
+        }
+        filled
+    }
+
+    /// (frame index, CGRAM dest word, units written per step) for every
+    /// palette-kind frame in the dialog's current list — used by the
+    /// palette editor to mark ExAnimated color destinations (LM v3.33).
+    pub fn palette_frame_dests(&self, data: &ExAnimationData, level_num: Option<u16>) -> Vec<(usize, u16, usize)> {
+        self.view_frames(data, level_num)
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.kind.is_palette())
+            .map(|(i, f)| (i, f.dest, f.units_per_frame as usize))
+            .collect()
     }
 
     fn anim<'a>(&self, data: &'a ExAnimationData, level_num: Option<u16>) -> Option<&'a ExAnimation> {
@@ -193,6 +274,27 @@ impl ExAnimDialog {
                     SelectTarget::Dest
                 }
             }
+            // Palette frames never arm tile targets; a stale one wraps to
+            // the first color slot.
+            SelectTarget::ColorSlot(_, _) => SelectTarget::ColorSlot(0, 0),
+        }
+    }
+
+    /// The palette-select field after `(f, u)`: next color in step/unit
+    /// order, wrapping back to the first slot (LM v3.33 auto-advance).
+    /// PaletteRotate frames store a single ring, so the step is always 0.
+    fn next_color_target(
+        &self, data: &ExAnimationData, level_num: Option<u16>, sel: usize, f: usize, u: usize,
+    ) -> SelectTarget {
+        let frame = &self.view_frames(data, level_num)[sel];
+        let units = frame.units_per_frame as usize;
+        let steps = if frame.kind == ExAnimFrameKind::PaletteRotate { 1 } else { frame.frames as usize };
+        if u + 1 < units {
+            SelectTarget::ColorSlot(f, u + 1)
+        } else if f + 1 < steps {
+            SelectTarget::ColorSlot(f + 1, 0)
+        } else {
+            SelectTarget::ColorSlot(0, 0)
         }
     }
 
@@ -205,6 +307,7 @@ impl ExAnimDialog {
                 format!("VRAM dest (now ${d:04X})")
             }
             Some(SelectTarget::Slot(f, u)) => format!("step {f} tile {u}"),
+            Some(SelectTarget::ColorSlot(f, u)) => format!("step {f} color {u}"),
         }
     }
 
@@ -590,6 +693,16 @@ impl ExAnimDialog {
             f.frames = e.frames;
             f.units_per_frame = e.units_per_frame;
             f.payload = e.payload.clone();
+            // A kind switch invalidates an armed 8x8/Palette Select target
+            // of the other flavor (tile fields vs color fields).
+            let keep = match self.select_target {
+                Some(SelectTarget::ColorSlot(_, _)) => e.kind.is_palette(),
+                Some(_) => e.kind.is_line(),
+                None => true,
+            };
+            if !keep {
+                self.select_target = None;
+            }
         }
 
         ui.separator();
@@ -711,6 +824,10 @@ impl ExAnimDialog {
                                         *p = word;
                                     }
                                 }
+                                // A color target can't be filled by a tile
+                                // click — the palette editor does that (LM
+                                // v3.33). Leave the arm alone.
+                                SelectTarget::ColorSlot(_, _) => {}
                             }
                             self.select_target = Some(self.next_target(data, level_num, sel, target));
                             changed = true;
@@ -756,6 +873,105 @@ impl ExAnimDialog {
         changed
     }
 
+    /// One palette color slot. With Palette Select armed (LM v3.33) it is a
+    /// plain swatch whose click retargets the armed field; otherwise the
+    /// usual color picker. Returns true when the payload value changed.
+    fn color_slot(
+        &mut self, ui: &mut egui::Ui, data: &mut ExAnimationData, level_num: Option<u16>, sel: usize, step: usize,
+        unit: usize, palette_select: bool,
+    ) -> bool {
+        let mut changed = false;
+        let units = self.view_frames(data, level_num)[sel].units_per_frame as usize;
+        let idx = step * units + unit;
+        let raw = self.view_frames(data, level_num)[sel].payload[idx];
+        let c0 = snes555_to_color32(raw);
+        if palette_select {
+            let armed = self.select_target == Some(SelectTarget::ColorSlot(step, unit));
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+            ui.painter().rect_filled(rect, 2.0, c0);
+            ui.painter().rect_stroke(
+                rect,
+                2.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80)),
+                egui::StrokeKind::Outside,
+            );
+            if armed {
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let clicked = resp.clicked();
+            resp.on_hover_text(format!(
+                "Color ${raw:04X} — click to make this the Palette Select target (step {step}, color {unit})"
+            ));
+            if clicked {
+                self.select_target = Some(SelectTarget::ColorSlot(step, unit));
+            }
+        } else {
+            let mut rgb = [c0.r(), c0.g(), c0.b()];
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                let frame = &mut self.anim_mut(data, level_num).frames[sel];
+                if let Some(p) = frame.payload.get_mut(idx) {
+                    *p = color32_to_snes555(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// LM v3.61: paste a clipboard palette row into the frame's color slots,
+    /// starting at the armed Palette-Select field (or step 0 / the ring
+    /// start when nothing is armed). Fills as many slots as the row covers;
+    /// returns true when any slot changed.
+    fn apply_pasted_palette_row(
+        &mut self, text: &str, data: &mut ExAnimationData, level_num: Option<u16>, sel: usize,
+    ) -> bool {
+        let decoded = crate::ui::clipboard::ClipboardPayload::decode(text);
+        let Some(crate::ui::clipboard::ClipboardPayload::PaletteRow { colors }) = decoded else {
+            self.paste_status = Some(
+                "Clipboard has no palette row — copy one with \"Copy row\" in the palette editor first.".to_owned(),
+            );
+            return false;
+        };
+        let (start_f, start_u) = match self.select_target {
+            Some(SelectTarget::ColorSlot(f, u)) => (f, u),
+            _ => (0, 0),
+        };
+        let (units, steps) = {
+            let frame = &self.view_frames(data, level_num)[sel];
+            let units = frame.units_per_frame as usize;
+            let steps = if frame.kind == ExAnimFrameKind::PaletteRotate { 1 } else { frame.frames as usize };
+            (units, steps)
+        };
+        let mut changed = 0usize;
+        let mut ci = 0usize;
+        'fill: for f in start_f..steps {
+            for u in (if f == start_f { start_u } else { 0 })..units {
+                if ci >= colors.len() {
+                    break 'fill;
+                }
+                let idx = f * units + u;
+                if let Some(p) = self.anim_mut(data, level_num).frames[sel].payload.get_mut(idx) {
+                    if *p != colors[ci] {
+                        *p = colors[ci];
+                        changed += 1;
+                    }
+                }
+                ci += 1;
+            }
+        }
+        self.paste_status = Some(if changed > 0 {
+            format!("Pasted {changed} color(s) from the clipboard row into frame #{sel}.")
+        } else {
+            "Clipboard row applied — every slot already had that color.".to_owned()
+        });
+        changed > 0
+    }
+
     /// Per-step color editing for palette frames / the rotate ring. Returns
     /// true if the frame was modified.
     fn palette_payload_editor(
@@ -763,18 +979,62 @@ impl ExAnimDialog {
     ) -> bool {
         let mut changed = false;
         let kind = self.view_frames(data, level_num)[sel].kind;
+
+        // ── LM v3.33 Palette Select + LM v3.61 row paste ──────────────────
+        ui.horizontal(|ui| {
+            let active = matches!(self.select_target, Some(SelectTarget::ColorSlot(_, _)));
+            if ui
+                .add(egui::Button::new(if active { "■ Palette Select" } else { "Palette Select" }).selected(active))
+                .on_hover_text(
+                    "LM v3.33: point-and-click color fill — arm a color field below, then \
+                     Ctrl+Left-Click a color in the palette editor to fill it (auto-advances). \
+                     Click any color slot to retarget it.",
+                )
+                .clicked()
+            {
+                self.select_target = if active { None } else { Some(SelectTarget::ColorSlot(0, 0)) };
+            }
+            if ui
+                .button("Paste row")
+                .on_hover_text(
+                    "LM v3.61: paste a whole row of palette colors from the clipboard (copied \
+                     with \"Copy row\" in the palette editor) into the color slots, starting at \
+                     the armed field",
+                )
+                .clicked()
+            {
+                crate::ui::clipboard::request_paste(ui.ctx());
+                self.paste_pending = true;
+            }
+        });
+        // The integration answers the paste request as Event::Paste on the
+        // next frame; drain it only while our own request is pending so a
+        // text widget's Ctrl+V is never stolen.
+        if self.paste_pending {
+            if let Some(text) = crate::ui::clipboard::take_paste_text(ui.ctx()) {
+                self.paste_pending = false;
+                changed |= self.apply_pasted_palette_row(&text, data, level_num, sel);
+            }
+        }
+        if let Some(s) = self.paste_status.clone() {
+            ui.small(s);
+        }
+        let palette_select = matches!(self.select_target, Some(SelectTarget::ColorSlot(_, _)));
+        if palette_select {
+            ui.small(format!(
+                "Palette Select → filling {}; Ctrl+Left-Click a color in the palette editor to fill it \
+                 (advances automatically), or click any slot below to retarget.",
+                self.target_label(data, level_num, sel)
+            ));
+        }
+        ui.separator();
+
         if kind == ExAnimFrameKind::PaletteRotate {
             ui.label("Color ring (rotates one step per tick):");
             let units = self.view_frames(data, level_num)[sel].units_per_frame as usize;
             ui.horizontal(|ui| {
                 for u in 0..units {
-                    let c0 = snes555_to_color32(self.view_frames(data, level_num)[sel].payload[u]);
-                    let mut rgb = [c0.r(), c0.g(), c0.b()];
-                    if ui.color_edit_button_srgb(&mut rgb).changed() {
-                        let frame = &mut self.anim_mut(data, level_num).frames[sel];
-                        frame.payload[u] = color32_to_snes555(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-                        changed = true;
-                    }
+                    changed |= self.color_slot(ui, data, level_num, sel, 0, u, palette_select);
                 }
             });
             return changed;
@@ -789,18 +1049,91 @@ impl ExAnimDialog {
                 ui.horizontal(|ui| {
                     ui.monospace(format!("step {f:3}:"));
                     for u in 0..units {
-                        let c0 = snes555_to_color32(self.view_frames(data, level_num)[sel].payload[f * units + u]);
-                        let mut rgb = [c0.r(), c0.g(), c0.b()];
-                        if ui.color_edit_button_srgb(&mut rgb).changed() {
-                            let frame = &mut self.anim_mut(data, level_num).frames[sel];
-                            frame.payload[f * units + u] =
-                                color32_to_snes555(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-                            changed = true;
-                        }
+                        changed |= self.color_slot(ui, data, level_num, sel, f, u, palette_select);
                     }
                 });
             }
         });
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smwe_rom::exanimation::{ExAnimFrame, ExAnimFrameKind, ExAnimTrigger, ExAnimation, ExAnimationData};
+
+    use super::*;
+
+    fn palette_frame(frames: u16, units: u8, payload: Vec<u16>) -> ExAnimFrame {
+        ExAnimFrame {
+            kind: ExAnimFrameKind::Palette,
+            dest: 0x0002,
+            speed: 1,
+            trigger: ExAnimTrigger::Always,
+            frames,
+            units_per_frame: units,
+            payload,
+        }
+    }
+
+    fn dialog_with(frame: ExAnimFrame) -> (ExAnimDialog, ExAnimationData) {
+        let mut dlg = ExAnimDialog::new(ExAnimList::Global);
+        let mut data = ExAnimationData::default();
+        data.global = ExAnimation { frames: vec![frame], disable_original: false };
+        dlg.selected = 0;
+        (dlg, data)
+    }
+
+    #[test]
+    fn fill_armed_color_writes_and_advances() {
+        // LM v3.33: Ctrl+Left-Click on a palette color fills the armed
+        // field, then the arm auto-advances to the next color field.
+        let (mut dlg, mut data) =
+            dialog_with(palette_frame(2, 3, vec![0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000]));
+        dlg.select_target = Some(SelectTarget::ColorSlot(0, 1));
+        assert!(dlg.fill_armed_color(&mut data, None, 0x7FFF));
+        assert_eq!(data.global.frames[0].payload[1], 0x7FFF);
+        assert_eq!(dlg.select_target, Some(SelectTarget::ColorSlot(0, 2)));
+        // Arm wraps from the last slot back to the first.
+        dlg.select_target = Some(SelectTarget::ColorSlot(1, 2));
+        assert!(dlg.fill_armed_color(&mut data, None, 0x001F));
+        assert_eq!(data.global.frames[0].payload[5], 0x001F);
+        assert_eq!(dlg.select_target, Some(SelectTarget::ColorSlot(0, 0)));
+    }
+
+    #[test]
+    fn fill_armed_color_ignores_tile_arms() {
+        let (mut dlg, mut data) = dialog_with(palette_frame(1, 2, vec![0x0000, 0x0000]));
+        dlg.select_target = Some(SelectTarget::Dest);
+        assert!(!dlg.fill_armed_color(&mut data, None, 0x7FFF));
+        assert_eq!(data.global.frames[0].payload, vec![0x0000, 0x0000]);
+    }
+
+    #[test]
+    fn paste_row_fills_from_armed_field() {
+        // LM v3.61: a clipboard palette row fills the slots starting at the
+        // armed field; the count stops at the frame's end.
+        let (mut dlg, mut data) = dialog_with(palette_frame(2, 2, vec![0x0000, 0x0000, 0x0000, 0x0000]));
+        dlg.select_target = Some(SelectTarget::ColorSlot(0, 1));
+        let row: Vec<u16> = (0..6).map(|i| 0x1000 + i).collect();
+        let text = crate::ui::clipboard::ClipboardPayload::PaletteRow { colors: row }.encode();
+        assert!(dlg.apply_pasted_palette_row(&text, &mut data, None, 0));
+        // Slot (0,0) untouched; (0,1),(1,0),(1,1) filled; rest of row dropped.
+        assert_eq!(data.global.frames[0].payload, vec![0x0000, 0x1000, 0x1001, 0x1002]);
+        assert!(dlg.paste_status.as_ref().unwrap().contains("3 color"));
+    }
+
+    #[test]
+    fn paste_row_rejects_non_palette_clipboard() {
+        let (mut dlg, mut data) = dialog_with(palette_frame(1, 2, vec![0x1111, 0x2222]));
+        assert!(!dlg.apply_pasted_palette_row("not a clipboard payload", &mut data, None, 0));
+        assert_eq!(data.global.frames[0].payload, vec![0x1111, 0x2222]);
+        assert!(dlg.paste_status.as_ref().unwrap().contains("no palette row"));
+    }
+
+    #[test]
+    fn palette_frame_dests_reports_write_ranges() {
+        let (dlg, data) = dialog_with(palette_frame(2, 3, vec![0; 6]));
+        assert_eq!(dlg.palette_frame_dests(&data, None), vec![(0, 0x0002, 3)]);
     }
 }

@@ -116,6 +116,24 @@ pub(super) fn snes_to_hex_rgb(raw: u16) -> String {
     format!("{r:02X}{g:02X}{b:02X}")
 }
 
+/// Find where the game's level-load palette upload placed one 12-color
+/// palette-editor row in CGRAM: scan the 512-byte CGRAM for the exact
+/// 12-word (24-byte) sequence and return its CGRAM *word* address.
+///
+/// The editor never guesses the game's dynamic palette-table layout —
+/// this finds the row empirically, right after the emulator has run the
+/// real upload code. Returns `None` when the row isn't in CGRAM (custom
+/// palettes the game never uploaded, animated regions already rewritten
+/// by a tick); the LM v3.33 destination features stay inert for it.
+/// First match wins if a row's colors appear more than once.
+pub(super) fn find_palette_cgram_base(cgram: &[u8], colors: &[u16; 12]) -> Option<u16> {
+    if cgram.len() < 512 {
+        return None;
+    }
+    let seq: Vec<u8> = colors.iter().flat_map(|c| c.to_le_bytes()).collect();
+    (0..=(512 - 24)).step_by(2).find_map(|off| (cgram[off..off + 24] == seq[..]).then_some((off / 2) as u16))
+}
+
 impl UiLevelEditor {
     pub(super) fn palette_editor_window(&mut self, ctx: &Context) {
         if !self.show_palette_editor {
@@ -124,6 +142,23 @@ impl UiLevelEditor {
         let mut open = self.show_palette_editor;
         let win = egui::Window::new("Palette Editor").open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label("Click a color swatch to edit it. Changes save with Ctrl+S.");
+
+            // ── Lunar Magic v3.33 ExAnimation link ────────────────────────
+            // While the ExAnimated dialog has Palette Select armed, a
+            // Ctrl+Left-Click here fills the armed color field instead of
+            // selecting the swatch.
+            if self.show_exanimation_editor
+                && self.exanim_dialog.palette_select_armed(&self.exanimation, Some(self.level_num))
+            {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Palette Select armed — Ctrl+Left-Click a color to fill the ExAnimated field \
+                     (Ctrl+Shift+Click a yellow-marked destination to select its slot).",
+                );
+            }
+            if let Some(s) = self.palette_link_status.clone() {
+                ui.small(egui::RichText::new(s).italics());
+            }
 
             // ── Undo/redo buttons (Lunar Magic v1.80 has these in the ──────
             // palette editors).
@@ -342,6 +377,45 @@ impl UiLevelEditor {
         }
     }
 
+    /// Re-scan CGRAM for the three palette-editor rows after a level load.
+    /// The scan runs after the emulator has uploaded the level's palettes
+    /// through the real game code, so the addresses are the game's actual
+    /// layout, not a guess (Lunar Magic v3.33 destination features).
+    pub(super) fn scan_palette_cgram_bases(&mut self) {
+        for g in 0..3 {
+            let colors: [u16; 12] = self.palettes.read(|pal| *pal.group(g));
+            self.palette_cgram_base[g] = find_palette_cgram_base(&self.cpu.mem.cgram, &colors);
+        }
+    }
+
+    /// Lunar Magic v3.33: the ExAnimated frame whose palette destination
+    /// covers this palette-editor swatch, if any. The swatch's CGRAM word
+    /// address comes from the level-load scan (`palette_cgram_base`); a
+    /// frame owns the swatch when the address falls in its per-step write
+    /// range `[dest, dest + units)`.
+    fn exanim_dest_at(&self, group: usize, col: usize) -> Option<usize> {
+        let base = self.palette_cgram_base[group]?;
+        let addr = base + col as u16;
+        self.exanim_dialog
+            .palette_frame_dests(&self.exanimation, Some(self.level_num))
+            .into_iter()
+            .find(|&(_, dest, units)| addr >= dest && addr - dest < units as u16)
+            .map(|(idx, _, _)| idx)
+    }
+
+    /// Lunar Magic v3.33: Ctrl+Shift+Left-Click in the palette editor on an
+    /// ExAnimated color destination selects that frame's slot in the
+    /// ExAnimated dialog, opening the dialog if needed.
+    fn select_exanim_dest(&mut self, group: usize, col: usize) {
+        if let Some(idx) = self.exanim_dest_at(group, col) {
+            self.exanim_dialog.select_frame(idx);
+            self.exanim_dialog.disarm_select();
+            self.show_exanimation_editor = true;
+            self.palette_link_status =
+                Some(format!("Selected ExAnimated frame #{idx} — its destination covers this color."));
+        }
+    }
+
     /// This level's shared-table row index for a palette group (0=BG, 1=FG,
     /// 2=sprite): the level header's palette indices into the shared tables.
     fn palette_row_index(&self, group: usize) -> usize {
@@ -533,7 +607,25 @@ impl UiLevelEditor {
         // In custom-palette mode the shared-table index no longer applies:
         // the level edits its own private palette.
         let source = if self.custom_palette_enabled { "custom".to_string() } else { format!("index {index:X}") };
-        ui.label(format!("{label} ({source})"));
+        ui.horizontal(|ui| {
+            ui.label(format!("{label} ({source})"));
+            // Lunar Magic v3.61: copy a whole row of palette colors for
+            // pasting into the ExAnimation dialog.
+            if ui
+                .small_button("Copy row")
+                .on_hover_text(
+                    "Copy this palette row (12 colors) to the clipboard — paste it into an \
+                     ExAnimated palette frame with \"Paste row\" (Lunar Magic v3.61)",
+                )
+                .clicked()
+            {
+                let colors: Vec<u16> = self.palettes.read(|pal| pal.group(group).to_vec());
+                crate::ui::clipboard::copy_payload(ui.ctx(), &crate::ui::clipboard::ClipboardPayload::PaletteRow {
+                    colors,
+                });
+                self.palette_link_status = Some(format!("Copied {label} row (12 colors) to the clipboard."));
+            }
+        });
 
         let colors: [u16; 12] = self.palettes.read(|pal| *pal.group(group));
 
@@ -575,11 +667,46 @@ impl UiLevelEditor {
                 );
             }
 
+            // Lunar Magic v3.33: mark swatches that are ExAnimated color
+            // destinations (their CGRAM address falls in a palette frame's
+            // write range) so Ctrl+Shift+Click can find them.
+            let exanim_dest = self.exanim_dest_at(group, col);
+            if exanim_dest.is_some() {
+                let tip = cell_rect.right_top();
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![tip, tip + vec2(-7.0, 0.0), tip + vec2(0.0, 7.0)],
+                    egui::Color32::YELLOW,
+                    egui::Stroke::NONE,
+                ));
+            }
+
             // Detect click
-            let resp = ui.interact(cell_rect, egui::Id::new(("pal_cell", group, col, index)), Sense::click());
+            let mut resp = ui.interact(cell_rect, egui::Id::new(("pal_cell", group, col, index)), Sense::click());
+            if exanim_dest.is_some() {
+                resp = resp.on_hover_text(
+                    "ExAnimated color destination — Ctrl+Shift+Left-Click to select its slot in ExAnimated Frames",
+                );
+            }
             if resp.clicked() {
-                self.selected_palette_group = group as u8;
-                self.selected_palette_idx = col;
+                let mods = ui.input(|i| i.modifiers);
+                if mods.ctrl && mods.shift {
+                    // LM v3.33: select the ExAnimated slot whose destination
+                    // is this color, opening the dialog if needed.
+                    self.select_exanim_dest(group, col);
+                } else if mods.ctrl
+                    && self.show_exanimation_editor
+                    && self.exanim_dialog.palette_select_armed(&self.exanimation, Some(self.level_num))
+                {
+                    // LM v3.33: fill the armed ExAnimated color field with
+                    // this swatch instead of selecting the swatch.
+                    if self.exanim_dialog.fill_armed_color(&mut self.exanimation, Some(self.level_num), raw) {
+                        self.exanimation_dirty = true;
+                        self.has_edits = true;
+                    }
+                } else {
+                    self.selected_palette_group = group as u8;
+                    self.selected_palette_idx = col;
+                }
             }
         }
 
@@ -799,5 +926,28 @@ mod tests {
         palettes.undo();
         assert_eq!(palettes.read(|p| p.bg[3]), 0);
         assert!(!palettes.can_undo(), "hex apply must be a single undo step");
+    }
+
+    #[test]
+    fn find_palette_cgram_base_locates_exact_row() {
+        // Lunar Magic v3.33: the palette-editor rows are located in CGRAM
+        // empirically, right after the real level-load palette upload.
+        let colors: [u16; 12] =
+            [0x7C00, 0x03E0, 0x001F, 0x7FFF, 0x0000, 0x4210, 0x6318, 0x7BDE, 0x1CE7, 0x7FE0, 0x7C1F, 0x03FF];
+        let mut cgram = [0xAAu8; 512];
+        // Plant the row at word address 0x20 (bytes 0x40..0x58).
+        for (i, c) in colors.iter().enumerate() {
+            let b = c.to_le_bytes();
+            cgram[0x40 + i * 2] = b[0];
+            cgram[0x40 + i * 2 + 1] = b[1];
+        }
+        assert_eq!(find_palette_cgram_base(&cgram, &colors), Some(0x20));
+        // A row that isn't in CGRAM stays inert (custom palettes, animated
+        // regions rewritten by a tick).
+        let mut other = colors;
+        other[11] ^= 0x7FFF;
+        assert_eq!(find_palette_cgram_base(&cgram, &other), None);
+        // Short/degenerate CGRAM never matches.
+        assert_eq!(find_palette_cgram_base(&cgram[..100], &colors), None);
     }
 }
