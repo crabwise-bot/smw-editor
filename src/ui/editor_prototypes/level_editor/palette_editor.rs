@@ -116,6 +116,30 @@ pub(super) fn snes_to_hex_rgb(raw: u16) -> String {
     format!("{r:02X}{g:02X}{b:02X}")
 }
 
+/// Build a linear gradient between two ABGR1555 SNES colors, endpoints
+/// included, with `between` intermediate colors (Lunar Magic palette-editor
+/// gradients: v1.50 introduced them on Ctrl+Right-Click, v1.63 moved them to
+/// Alt+Right-Click, v3.40 added the vertical variant on Alt+Shift+Right-Click).
+///
+/// Interpolation is per-channel in 5-bit space with round-to-nearest, so a
+/// black→white midpoint lands on 0x4210 (the classic SNES gray) — the LM
+/// v3.50 "gradient colors lightened" change, which replaced the older
+/// floor-toward-dark behavior. LM's exact intermediate-cell semantics beyond
+/// the documented gestures are not in the public docs, so this implements
+/// the documented purpose: fill the cells between the selected color and the
+/// clicked color.
+pub(super) fn gradient_fill(start: u16, end: u16, between: usize) -> Vec<u16> {
+    let (sr, sg, sb) = (start & 0x1F, (start >> 5) & 0x1F, (start >> 10) & 0x1F);
+    let (er, eg, eb) = (end & 0x1F, (end >> 5) & 0x1F, (end >> 10) & 0x1F);
+    (0..=(between + 1))
+        .map(|i| {
+            let t = i as f32 / (between + 1) as f32;
+            let ch = |s: u16, e: u16| ((s as f32 + (e as f32 - s as f32) * t).round() as u16).min(0x1F);
+            ch(sr, er) | (ch(sg, eg) << 5) | (ch(sb, eb) << 10)
+        })
+        .collect()
+}
+
 /// Find where the game's level-load palette upload placed one 12-color
 /// palette-editor row in CGRAM: scan the 512-byte CGRAM for the exact
 /// 12-word (24-byte) sequence and return its CGRAM *word* address.
@@ -142,6 +166,10 @@ impl UiLevelEditor {
         let mut open = self.show_palette_editor;
         let win = egui::Window::new("Palette Editor").open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label("Click a color swatch to edit it. Changes save with Ctrl+S.");
+            ui.small(
+                "Alt+Right-Click a swatch: gradient from the selected color · \
+                 Alt+Shift+Right-Click: vertical gradient (Lunar Magic v1.63 / v3.40)",
+            );
 
             // ── Lunar Magic v3.33 ExAnimation link ────────────────────────
             // While the ExAnimated dialog has Palette Select armed, a
@@ -368,6 +396,82 @@ impl UiLevelEditor {
         self.sync_custom_palette_entry();
         self.auto_enable_custom_palette_on_edit();
         true
+    }
+
+    /// Lunar Magic palette-editor gradients (v1.50, gesture moved to
+    /// Alt+Right-Click in v1.63; Alt+Shift+Right-Click for the vertical
+    /// variant in v3.40): fill the cells between the currently selected
+    /// color and the clicked cell with a linear gradient between the two
+    /// colors. Horizontal fills the row within the clicked group; vertical
+    /// fills the column down the three palette rows (BG → FG → sprite).
+    /// The whole fill is a single undo step, like every other palette edit.
+    fn apply_palette_gradient(&mut self, group: usize, col: usize, vertical: bool) {
+        let (sg, sc) = (self.selected_palette_group as usize, self.selected_palette_idx);
+        if sg >= 3 {
+            self.palette_link_status =
+                Some("Gradient: left-click a color first to pick the gradient start.".to_string());
+            return;
+        }
+        let (axis_ok, lo, hi) =
+            if vertical { (sc == col, sg.min(group), sg.max(group)) } else { (sg == group, sc.min(col), sc.max(col)) };
+        if !axis_ok {
+            self.palette_link_status = Some(
+                if vertical {
+                    "Vertical gradient: Alt+Shift+Right-Click a cell in the same column as the selected color."
+                } else {
+                    "Gradient: Alt+Right-Click a cell in the same palette row as the selected color."
+                }
+                .to_string(),
+            );
+            return;
+        }
+        if hi - lo < 1 {
+            self.palette_link_status =
+                Some("Gradient: pick two different colors — Alt+Right-Click another cell.".to_string());
+            return;
+        }
+        // Cell coordinates from the selected cell to the clicked cell, so the
+        // gradient endpoints land on the right cells regardless of direction.
+        let coords: Vec<(usize, usize)> = if vertical {
+            if sg <= group {
+                (sg..=group).map(|g| (g, col)).collect()
+            } else {
+                (group..=sg).rev().map(|g| (g, col)).collect()
+            }
+        } else if sc <= col {
+            (sc..=col).map(|c| (group, c)).collect()
+        } else {
+            (col..=sc).rev().map(|c| (group, c)).collect()
+        };
+        let (start_raw, end_raw) = self.palettes.read(|pal| (pal.group(sg)[sc], pal.group(group)[col]));
+        let fills = gradient_fill(start_raw, end_raw, coords.len() - 2);
+        self.commit_palette_gesture();
+        let custom = self.custom_palette_enabled;
+        // Shared-table row index per palette group (non-custom mode writes
+        // into the shared tables, same as every other palette edit).
+        let row_idx = [self.palette_row_index(0), self.palette_row_index(1), self.palette_row_index(2)];
+        self.palettes.write(|pal| {
+            for ((g, c), v) in coords.iter().zip(fills.iter()) {
+                pal.group_mut(*g)[*c] = *v;
+                if !custom {
+                    pal.shared_group_mut(*g)[row_idx[*g]][*c] = *v;
+                }
+            }
+        });
+        if !custom {
+            for (g, _) in &coords {
+                self.shared_rows_dirty[g * 8 + row_idx[*g]] = true;
+            }
+        }
+        self.palette_dirty = true;
+        self.mark_edited();
+        self.sync_custom_palette_entry();
+        self.auto_enable_custom_palette_on_edit();
+        self.palette_link_status = Some(format!(
+            "{} gradient applied across {} colors (one undo step).",
+            if vertical { "Vertical" } else { "Horizontal" },
+            coords.len()
+        ));
     }
 
     /// Commit an in-flight color-drag gesture as a single undo step, if any.
@@ -682,10 +786,17 @@ impl UiLevelEditor {
 
             // Detect click
             let mut resp = ui.interact(cell_rect, egui::Id::new(("pal_cell", group, col, index)), Sense::click());
+            // Lunar Magic gradient gestures (v1.63 / v3.40): Alt+Right-Click
+            // fills a gradient from the selected color to this cell,
+            // Alt+Shift+Right-Click makes it vertical.
+            let gradient_hint =
+                "Alt+Right-Click: gradient from the selected color · Alt+Shift+Right-Click: vertical gradient";
             if exanim_dest.is_some() {
-                resp = resp.on_hover_text(
-                    "ExAnimated color destination — Ctrl+Shift+Left-Click to select its slot in ExAnimated Frames",
-                );
+                resp = resp.on_hover_text(format!(
+                    "ExAnimated color destination — Ctrl+Shift+Left-Click to select its slot in ExAnimated Frames\n{gradient_hint}"
+                ));
+            } else {
+                resp = resp.on_hover_text(gradient_hint);
             }
             if resp.clicked() {
                 let mods = ui.input(|i| i.modifiers);
@@ -706,6 +817,16 @@ impl UiLevelEditor {
                 } else {
                     self.selected_palette_group = group as u8;
                     self.selected_palette_idx = col;
+                }
+            }
+            if resp.secondary_clicked() {
+                let mods = ui.input(|i| i.modifiers);
+                if mods.alt {
+                    // Lunar Magic palette gradients: Alt+Right-Click (v1.63;
+                    // Ctrl+Right-Click in v1.50) fills a gradient from the
+                    // selected color to this cell; Alt+Shift+Right-Click
+                    // (v3.40) makes it vertical.
+                    self.apply_palette_gradient(group, col, mods.shift);
                 }
             }
         }
@@ -949,5 +1070,48 @@ mod tests {
         assert_eq!(find_palette_cgram_base(&cgram, &other), None);
         // Short/degenerate CGRAM never matches.
         assert_eq!(find_palette_cgram_base(&cgram[..100], &colors), None);
+    }
+
+    #[test]
+    fn gradient_fill_keeps_endpoints_and_midpoint_gray() {
+        // Lunar Magic palette gradients: endpoints are the two colors,
+        // intermediates are per-channel round-to-nearest (the v3.50
+        // "gradient colors lightened" behavior).
+        let g = gradient_fill(0x0000, 0x7FFF, 1);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0], 0x0000);
+        assert_eq!(g[2], 0x7FFF);
+        // 0 → 31 at t=0.5 rounds to 16, not 15: the classic SNES gray.
+        assert_eq!(g[1], 0x4210);
+    }
+
+    #[test]
+    fn gradient_fill_adjacent_colors_is_just_endpoints() {
+        let g = gradient_fill(0x001F, 0x03E0, 0);
+        assert_eq!(g, vec![0x001F, 0x03E0]);
+    }
+
+    #[test]
+    fn gradient_fill_is_monotone_and_channel_exact() {
+        let start = 0x001F; // full red
+        let end = 0x7C00; // full blue
+        let g = gradient_fill(start, end, 4);
+        assert_eq!(g.len(), 6);
+        assert_eq!(g[0], start);
+        assert_eq!(g[5], end);
+        // Red ramps down, blue ramps up, green stays zero throughout.
+        let reds: Vec<u16> = g.iter().map(|v| v & 0x1F).collect();
+        let blues: Vec<u16> = g.iter().map(|v| (v >> 10) & 0x1F).collect();
+        assert!(reds.windows(2).all(|w| w[0] >= w[1]));
+        assert!(blues.windows(2).all(|w| w[0] <= w[1]));
+        assert!(g.iter().all(|v| (v >> 5) & 0x1F == 0));
+        // Exact intermediate: i=2, t=2/5 → red 31*3/5=18.6→19, blue 31*2/5=12.4→12.
+        assert_eq!(g[2], 19 | (12 << 10));
+    }
+
+    #[test]
+    fn gradient_fill_single_color_range_is_constant() {
+        let g = gradient_fill(0x1234, 0x1234, 3);
+        assert!(g.iter().all(|&v| v == 0x1234));
     }
 }
