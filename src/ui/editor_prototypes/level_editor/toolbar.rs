@@ -169,6 +169,9 @@ impl UiLevelEditor {
             if tbtn(ui, icon::TREND_UP, "Tile surface outlines (F10)", self.show_surface_outlines) {
                 self.show_surface_outlines = !self.show_surface_outlines;
             }
+            if tbtn(ui, icon::STAR, "Special World Passed (F11)", self.special_world_passed) {
+                self.set_special_world_passed_view(!self.special_world_passed);
+            }
             ui.separator();
 
             // Sub-editor launchers (toggle the floating editor windows).
@@ -337,7 +340,8 @@ impl UiLevelEditor {
     /// Lunar Magic keyboard shortcuts that operate on the level editor:
     /// PageUp/PageDown step the level number, backtick toggles Layer 1/2, F8
     /// toggles the grid, F9 toggles the exit-enabled tile markers, F10 toggles
-    /// the tile surface outlines, and Ctrl -/= zoom out/in.
+    /// the tile surface outlines, F11 toggles the Special World Passed view,
+    /// and Ctrl -/= zoom out/in.
     fn handle_shortcuts(&mut self, ui: &mut Ui) {
         // Don't steal keys while a widget (e.g. the level-number box) is focused.
         if ui.ctx().memory(|m| m.focused().is_some()) {
@@ -351,9 +355,10 @@ impl UiLevelEditor {
             mut toggle_grid,
             mut toggle_exits,
             mut toggle_surfaces,
+            mut toggle_special_world,
             mut zoom_in,
             mut zoom_out,
-        ) = (false, false, false, false, false, false, false, false);
+        ) = (false, false, false, false, false, false, false, false, false);
         ui.input_mut(|i| {
             lvl_next = i.consume_key(Modifiers::NONE, Key::PageUp);
             lvl_prev = i.consume_key(Modifiers::NONE, Key::PageDown);
@@ -361,6 +366,7 @@ impl UiLevelEditor {
             toggle_grid = i.consume_key(Modifiers::NONE, Key::F8);
             toggle_exits = i.consume_key(Modifiers::NONE, Key::F9);
             toggle_surfaces = i.consume_key(Modifiers::NONE, Key::F10);
+            toggle_special_world = i.consume_key(Modifiers::NONE, Key::F11);
             zoom_in = i.consume_key(Modifiers::COMMAND, Key::Equals) || i.consume_key(Modifiers::COMMAND, Key::Plus);
             zoom_out = i.consume_key(Modifiers::COMMAND, Key::Minus);
         });
@@ -390,6 +396,9 @@ impl UiLevelEditor {
         }
         if toggle_surfaces {
             self.show_surface_outlines = !self.show_surface_outlines;
+        }
+        if toggle_special_world {
+            self.set_special_world_passed_view(!self.special_world_passed);
         }
         if zoom_in {
             self.zoom = (self.zoom + 0.25).min(3.0);

@@ -767,6 +767,161 @@ pub fn decompress_sublevel(cpu: &mut Cpu<CheckedMem>, id: u16) -> u64 {
     cy
 }
 
+/// "Special World Passed" view (Lunar Magic v1.10 parity).
+///
+/// When the player beats Special World, the game records it as bit 7 of two
+/// bytes in the `OWLevelTileSettings` scratch area (SMWDisX `rammap.asm`,
+/// base `0x1EA2`; the bits are set by the overworld event code in
+/// `bank_04.asm` when the Special World event activates):
+/// - `OWLevelTileSettings+$48` (`0x1EEA`): `CODE_00AD25` (overworld palette
+///   load, `bank_00.asm`) then loads `OWSpecialColors` — the autumn overworld
+///   palettes — instead of `OverworldColors`.
+/// - `OWLevelTileSettings+$49` (`0x1EEB`): `UploadGFXFile` (`bank_00.asm`)
+///   uploads GFX `$31` (the post-special-world koopa graphics) in place of
+///   GFX `$01`; sprite load/init (`CODE_02A95B`, `bank_02.asm`) swaps koopa
+///   shell sprite numbers and sprite draw code (`bank_01.asm`) applies the
+///   koopa color swap.
+///
+/// The editor's level/overworld init paths run exactly these game routines,
+/// so setting both bits beforehand reproduces precisely what the game shows
+/// after Special World is beaten. The view is preview-only: nothing is ever
+/// written to the ROM.
+pub mod special_world {
+    use super::{run_routines, CheckedMem, Cpu};
+
+    /// WRAM address of `OWLevelTileSettings` (SMWDisX `rammap.asm`).
+    pub const OW_LEVEL_TILE_SETTINGS: u32 = 0x1EA2;
+    /// `OWLevelTileSettings+$48`: bit 7 = Special World beaten (checked by
+    /// `CODE_00AD25` for the overworld palettes).
+    pub const FLAG_OW_COLORS: u32 = OW_LEVEL_TILE_SETTINGS + 0x48;
+    /// `OWLevelTileSettings+$49`: bit 7 = Special World beaten (checked by
+    /// `UploadGFXFile` and the sprite init/draw code for the koopa swap).
+    pub const FLAG_GFX_SWAP: u32 = OW_LEVEL_TILE_SETTINGS + 0x49;
+
+    /// Set or clear the game's "Special World beaten" bits in WRAM.
+    ///
+    /// Call before the game's init routines run (`decompress_sublevel`,
+    /// `load_overworld`); the routines then produce the post-Special-World
+    /// graphics and palettes exactly as the game does. All other bits in
+    /// both bytes are preserved.
+    pub fn set_special_world_passed(cpu: &mut Cpu<CheckedMem>, passed: bool) {
+        for addr in [FLAG_OW_COLORS, FLAG_GFX_SWAP] {
+            let v = cpu.mem.load_u8(addr);
+            cpu.mem.store_u8(addr, if passed { v | 0x80 } else { v & !0x80 });
+        }
+    }
+
+    /// Re-run the game's sprite-GFX upload (`UploadSpriteGFX`, which calls
+    /// `UploadGFXFile` and honors `FLAG_GFX_SWAP`) on an already-initialized
+    /// CPU.
+    ///
+    /// This is the surgical refresh for the "Special World Passed" view
+    /// toggle in the level editor: of everything the flag affects at level
+    /// scope, only the sprite-GFX VRAM region changes (CGRAM, the block map,
+    /// and all edit state are untouched), so toggling the view never
+    /// disturbs unsaved edits. Mirrors `decompress_sublevel`'s guard against
+    /// `UploadSpriteGFX`'s decompression-buffer overrun into the BG tilemap
+    /// (`$7EB900`).
+    pub fn refresh_sprite_gfx(cpu: &mut Cpu<CheckedMem>) {
+        // UploadSpriteGFX skips any slot whose file number already matches
+        // SpriteGFXFile ($0101-$0104, "don't upload when it's not needed").
+        // Clear it so every slot re-uploads through UploadGFXFile, exactly
+        // as on a fresh level load (where WRAM starts zeroed).
+        for i in 0..4u32 {
+            cpu.mem.store_u8(0x0101 + i, 0);
+        }
+        let snapshot: Vec<u8> = (0x7EB900..0x7EC100).map(|a| cpu.mem.load_u8(a)).collect();
+        run_routines(cpu, &["UploadSpriteGFX"], 20_000_000);
+        for (i, byte) in snapshot.into_iter().enumerate() {
+            cpu.mem.store_u8(0x7EB900 + i as u32, byte);
+        }
+    }
+
+    /// Re-run the overworld routines affected by the flag (`UploadSpriteGFX`
+    /// for the koopa graphics, `CODE_00AD25` to rebuild the palette buffer,
+    /// `CODE_00922F` to DMA it to CGRAM) on an already-initialized CPU.
+    ///
+    /// Surgical refresh for the world-editor toggle: only VRAM's sprite-GFX
+    /// region and CGRAM change, so the overworld tilemap, event preview, and
+    /// unsaved edits are untouched. `SpriteGFXFile` is cleared first for the
+    /// same "don't upload when it's not needed" reason as
+    /// [`refresh_sprite_gfx`].
+    pub fn refresh_overworld_special_world(cpu: &mut Cpu<CheckedMem>) {
+        for i in 0..4u32 {
+            cpu.mem.store_u8(0x0101 + i, 0);
+        }
+        run_routines(cpu, &["UploadSpriteGFX", "CODE_00AD25", "CODE_00922F"], 20_000_000);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn test_cpu() -> Cpu<CheckedMem> {
+            let rom = crate::rom::Rom::new(vec![0u8; 0x8000]);
+            Cpu::new(CheckedMem::new(std::sync::Arc::new(rom)))
+        }
+
+        #[test]
+        fn set_and_clear_preserves_other_bits() {
+            let mut cpu = test_cpu();
+            cpu.mem.store_u8(FLAG_OW_COLORS, 0x07);
+            cpu.mem.store_u8(FLAG_GFX_SWAP, 0x42);
+            set_special_world_passed(&mut cpu, true);
+            assert_eq!(cpu.mem.load_u8(FLAG_OW_COLORS), 0x87);
+            assert_eq!(cpu.mem.load_u8(FLAG_GFX_SWAP), 0xC2);
+            set_special_world_passed(&mut cpu, false);
+            assert_eq!(cpu.mem.load_u8(FLAG_OW_COLORS), 0x07);
+            assert_eq!(cpu.mem.load_u8(FLAG_GFX_SWAP), 0x42);
+        }
+
+        #[test]
+        fn flag_addresses_match_disassembly() {
+            // OWLevelTileSettings = 0x1EA2 per SMWDisX rammap.asm and
+            // symbols/SMW_U.sym; the game checks +$48 (bank_00.asm:5739) and
+            // +$49 (bank_00.asm:5405).
+            assert_eq!(OW_LEVEL_TILE_SETTINGS, 0x1EA2);
+            assert_eq!(FLAG_OW_COLORS, 0x1EEA);
+            assert_eq!(FLAG_GFX_SWAP, 0x1EEB);
+        }
+
+        fn real_rom_cpu() -> Option<Cpu<CheckedMem>> {
+            let rom_path = std::env::var("ROM_PATH").ok()?;
+            let raw = std::fs::read(&rom_path).ok()?;
+            let bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let sym = std::fs::read_to_string(root.join("symbols/SMW_U.sym")).ok()?;
+            let mut rom = crate::rom::Rom::new(bytes);
+            rom.load_symbols(&sym);
+            Some(Cpu::new(CheckedMem::new(std::sync::Arc::new(rom))))
+        }
+
+        /// The flag changes what the real game init produces: GFX $31 is
+        /// uploaded instead of GFX $01 (VRAM sprite tiles differ) and the
+        /// overworld gets the OWSpecialColors palettes (CGRAM differs).
+        /// Requires ROM_PATH. Ignored in normal runs.
+        #[test]
+        #[ignore]
+        fn flag_changes_real_init_output() {
+            let mut plain = real_rom_cpu().expect("ROM_PATH must be set");
+            super::super::decompress_sublevel(&mut plain, 0x105);
+            let mut passed = real_rom_cpu().expect("ROM_PATH must be set");
+            set_special_world_passed(&mut passed, true);
+            super::super::decompress_sublevel(&mut passed, 0x105);
+            let vram_diff = plain.mem.vram.iter().zip(passed.mem.vram.iter()).filter(|(a, b)| a != b).count();
+            assert!(vram_diff > 0, "expected VRAM to differ with the flag set");
+
+            let mut ow_plain = real_rom_cpu().expect("ROM_PATH must be set");
+            super::super::load_overworld(&mut ow_plain, 0);
+            let mut ow_passed = real_rom_cpu().expect("ROM_PATH must be set");
+            set_special_world_passed(&mut ow_passed, true);
+            super::super::load_overworld(&mut ow_passed, 0);
+            let cgram_diff = ow_plain.mem.cgram.iter().zip(ow_passed.mem.cgram.iter()).filter(|(a, b)| a != b).count();
+            assert!(cgram_diff > 0, "expected overworld CGRAM to differ with the flag set");
+        }
+    }
+}
+
 /// Snapshot of emulator state after [`render_message`] ran the real message
 /// routine: the raw dynamic-stripe-image bytes the game appends to its WRAM
 /// stripe buffer. See [`render_message`] for the command format.

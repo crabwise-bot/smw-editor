@@ -72,7 +72,13 @@ pub fn load_level_cpu(rom_bytes: &[u8], level: u16) -> Result<Cpu> {
 /// two can never drift apart.
 pub fn render_level_png(rom_bytes: &[u8], level: u16, opts: &LevelPngOptions) -> Result<LevelPng> {
     let mut cpu = load_level_cpu(rom_bytes, level)?;
+    render_level_png_from_cpu(&mut cpu, opts)
+}
 
+/// Render from an already-loaded [`Cpu`]: same pipeline as
+/// [`render_level_png`], for callers that set up emulator state (e.g. the
+/// "Special World Passed" view flag) before the game's level init ran.
+pub fn render_level_png_from_cpu(mut cpu: &mut Cpu, opts: &LevelPngOptions) -> Result<LevelPng> {
     let level_mode = cpu.mem.load_u8(0x1925);
     let vertical = cpu.mem.load_u8(0x5B) & 1 != 0;
     let renderer_table = cpu.mem.cart.resolve("CODE_058955").context("symbol CODE_058955 not found")? + 9;

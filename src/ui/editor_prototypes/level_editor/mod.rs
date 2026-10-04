@@ -135,6 +135,7 @@ pub struct UiLevelEditor {
     show_object_labels:    bool,
     mark_exit_tiles:       bool, // LM v3.31 view option: mark exit-enabled tiles
     show_surface_outlines: bool, // LM v3.00/v3.70 view option: tile surface outlines
+    special_world_passed:  bool, // LM v1.10 view option: Special World Passed
     selected_tile:         Option<(u32, u32)>,
 
     level_properties:        LevelProperties,
@@ -639,6 +640,7 @@ impl UiLevelEditor {
             show_object_labels: true,
             mark_exit_tiles: false,
             show_surface_outlines: false,
+            special_world_passed: false,
             selected_tile: None,
             level_properties: LevelProperties::default(),
             layer1: UndoableData::new(EditableObjectLayer::default()),
@@ -2109,6 +2111,12 @@ impl UiLevelEditor {
         self.cpu.mem.cgram.fill(0);
         self.cpu.mem.regs.fill(0);
 
+        // "Special World Passed" view (LM v1.10): set the game's beaten-
+        // Special-World bits before the init routines run, so the real
+        // UploadGFXFile / palette code produces the post-Special-World
+        // graphics exactly as the game does.
+        smwe_emu::emu::special_world::set_special_world_passed(&mut self.cpu, self.special_world_passed);
+
         // Decompress level: fills WRAM block maps, VRAM tile graphics, CGRAM palette.
         smwe_emu::emu::decompress_sublevel(&mut self.cpu, self.level_num);
         // Run one animation frame so animated VRAM tiles (coins, ? blocks) are
@@ -2141,19 +2149,8 @@ impl UiLevelEditor {
         // For each unique sprite ID, clone the clean post-decompress CPU state,
         // run exec_sprite_id on the clone (so state never accumulates between IDs),
         // and collect the OAM tiles the sprite emits relative to the anchor point.
-        let mut oam_map: HashMap<u8, Vec<SpriteOamTile>> = HashMap::new();
-        {
-            let mut unique_ids: Vec<u8> = sprite_layer.sprites.iter().map(|s| s.sprite_id()).collect();
-            unique_ids.sort_unstable();
-            unique_ids.dedup();
-
-            for id in unique_ids {
-                let tiles = self.compute_sprite_oam_tiles(id);
-                if !tiles.is_empty() {
-                    oam_map.insert(id, tiles);
-                }
-            }
-        }
+        let sprite_ids: Vec<u8> = sprite_layer.sprites.iter().map(|s| s.sprite_id()).collect();
+        let oam_map = self.rebuild_sprite_oam_cache(&sprite_ids);
 
         // Mario spawn point is now rendered as text "M", not a sprite
 
@@ -2295,6 +2292,9 @@ impl UiLevelEditor {
         self.cpu.mem.vram.fill(0);
         self.cpu.mem.cgram.fill(0);
         self.cpu.mem.regs.fill(0);
+        // "Special World Passed" view (LM v1.10): same flag setup as
+        // `load_level` so the imported layer-1 renders like a native load.
+        smwe_emu::emu::special_world::set_special_world_passed(&mut self.cpu, self.special_world_passed);
         smwe_emu::emu::decompress_sublevel(&mut self.cpu, self.level_num);
         smwe_emu::emu::fetch_anim_frame(&mut self.cpu);
         self.cpu.mem.cart = old_cart;
@@ -2414,6 +2414,46 @@ impl UiLevelEditor {
             smwe_emu::emu::upload_sprite_tileset(&mut cpu_clone, tileset);
         }
         smwe_emu::emu::sprite_oam_tiles(&mut cpu_clone, sprite_id)
+    }
+
+    /// Rebuild the sprite OAM tile cache from the current CPU state (used by
+    /// `load_level` and by the "Special World Passed" view toggle, whose flag
+    /// is consulted by the sprite init code).
+    fn rebuild_sprite_oam_cache(&self, sprite_ids: &[u8]) -> HashMap<u8, Vec<SpriteOamTile>> {
+        let mut oam_map: HashMap<u8, Vec<SpriteOamTile>> = HashMap::new();
+        let mut unique_ids: Vec<u8> = sprite_ids.to_vec();
+        unique_ids.sort_unstable();
+        unique_ids.dedup();
+        for id in unique_ids {
+            let tiles = self.compute_sprite_oam_tiles(id);
+            if !tiles.is_empty() {
+                oam_map.insert(id, tiles);
+            }
+        }
+        oam_map
+    }
+
+    /// "Special World Passed" view (LM v1.10) toggle: set the game's beaten-
+    /// Special-World bits and re-render through the real game code without
+    /// disturbing unsaved edits. Only the sprite-GFX VRAM region can change
+    /// at level scope (CGRAM, the block map, and all edit state are
+    /// untouched), so this re-runs just `UploadSpriteGFX`, re-applies the
+    /// Super GFX Bypass, rebuilds the sprite OAM cache (sprite init consults
+    /// the flag for the koopa shell swap), and re-uploads to the renderer.
+    pub(super) fn set_special_world_passed_view(&mut self, passed: bool) {
+        self.special_world_passed = passed;
+        smwe_emu::emu::special_world::set_special_world_passed(&mut self.cpu, passed);
+        smwe_emu::emu::special_world::refresh_sprite_gfx(&mut self.cpu);
+        self.apply_bypass_to_vram();
+        let sprite_entries = self.sprites.read(|sprites| sprites.sprites.clone());
+        let sprite_ids: Vec<u8> = sprite_entries.iter().map(|s| s.sprite_id).collect();
+        let oam_map = self.rebuild_sprite_oam_cache(&sprite_ids);
+        self.sprite_oam_cache = oam_map.clone();
+        let mut renderer = self.level_renderer.lock().expect("Cannot lock level_renderer");
+        renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+        renderer.upload_editable_sprites(&self.gl, &sprite_entries, &oam_map, self.level_properties.is_vertical);
+        drop(renderer);
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
     }
 
     pub(super) fn sprite_pixel_bounds(&mut self, sprite_id: u8) -> Option<(i32, i32, i32, i32)> {
