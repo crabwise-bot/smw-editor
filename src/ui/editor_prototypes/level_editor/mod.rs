@@ -266,12 +266,22 @@ pub struct UiLevelEditor {
     /// edits are never clobbered by this tab writing back stale rows.
     shared_rows_dirty:          [bool; 24],
     /// Status line for the palette file interchange buttons (shared-palette
-    /// extract/insert, `.mw3` export/import, Snes9x savestate import).
+    /// extract/insert, `.mw3` export/import, Snes9x savestate import,
+    /// `.palmask` mask import).
     palette_file_status:        Option<String>,
     /// Pending Snes9x-savestate palette import dialog (Lunar Magic v3.40
     /// parity): the parsed CGRAM plus the destination choice, shown until
     /// the user confirms or cancels.
     snes9x_import:              Option<palette_editor::Snes9xImportDialog>,
+    /// Lunar Magic v2.40 `.palmask` support: the 257-word import selector.
+    /// Default = everything enabled (Lunar Magic's transient-selector reset
+    /// state), so imports are unmasked until the user edits or loads a mask.
+    palmask:                    crate::palmask::Palmask,
+    /// When set, clicking a palette swatch toggles its `.palmask`
+    /// selection bit instead of selecting the swatch for color editing.
+    palmask_edit_mode:          bool,
+    /// Status line for the `.palmask` mask buttons.
+    palmask_status:             Option<String>,
     selected_palette_group:     u8,
     selected_palette_idx:       usize,
     // Pre-drag snapshot for gesture-style color edits (see
@@ -704,6 +714,9 @@ impl UiLevelEditor {
             shared_rows_dirty: [false; 24],
             palette_file_status: None,
             snes9x_import: None,
+            palmask: crate::palmask::Palmask::default(),
+            palmask_edit_mode: false,
+            palmask_status: None,
             selected_palette_group: 3, // none
             selected_palette_idx: 0,
             palette_gesture_before: None,
