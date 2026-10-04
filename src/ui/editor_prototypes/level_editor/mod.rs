@@ -134,6 +134,7 @@ pub struct UiLevelEditor {
     show_sprite_overlay:   bool,
     show_object_labels:    bool,
     mark_exit_tiles:       bool, // LM v3.31 view option: mark exit-enabled tiles
+    show_surface_outlines: bool, // LM v3.00/v3.70 view option: tile surface outlines
     selected_tile:         Option<(u32, u32)>,
 
     level_properties:        LevelProperties,
@@ -627,6 +628,7 @@ impl UiLevelEditor {
             show_sprite_overlay: true,
             show_object_labels: true,
             mark_exit_tiles: false,
+            show_surface_outlines: false,
             selected_tile: None,
             level_properties: LevelProperties::default(),
             layer1: UndoableData::new(EditableObjectLayer::default()),
