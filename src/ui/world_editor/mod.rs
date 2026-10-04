@@ -10,6 +10,7 @@
 //! 32×32 screens (2 across × 2 down). Each entry is [tile_num_u8, YXPCCCTT_u8].
 
 mod editing;
+mod events_passed;
 mod ow_tile_picker;
 mod reveal_list_editor;
 mod se_teleport_editor;
@@ -37,6 +38,7 @@ use egui::{
     SidePanel,
     Stroke,
     StrokeKind,
+    TopBottomPanel,
     Ui,
     Vec2,
     WidgetText,
@@ -465,9 +467,22 @@ pub struct UiWorldEditor {
     /// this "destruction" event (castle/fortress/switch palace beaten, etc.) is
     /// considered active for preview purposes. Defaults to all-on, matching the
     /// previous blanket "activate everything" behavior.
-    active_events:         Vec<bool>,
+    active_events:             Vec<bool>,
     /// Whether the Layer 2 event target markers are drawn over the map.
-    show_l2_event_markers: bool,
+    show_l2_event_markers:     bool,
+    /// "Change Events Passed…" dialog (Lunar Magic overworld dialog: Edit menu
+    /// since v3.61, toolbar button added in v3.70): open flag. Preview-only —
+    /// nothing in the dialog is ever written to the ROM.
+    show_change_events_passed: bool,
+    /// Current event number for the "Change Events Passed" preview dialog
+    /// (0..OW_EVENT_COUNT). Dialog bookkeeping from LM's testing-only dialog:
+    /// changing it jumps the dialog's event list to that event; the
+    /// passed-events checkboxes (shared with the Events panel) are what drive
+    /// the preview, through the game's $1F02–$1F60 passed-events bits.
+    preview_current_event:     u8,
+    /// Pending jump-to-event for the dialog's checklist, set when the current
+    /// event spinner changes; consumed by `events_passed_window`.
+    events_passed_scroll_to:   Option<usize>,
 
     /// Per-tile (index into `layer1_tiles`) level-number overrides. Absent
     /// entries use the vanilla scan-order-derived level number unchanged.
@@ -710,6 +725,9 @@ impl UiWorldEditor {
             edit_state,
             active_events: vec![true; smwe_rom::overworld::OW_EVENT_COUNT],
             show_l2_event_markers: true,
+            show_change_events_passed: false,
+            preview_current_event: 0,
+            events_passed_scroll_to: None,
             custom_level_numbers: HashMap::new(),
             level_numbers_dirty: false,
             ow_sprite_tool: false,
@@ -810,6 +828,16 @@ impl DockableEditorTool for UiWorldEditor {
     }
 
     fn update(&mut self, ui: &mut Ui) {
+        // Slim top toolbar (LM v3.70 added a "Change Events Passed" button to
+        // the overworld editor's toolbar; this tab has no other toolbar, so
+        // the strip holds just that button for now).
+        TopBottomPanel::top("world_editor.toolbar").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Change Events Passed…").clicked() {
+                    self.show_change_events_passed = true;
+                }
+            });
+        });
         SidePanel::left("world_editor.left_panel").resizable(false).show_inside(ui, |ui| self.left_panel(ui));
         CentralPanel::default().frame(Frame::NONE.inner_margin(0.)).show_inside(ui, |ui| self.central_panel(ui));
         if self.show_exanimation_editor {
@@ -836,6 +864,7 @@ impl DockableEditorTool for UiWorldEditor {
         self.secret_exits_window(ui.ctx());
         self.reveal_list_editor_window(ui.ctx());
         self.submap_music_window(ui.ctx());
+        self.events_passed_window(ui.ctx());
     }
 
     fn on_closed(&mut self) {
@@ -1147,6 +1176,12 @@ impl UiWorldEditor {
     /// with the new `OWEventsActivated` bits, so the real emulated game code
     /// applies (or doesn't apply) that event's reveal-tile swap.
     fn events_panel(&mut self, ui: &mut Ui) {
+        // Full dialog version of the checklist below (LM Edit-menu dialog;
+        // toolbar button added in LM v3.70).
+        if ui.button("Change Events Passed…").clicked() {
+            self.show_change_events_passed = true;
+        }
+        ui.small("Current event + passed-events checklist for previewing event tiles.");
         ui.collapsing("Events (preview)", |ui| {
             ui.horizontal(|ui| {
                 if ui.button("All on").clicked() {
