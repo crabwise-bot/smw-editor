@@ -27,7 +27,10 @@
 //!     dest              u16 LE (VRAM word address for line kinds,
 //!                              CGRAM word address for palette kinds)
 //!     speed             u8 (editor ticks per animation step; 0 = every tick)
-//!     trigger           u8 (0=Always, 1=On/Off, 2=Manual, 3=OneShot)
+//!     trigger           u8: low nibble 0=Always, 1=On/Off, 2=Manual, 3=OneShot;
+//!                       high nibble = one-shot trigger number 0..=0xF (LM's
+//!                       "One shot 0-F"; 0 for frames written before the
+//!                       number existed, ignored unless the trigger is OneShot)
 //!     frames            u16 LE (1..=0x100 animation steps)
 //!     units_per_frame   u8
 //!     payload           frames * units_per_frame u16 LE entries:
@@ -75,6 +78,8 @@ pub const EXANIM_FORMAT_VERSION: u8 = 2;
 pub const EXANIM_FORMAT_VERSION_V1: u8 = 1;
 /// Maximum animation steps per frame, matching LM's 0x100-frame cap.
 pub const EXANIM_MAX_FRAMES: u16 = 0x100;
+/// Maximum one-shot trigger number (LM's "One shot 0-F" triggers).
+pub const EXANIM_MAX_TRIGGER_NUM: u8 = 0xF;
 /// Maximum tiles/colors per animation step (sanity cap for parsing).
 pub const EXANIM_MAX_UNITS_PER_FRAME: usize = 64;
 /// Maximum frames in one animation list (level or global).
@@ -171,6 +176,13 @@ pub struct ExAnimFrame {
     /// Editor ticks per animation step; 0 means every tick.
     pub speed:           u8,
     pub trigger:         ExAnimTrigger,
+    /// One-shot trigger number (LM's "One shot 0-F"), 0..=0xF. Only
+    /// meaningful when [`ExAnimFrame::trigger`] is
+    /// [`ExAnimTrigger::OneShot`]; stored (but ignored) otherwise so a
+    /// trigger switch away and back restores the number. Encoded in the
+    /// high nibble of the trigger byte (see [`encode_frame`]); blocks
+    /// written before this field existed decode with 0.
+    pub trigger_num:     u8,
     /// Animation steps, 1..=[`EXANIM_MAX_FRAMES`].
     pub frames:          u16,
     pub units_per_frame: u8,
@@ -292,6 +304,7 @@ impl Default for ExAnimFrame {
             dest:            0,
             speed:           0,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          2,
             units_per_frame: 1,
             payload:         vec![0, 0],
@@ -347,7 +360,10 @@ fn encode_frame(frame: &ExAnimFrame, out: &mut Vec<u8>) -> Result<(), ExAnimErro
     out.push(frame.kind as u8);
     out.extend_from_slice(&frame.dest.to_le_bytes());
     out.push(frame.speed);
-    out.push(frame.trigger as u8);
+    // Trigger byte: low nibble is the trigger, high nibble the one-shot
+    // trigger number (LM's "One shot 0-F"). Masked, never validated: the
+    // dialog clamps to 0..=0xF and decode can only produce that range.
+    out.push(frame.trigger as u8 | ((frame.trigger_num & EXANIM_MAX_TRIGGER_NUM) << 4));
     out.extend_from_slice(&frame.frames.to_le_bytes());
     out.push(frame.units_per_frame);
     for &w in &frame.payload {
@@ -364,11 +380,13 @@ fn decode_frame(input: &[u8]) -> Result<(ExAnimFrame, usize), ExAnimError> {
         .ok_or_else(|| ExAnimError::Corrupt(format!("unknown frame kind {}", input[0])))?;
     let dest = u16::from_le_bytes([input[1], input[2]]);
     let speed = input[3];
-    let trigger = ExAnimTrigger::from_u8(input[4])
-        .ok_or_else(|| ExAnimError::Corrupt(format!("unknown trigger {}", input[4])))?;
+    let trigger = ExAnimTrigger::from_u8(input[4] & 0x0F)
+        .ok_or_else(|| ExAnimError::Corrupt(format!("unknown trigger {}", input[4] & 0x0F)))?;
+    // Frames written before the one-shot number existed have 0 here.
+    let trigger_num = input[4] >> 4;
     let frames = u16::from_le_bytes([input[5], input[6]]);
     let units_per_frame = input[7];
-    let frame = ExAnimFrame { kind, dest, speed, trigger, frames, units_per_frame, payload: Vec::new() };
+    let frame = ExAnimFrame { kind, dest, speed, trigger, trigger_num, frames, units_per_frame, payload: Vec::new() };
     // Validate counts before trusting the payload length.
     if frame.frames == 0 || frame.frames > EXANIM_MAX_FRAMES {
         return Err(ExAnimError::BadFrameCount(frame.frames));
@@ -617,6 +635,96 @@ pub fn remap_addresses(anim: &mut ExAnimation, old: u16, new: u16, frames: bool,
 }
 
 // -------------------------------------------------------------------------------------------------
+// Validation: LM v3.40 "More ExAnimation Checks"
+// -------------------------------------------------------------------------------------------------
+
+/// A single LM v3.40-style validation finding against one animation list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExAnimWarning {
+    /// Index of the offending frame in the validated list.
+    pub frame: usize,
+    pub kind:  ExAnimWarningKind,
+}
+
+/// The two checks Lunar Magic v3.40 added to the ExAnimated Frames dialogs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExAnimWarningKind {
+    /// The frame's destination is set to a slot that is disabled for its
+    /// kind. A line frame needs a VRAM word address below $8000 (bit 15 of
+    /// LM's destination word is the alternate-ExGFX-file flag, not address
+    /// bits); a palette frame needs a CGRAM word address 0x00-0xFF. The
+    /// dialog's own destination field clamps to exactly these ranges, so
+    /// this only fires on data that arrived another way (MWL import,
+    /// older/hand-built blocks).
+    DisabledSlot { dest: u16 },
+    /// Another frame in the same list uses the same one-shot trigger
+    /// number. `other_frame` is the index of the first frame holding the
+    /// number.
+    DuplicateOneShotTrigger { trigger_num: u8, other_frame: usize },
+}
+
+impl ExAnimWarning {
+    /// One-line human-readable description, shared by the dialog banner and
+    /// the headless screenshot tooling.
+    pub fn describe(&self, anim: &ExAnimation) -> String {
+        match &self.kind {
+            ExAnimWarningKind::DisabledSlot { dest } => {
+                let frame = anim.frames.get(self.frame);
+                let kind = frame.map(|f| f.kind.label()).unwrap_or("?");
+                if frame.is_some_and(|f| f.kind.is_line()) {
+                    format!(
+                        "Frame #{} ({kind}): destination ${dest:04X} is a disabled slot — \
+                         line frames need a VRAM word below $8000",
+                        self.frame,
+                    )
+                } else {
+                    format!(
+                        "Frame #{} ({kind}): destination ${dest:04X} is a disabled slot — \
+                         palette frames need a CGRAM word $00-$FF",
+                        self.frame,
+                    )
+                }
+            }
+            ExAnimWarningKind::DuplicateOneShotTrigger { trigger_num, other_frame } => {
+                format!("Frame #{}: one-shot trigger #{trigger_num} is also used by frame #{other_frame}", self.frame,)
+            }
+        }
+    }
+}
+
+/// LM v3.40 "More ExAnimation Checks": validate one animation list (level,
+/// global, or overworld — the dialog validates whichever list it shows).
+/// Returns one warning per problem, in frame order.
+pub fn validate_animation(anim: &ExAnimation) -> Vec<ExAnimWarning> {
+    let mut warnings = Vec::new();
+    for (i, frame) in anim.frames.iter().enumerate() {
+        let disabled = if frame.kind.is_line() { frame.dest >= 0x8000 } else { frame.dest > 0xFF };
+        if disabled {
+            warnings.push(ExAnimWarning { frame: i, kind: ExAnimWarningKind::DisabledSlot { dest: frame.dest } });
+        }
+    }
+    // Duplicate one-shot trigger numbers: warn on every frame after the
+    // first holding a number. Non-one-shot frames are skipped even if they
+    // carry a stale number from an earlier trigger switch.
+    let mut seen: [Option<usize>; 16] = [None; 16];
+    for (i, frame) in anim.frames.iter().enumerate() {
+        if frame.trigger != ExAnimTrigger::OneShot {
+            continue;
+        }
+        let n = (frame.trigger_num & EXANIM_MAX_TRIGGER_NUM) as usize;
+        match seen[n] {
+            Some(first) => warnings.push(ExAnimWarning {
+                frame: i,
+                kind:  ExAnimWarningKind::DuplicateOneShotTrigger { trigger_num: n as u8, other_frame: first },
+            }),
+            None => seen[n] = Some(i),
+        }
+    }
+    warnings.sort_by_key(|w| w.frame);
+    warnings
+}
+
+// -------------------------------------------------------------------------------------------------
 // Preview: apply one tick to VRAM/CGRAM
 // -------------------------------------------------------------------------------------------------
 
@@ -704,6 +812,7 @@ mod tests {
             dest:            0x1000,
             speed:           2,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 2,
             payload:         vec![0x2000, 0x2010, 0x2020, 0x2030, 0x2040, 0x2050],
@@ -737,6 +846,7 @@ mod tests {
             dest:            0x20,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          4,
             units_per_frame: 4,
             payload:         vec![0x001F, 0x03E0, 0x7C00, 0x7FFF],
@@ -877,6 +987,7 @@ mod tests {
             dest:            0x10,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          2,
             units_per_frame: 2,
             payload:         vec![0x001F, 0x03E0, 0x7C00, 0x7FFF],
@@ -895,6 +1006,7 @@ mod tests {
             dest:            0x30,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 3,
             payload:         vec![0x0001, 0x0002, 0x0003],
@@ -916,6 +1028,7 @@ mod tests {
                     dest:            0x1000,
                     speed:           0,
                     trigger:         ExAnimTrigger::Always,
+                    trigger_num:     0,
                     frames:          2,
                     units_per_frame: 2,
                     payload:         vec![0x2000, 0x2010, 0x2000, 0x2020],
@@ -925,6 +1038,7 @@ mod tests {
                     dest:            0x2000, // a destination that also matches `old`
                     speed:           0,
                     trigger:         ExAnimTrigger::Always,
+                    trigger_num:     0,
                     frames:          1,
                     units_per_frame: 1,
                     payload:         vec![0x3000],
@@ -934,6 +1048,7 @@ mod tests {
                     dest:            0x2000, // CGRAM address: must NOT be remapped
                     speed:           0,
                     trigger:         ExAnimTrigger::Always,
+                    trigger_num:     0,
                     frames:          1,
                     units_per_frame: 1,
                     payload:         vec![0x2000], // a color, not an address: untouched
@@ -961,6 +1076,7 @@ mod tests {
                 dest:            0x1000,
                 speed:           0,
                 trigger:         ExAnimTrigger::Always,
+                trigger_num:     0,
                 frames:          1,
                 units_per_frame: 1,
                 payload:         vec![0x1000],
@@ -987,6 +1103,7 @@ mod tests {
             dest:            0xFFF0, // near the end of VRAM
             speed:           0,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          1,
             units_per_frame: 4,
             payload:         vec![0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF], // out of range sources
@@ -1006,6 +1123,7 @@ mod tests {
             dest:            0x1000,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 2,
             payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
@@ -1023,6 +1141,7 @@ mod tests {
             dest:            0x10,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 2,
             payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
@@ -1040,6 +1159,7 @@ mod tests {
             dest:            0x1000,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 2,
             payload:         vec![0xA0, 0xA1, 0xB0, 0xB1, 0xC0, 0xC1],
@@ -1062,6 +1182,7 @@ mod tests {
             dest:            0,
             speed:           0,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          EXANIM_MAX_FRAMES,
             units_per_frame: 1,
             payload:         vec![0; EXANIM_MAX_FRAMES as usize],
@@ -1075,6 +1196,7 @@ mod tests {
             dest:            0,
             speed:           0,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          1,
             units_per_frame: 2,
             payload:         vec![0xA0, 0xA1],
@@ -1091,6 +1213,7 @@ mod tests {
             dest:            0x20,
             speed:           1,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          3,
             units_per_frame: 3,
             payload:         vec![0x0001, 0x0002, 0x0003],
@@ -1117,6 +1240,7 @@ mod tests {
             dest:            0x10,
             speed:           2,
             trigger:         ExAnimTrigger::OnOff,
+            trigger_num:     0,
             frames:          4,
             units_per_frame: 3,
             payload:         (1..=12).map(|i| i * 0x111).collect(),
@@ -1125,6 +1249,129 @@ mod tests {
         frame.insert_frame_at_start();
         frame.delete_frame_at_start();
         assert_eq!(frame, orig);
+    }
+
+    #[test]
+    fn trigger_num_round_trips_in_trigger_byte_nibble() {
+        let mut frame = sample_frame();
+        frame.trigger = ExAnimTrigger::OneShot;
+        frame.trigger_num = 5;
+        let mut out = Vec::new();
+        encode_frame(&frame, &mut out).unwrap();
+        // High nibble 5 (the number), low nibble 3 (OneShot).
+        assert_eq!(out[4], 0x53);
+        let (back, used) = decode_frame(&out).unwrap();
+        assert_eq!(used, out.len());
+        assert_eq!(back.trigger, ExAnimTrigger::OneShot);
+        assert_eq!(back.trigger_num, 5);
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn legacy_trigger_byte_decodes_with_trigger_num_zero() {
+        // A frame header written before the one-shot number existed: the
+        // trigger byte has no high nibble, so the number decodes as 0.
+        let mut frame = sample_frame();
+        frame.trigger = ExAnimTrigger::OneShot;
+        frame.trigger_num = 0;
+        let mut out = Vec::new();
+        encode_frame(&frame, &mut out).unwrap();
+        assert_eq!(out[4], 0x03);
+        let (back, _) = decode_frame(&out).unwrap();
+        assert_eq!(back.trigger, ExAnimTrigger::OneShot);
+        assert_eq!(back.trigger_num, 0);
+    }
+
+    #[test]
+    fn trigger_num_survives_payload_round_trip() {
+        // The on-disk format is unchanged in size: the number rides in the
+        // existing trigger byte's high nibble, so v1/v2 blocks keep working.
+        let mut data = ExAnimationData::default();
+        let mut f = sample_frame();
+        f.trigger = ExAnimTrigger::OneShot;
+        f.trigger_num = 0xF;
+        data.global.frames.push(f);
+        let payload = encode_payload(&data).unwrap();
+        let back = decode_payload(&payload).unwrap();
+        assert_eq!(back.global.frames[0].trigger, ExAnimTrigger::OneShot);
+        assert_eq!(back.global.frames[0].trigger_num, 0xF);
+    }
+
+    #[test]
+    fn validate_animation_flags_disabled_slots() {
+        let mut anim = ExAnimation::default();
+        // Line frame with a VRAM word >= $8000: disabled (bit 15 is LM's
+        // alt-file flag, not address bits).
+        anim.frames.push(ExAnimFrame { kind: ExAnimFrameKind::Line8x8, dest: 0x9000, ..sample_frame() });
+        // Line frame at the top of the valid range: fine.
+        anim.frames.push(ExAnimFrame { kind: ExAnimFrameKind::Line16x16, dest: 0x7FFF, ..sample_frame() });
+        // Palette frame past CGRAM: disabled.
+        anim.frames.push(ExAnimFrame {
+            kind: ExAnimFrameKind::Palette,
+            dest: 0x120,
+            frames: 1,
+            units_per_frame: 1,
+            payload: vec![0],
+            ..sample_frame()
+        });
+        // Palette frame at the top of CGRAM: fine.
+        anim.frames.push(ExAnimFrame {
+            kind: ExAnimFrameKind::PaletteRotate,
+            dest: 0xFF,
+            frames: 1,
+            units_per_frame: 1,
+            payload: vec![0],
+            ..sample_frame()
+        });
+        let warnings = validate_animation(&anim);
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].frame, 0);
+        assert!(matches!(warnings[0].kind, ExAnimWarningKind::DisabledSlot { dest: 0x9000 }));
+        assert_eq!(warnings[1].frame, 2);
+        assert!(matches!(warnings[1].kind, ExAnimWarningKind::DisabledSlot { dest: 0x120 }));
+    }
+
+    #[test]
+    fn validate_animation_flags_duplicate_one_shot_triggers() {
+        let one_shot = |num: u8| ExAnimFrame { trigger: ExAnimTrigger::OneShot, trigger_num: num, ..sample_frame() };
+        let mut anim = ExAnimation::default();
+        anim.frames.push(one_shot(5)); // #0
+        anim.frames.push(one_shot(7)); // #1: different number, fine
+        anim.frames.push(one_shot(5)); // #2: duplicate of #0
+                                       // A stale number on a non-one-shot trigger is ignored.
+        anim.frames.push(ExAnimFrame { trigger: ExAnimTrigger::Always, trigger_num: 5, ..sample_frame() });
+        anim.frames.push(one_shot(5)); // #4: duplicate of #0
+        let warnings = validate_animation(&anim);
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].frame, 2);
+        assert!(matches!(warnings[0].kind, ExAnimWarningKind::DuplicateOneShotTrigger {
+            trigger_num: 5,
+            other_frame: 0,
+        }));
+        assert_eq!(warnings[1].frame, 4);
+        assert!(matches!(warnings[1].kind, ExAnimWarningKind::DuplicateOneShotTrigger {
+            trigger_num: 5,
+            other_frame: 0,
+        }));
+
+        // Distinct numbers: no warnings.
+        let clean =
+            ExAnimation { frames: vec![one_shot(0), one_shot(1), one_shot(15)], disable_original: false };
+        assert!(validate_animation(&clean).is_empty());
+    }
+
+    #[test]
+    fn warning_describe_mentions_frame_and_slot() {
+        let mut anim = ExAnimation::default();
+        anim.frames.push(ExAnimFrame { kind: ExAnimFrameKind::Line8x8, dest: 0x9000, ..sample_frame() });
+        anim.frames.push(ExAnimFrame { trigger: ExAnimTrigger::OneShot, trigger_num: 9, ..sample_frame() });
+        anim.frames.push(ExAnimFrame { trigger: ExAnimTrigger::OneShot, trigger_num: 9, ..sample_frame() });
+        let warnings = validate_animation(&anim);
+        assert_eq!(warnings.len(), 2);
+        let d0 = warnings[0].describe(&anim);
+        assert!(d0.contains("#0") && d0.contains("$9000") && d0.contains("$8000"), "got: {d0}");
+        let d1 = warnings[1].describe(&anim);
+        assert!(d1.contains("#2") && d1.contains("#9") && d1.contains("#1"), "got: {d1}");
     }
 
     /// Real-ROM test: write the block into a scratch *copy* of the real ROM
@@ -1140,11 +1387,16 @@ mod tests {
 
         let mut data = ExAnimationData::default();
         data.levels.insert(0x105, ExAnimation { frames: vec![sample_frame()], disable_original: true });
+        let mut one_shot = sample_frame();
+        one_shot.trigger = ExAnimTrigger::OneShot;
+        one_shot.trigger_num = 0xB;
+        data.global.frames.push(one_shot);
         data.global.frames.push(ExAnimFrame {
             kind:            ExAnimFrameKind::Palette,
             dest:            0x08,
             speed:           4,
             trigger:         ExAnimTrigger::Always,
+            trigger_num:     0,
             frames:          2,
             units_per_frame: 3,
             payload:         vec![0x7FFF, 0x7FFF, 0x7FFF, 0x0000, 0x0000, 0x0000],

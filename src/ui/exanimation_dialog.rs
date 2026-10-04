@@ -15,12 +15,14 @@ use egui::{Color32, Context, ScrollArea};
 use smwe_rom::{
     exanimation::{
         remap_addresses,
+        validate_animation,
         ExAnimFrame,
         ExAnimFrameKind,
         ExAnimTrigger,
         ExAnimation,
         ExAnimationData,
         EXANIM_MAX_FRAMES,
+        EXANIM_MAX_TRIGGER_NUM,
         EXANIM_MAX_UNITS_PER_FRAME,
     },
     graphics::gfx_file::Tile,
@@ -456,6 +458,39 @@ impl ExAnimDialog {
             );
             ui.separator();
 
+            // LM v3.40 "More ExAnimation Checks": warn about ExAnimation
+            // destinations set to disabled slots and about the same one-shot
+            // trigger number assigned to more than one slot. Disabled via the
+            // Options menu ("More ExAnimation Checks", per-user setting).
+            if crate::editor_options::EditorOptions::load().more_exanimation_checks {
+                if let Some(anim) = self.anim(data, level_num) {
+                    let warnings = validate_animation(anim);
+                    if !warnings.is_empty() {
+                        let mut jump_to = None;
+                        egui::Frame::default()
+                            .fill(egui::Color32::from_rgb(72, 54, 10))
+                            .corner_radius(4.0)
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 200, 80),
+                                    "⚠ ExAnimation checks (Lunar Magic v3.40) — click a warning to select its frame:",
+                                );
+                                for w in &warnings {
+                                    if ui.link(w.describe(anim)).clicked() {
+                                        jump_to = Some(w.frame);
+                                    }
+                                }
+                            });
+                        if let Some(sel) = jump_to {
+                            self.selected = sel;
+                            self.pick_slot = None;
+                        }
+                        ui.separator();
+                    }
+                }
+            }
+
             ui.horizontal(|ui| {
                 // ── Frame list ──
                 ui.vertical(|ui| {
@@ -582,6 +617,10 @@ impl ExAnimDialog {
             dest:            u16,
             speed:           u8,
             trigger:         ExAnimTrigger,
+            /// LM's "One shot 0-F" trigger number; only meaningful when
+            /// `trigger == OneShot` (stored but ignored otherwise, so a
+            /// trigger switch away and back restores the number).
+            trigger_num:     u8,
             frames:          u16,
             units_per_frame: u8,
             payload:         Vec<u16>,
@@ -593,6 +632,7 @@ impl ExAnimDialog {
                 dest:            f.dest,
                 speed:           f.speed,
                 trigger:         f.trigger,
+                trigger_num:     f.trigger_num,
                 frames:          f.frames,
                 units_per_frame: f.units_per_frame,
                 payload:         f.payload.clone(),
@@ -622,6 +662,20 @@ impl ExAnimDialog {
                     }
                 }
             });
+            // LM v3.40 parity: one-shot triggers carry a trigger number 0-F;
+            // the duplicate-number warning (below) checks these.
+            if e.trigger == ExAnimTrigger::OneShot {
+                ui.label("One-shot #");
+                let mut num = e.trigger_num.min(EXANIM_MAX_TRIGGER_NUM) as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut num).range(0..=EXANIM_MAX_TRIGGER_NUM as i32))
+                    .on_hover_text("One-shot trigger number 0-F (Lunar Magic v3.40)")
+                    .changed()
+                {
+                    e.trigger_num = num as u8;
+                    changed = true;
+                }
+            }
         });
 
         // Destination range depends on the kind: VRAM words for line frames,
@@ -690,6 +744,7 @@ impl ExAnimDialog {
             f.dest = e.dest.min(dest_max);
             f.speed = e.speed;
             f.trigger = e.trigger;
+            f.trigger_num = e.trigger_num.min(EXANIM_MAX_TRIGGER_NUM);
             f.frames = e.frames;
             f.units_per_frame = e.units_per_frame;
             f.payload = e.payload.clone();
@@ -1070,6 +1125,7 @@ mod tests {
             dest: 0x0002,
             speed: 1,
             trigger: ExAnimTrigger::Always,
+            trigger_num: 0,
             frames,
             units_per_frame: units,
             payload,

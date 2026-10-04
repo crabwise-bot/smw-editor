@@ -189,6 +189,7 @@ fn main() {
         dest:            0x0002,
         speed:           1,
         trigger:         ExAnimTrigger::Always,
+        trigger_num:     0,
         frames:          3,
         units_per_frame: 4,
         payload:         vec![

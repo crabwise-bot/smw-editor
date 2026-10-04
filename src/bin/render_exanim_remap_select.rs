@@ -191,6 +191,7 @@ fn main() -> anyhow::Result<()> {
         dest:            0x1000,
         speed:           4,
         trigger:         ExAnimTrigger::Always,
+        trigger_num:     0,
         frames:          2,
         units_per_frame: 4,
         payload:         vec![0x2000, 0x2010, 0x2000, 0x2020, 0x2030, 0x2040, 0x2050, 0x2060],
