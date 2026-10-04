@@ -11,5 +11,6 @@ pub mod project;
 pub mod render_util;
 pub mod resource_scan;
 pub mod rom_freespace;
+pub mod snes9x_state;
 pub mod ui;
 pub mod undo;

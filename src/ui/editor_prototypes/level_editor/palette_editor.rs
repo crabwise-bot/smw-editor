@@ -5,6 +5,7 @@ use egui_phosphor::regular as icon;
 use super::UiLevelEditor;
 use crate::{
     palette_files::{LevelPalette36, SharedPaletteTables, SHARED_PALETTE_BYTES},
+    snes9x_state::{self, Snes9xCgram},
     undo::Undo,
 };
 
@@ -92,6 +93,31 @@ impl Undo for EditablePalettes {
     fn size_bytes(&self) -> usize {
         EDITABLE_PALETTES_BYTES
     }
+}
+
+/// Pending Snes9x-savestate palette import dialog (Lunar Magic v3.40
+/// parity: "added support for importing palettes from Snes9x save state
+/// files"). The parsed CGRAM is shown as a 16×16 preview and the user
+/// picks the destination before anything is applied, so the savestate
+/// parse can never half-apply.
+#[derive(Clone)]
+pub(super) struct Snes9xImportDialog {
+    /// The savestate's live 256-color CGRAM plus its snapshot version.
+    pub cgram:                Snes9xCgram,
+    /// Display name of the source file.
+    pub file_name:            String,
+    /// Destination: full shared palette tables, or just this level's
+    /// BG/FG/sprite rows.
+    pub import_shared_tables: bool,
+}
+
+/// Convert a SNES 15-bit BGR color word to an egui color (same conversion
+/// the swatch grid uses).
+fn snes_to_egui(raw: u16) -> Color32 {
+    let r = ((raw & 0x1F) as f32 / 31.0 * 255.0) as u8;
+    let g = (((raw >> 5) & 0x1F) as f32 / 31.0 * 255.0) as u8;
+    let b = (((raw >> 10) & 0x1F) as f32 / 31.0 * 255.0) as u8;
+    Color32::from_rgb(r, g, b)
 }
 
 /// Parse an RGB hex color string into 8-bit sRGB components (Lunar Magic
@@ -252,6 +278,13 @@ impl UiLevelEditor {
             self.palette_files_section(ui);
         });
         self.show_palette_editor = open;
+
+        // ── Snes9x savestate import dialog (Lunar Magic v3.40) ─────────────
+        // Drawn outside the palette window so it stays up after the file
+        // picker closes; `take()`/restore inside handles its lifetime.
+        if self.snes9x_import.is_some() {
+            self.snes9x_import_dialog(ctx);
+        }
 
         // ── Ctrl+Z / Ctrl+Y while the pointer is over this window ───────────
         // (or while a color drag is in flight, since the picker popup floats
@@ -576,9 +609,152 @@ impl UiLevelEditor {
                 self.import_mw3();
             }
         });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Import Palette from Snes9x Savestate…")
+                .on_hover_text(
+                    "Load the live on-screen palette (CGRAM) from a Snes9x savestate file \
+                     (Lunar Magic v3.40) — shows a preview and asks where to put it",
+                )
+                .clicked()
+            {
+                self.import_snes9x_savestate();
+            }
+        });
         if let Some(status) = self.palette_file_status.clone() {
             ui.label(egui::RichText::new(status).small().italics());
         }
+    }
+
+    /// Lunar Magic v3.40: "support for importing palettes from Snes9x save
+    /// state files". Pick the savestate, parse its `PPU` block's `CGDATA`
+    /// (the emulator's live CGRAM), and stage the import dialog — nothing
+    /// is applied until the user confirms a destination there.
+    fn import_snes9x_savestate(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Snes9x savestate", &[
+                "000", "001", "002", "003", "004", "005", "006", "007", "008", "009", "o00", "o01", "o02", "o03",
+                "o04", "o05", "o06", "o07", "o08", "o09", "sst", "s9x",
+            ])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<Snes9xImportDialog> {
+            let bytes = std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+            let cgram = snes9x_state::parse_cgram(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(Snes9xImportDialog {
+                cgram,
+                file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                import_shared_tables: false,
+            })
+        })();
+        match result {
+            Ok(dlg) => {
+                log::info!("parsed Snes9x savestate CGRAM ← {}", path.display());
+                self.snes9x_import = Some(dlg);
+                self.palette_file_status = None;
+            }
+            Err(e) => {
+                self.palette_file_status = Some(format!("Snes9x savestate import failed: {e:#}"));
+            }
+        }
+    }
+
+    /// The Snes9x import dialog: 16×16 preview of the savestate's CGRAM plus
+    /// the destination choice. Import is a single undo step either way.
+    fn snes9x_import_dialog(&mut self, ctx: &Context) {
+        let Some(mut dlg) = self.snes9x_import.take() else { return };
+        let mut apply = false;
+        let mut cancel = false;
+        // No `.open()` binding, so egui draws no title-bar close button —
+        // the dialog lives until Import or Cancel is clicked.
+        egui::Window::new("Import Palette from Snes9x Savestate").collapsible(false).show(ctx, |ui| {
+            ui.label(format!("{} — savestate v{}, 256-color live CGRAM", dlg.file_name, dlg.cgram.version));
+            // Preview grid: 16×16 swatches, CGRAM rows top to bottom.
+            let (grid_rect, _) = ui.allocate_exact_size(vec2(16.0 * 12.0, 16.0 * 12.0), Sense::hover());
+            for (i, &raw) in dlg.cgram.colors.iter().enumerate() {
+                let cell_min = grid_rect.min + vec2((i % 16) as f32 * 12.0, (i / 16) as f32 * 12.0);
+                let cell_rect = Rect::from_min_size(cell_min, Vec2::splat(12.0));
+                ui.painter().rect_filled(cell_rect, egui::CornerRadius::ZERO, snes_to_egui(raw));
+            }
+            ui.radio_value(
+                &mut dlg.import_shared_tables,
+                false,
+                "This level's rows (BG/FG/sprite at this level's palette indices)",
+            )
+            .on_hover_text(
+                "Import the savestate's BG/FG/sprite rows at this level's palette indices \
+                 into this level's palette — the custom palette is auto-enabled, like the \
+                 .mw3 import",
+            );
+            ui.radio_value(&mut dlg.import_shared_tables, true, "Full shared palette tables (BG/FG/sprite groups)")
+                .on_hover_text(
+                    "Replace all 24 shared palette rows from the savestate's CGRAM \
+                     (BG/FG rows 0–7, sprite rows 8–15) — affects every level that uses \
+                     the shared tables",
+                );
+            ui.horizontal(|ui| {
+                if ui.button("Import").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if apply {
+            self.apply_snes9x_import(&dlg.cgram.colors, dlg.import_shared_tables);
+            self.palette_file_status = Some(format!("Imported palette ← {} (undo with Ctrl+Z)", dlg.file_name));
+        } else if !cancel {
+            self.snes9x_import = Some(dlg);
+        }
+    }
+
+    /// Apply a staged Snes9x savestate import as one undo step.
+    fn apply_snes9x_import(&mut self, cgram: &[u16; snes9x_state::CGRAM_COLORS], import_shared_tables: bool) {
+        let (bg_idx, fg_idx, sp_idx) =
+            (self.palette_row_index(0), self.palette_row_index(1), self.palette_row_index(2));
+        if import_shared_tables {
+            // Full shared-table replacement, same shape as
+            // `insert_shared_palette`: one undo step over `EditablePalettes`,
+            // on-screen colors re-synced when the custom palette is off.
+            let custom = self.custom_palette_enabled;
+            self.palettes.write(|pal| {
+                for r in 0..8 {
+                    pal.shared.bg[r] = snes9x_state::cgram_row(cgram, r);
+                    pal.shared.fg[r] = snes9x_state::cgram_row(cgram, r);
+                    pal.shared.sprite[r] = snes9x_state::cgram_row(cgram, 8 + r);
+                }
+                if !custom {
+                    pal.bg = pal.shared.bg[bg_idx];
+                    pal.fg = pal.shared.fg[fg_idx];
+                    pal.sprite = pal.shared.sprite[sp_idx];
+                }
+            });
+            self.shared_rows_dirty = [true; 24];
+        } else {
+            // Level rows: the savestate's CGRAM rows at this level's palette
+            // indices. Per-level data, so the custom palette is auto-enabled
+            // first — same semantics as the `.mw3` import.
+            if !self.custom_palette_enabled {
+                self.set_custom_palette_enabled(true);
+            }
+            let (bg, fg, sprite) = (
+                snes9x_state::cgram_row(cgram, bg_idx),
+                snes9x_state::cgram_row(cgram, fg_idx),
+                snes9x_state::cgram_row(cgram, 8 + sp_idx),
+            );
+            self.palettes.write(|pal| {
+                pal.bg = bg;
+                pal.fg = fg;
+                pal.sprite = sprite;
+            });
+        }
+        self.palette_dirty = true;
+        self.mark_edited();
+        self.sync_custom_palette_entry();
+        log::info!("imported Snes9x savestate palette (shared tables: {import_shared_tables})");
     }
 
     /// Lunar Magic "Extract Shared Palette to File": save the shared palette
