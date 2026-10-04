@@ -56,6 +56,7 @@ fn main() {
         dest:            0x1000,
         speed:           1,
         trigger:         ExAnimTrigger::Always,
+        trigger_num:     0,
         frames:          4,
         units_per_frame: UNITS_PER_STEP as u8,
         payload:         vec![0x46B0, 0x4960, 0x0910, 0x4770, 0x1650, 0x1E90, 0x0900, 0x4F40],

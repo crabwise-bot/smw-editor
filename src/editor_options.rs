@@ -1,5 +1,5 @@
 //! Per-user editor options (Lunar Magic v1.91 "Check Object Placement on
-//! Save").
+//! Save", v3.40 "More ExAnimation Checks").
 //!
 //! Stored in `$HOME/.smw-editor-options.json` — the same per-user convention
 //! as the recent-files list and the custom-tooltips store. These are editor
@@ -19,12 +19,17 @@ pub struct EditorOptions {
     /// When on, saving to the ROM warns about objects and sprites placed
     /// outside the level boundaries.
     pub check_placement_on_save: bool,
+    /// Lunar Magic v3.40 "More ExAnimation Checks" (Options menu). When on,
+    /// the shared "ExAnimated Frames" dialog warns about ExAnimation
+    /// destinations set to disabled slots and duplicate one-shot trigger
+    /// numbers. LM ships this checked; unchecking disables the warnings.
+    pub more_exanimation_checks: bool,
 }
 
 impl Default for EditorOptions {
     fn default() -> Self {
-        // LM ships the option off by default; the user opts in.
-        EditorOptions { check_placement_on_save: false }
+        // LM ships both options' defaults this way; the user opts in/out.
+        EditorOptions { check_placement_on_save: false, more_exanimation_checks: true }
     }
 }
 
@@ -54,21 +59,37 @@ impl EditorOptions {
         struct StoreFile {
             #[serde(default)]
             check_placement_on_save: bool,
+            // `serde(default)` keeps old files (written before this field
+            // existed) loading as the default (true).
+            #[serde(default = "default_more_exanimation_checks")]
+            more_exanimation_checks: bool,
         }
         let Ok(data) = std::fs::read_to_string(path) else { return Self::default() };
         let Ok(file) = serde_json::from_str::<StoreFile>(&data) else { return Self::default() };
-        EditorOptions { check_placement_on_save: file.check_placement_on_save }
+        EditorOptions {
+            check_placement_on_save: file.check_placement_on_save,
+            more_exanimation_checks: file.more_exanimation_checks,
+        }
     }
 
     fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         #[derive(serde::Serialize)]
         struct StoreFile {
             check_placement_on_save: bool,
+            more_exanimation_checks: bool,
         }
-        let file = StoreFile { check_placement_on_save: self.check_placement_on_save };
+        let file = StoreFile {
+            check_placement_on_save: self.check_placement_on_save,
+            more_exanimation_checks: self.more_exanimation_checks,
+        };
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
+}
+
+/// The default for files written before the field existed.
+fn default_more_exanimation_checks() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -80,10 +101,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("smwe-opt-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("options.json");
-        let opts = EditorOptions { check_placement_on_save: true };
+        let opts = EditorOptions { check_placement_on_save: true, more_exanimation_checks: false };
         opts.save_to(&path).unwrap();
         let back = EditorOptions::load_from(&path);
         assert!(back.check_placement_on_save);
+        assert!(!back.more_exanimation_checks);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -95,6 +117,21 @@ mod tests {
         std::fs::write(&path, "{not json").unwrap();
         let back = EditorOptions::load_from(&path);
         assert!(!back.check_placement_on_save);
+        assert!(back.more_exanimation_checks);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_file_without_new_field_loads_true() {
+        // A file written before `more_exanimation_checks` existed must not
+        // silently turn the checks off.
+        let dir = std::env::temp_dir().join(format!("smwe-opt-test-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("options.json");
+        std::fs::write(&path, "{\"check_placement_on_save\": true}").unwrap();
+        let back = EditorOptions::load_from(&path);
+        assert!(back.check_placement_on_save);
+        assert!(back.more_exanimation_checks);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

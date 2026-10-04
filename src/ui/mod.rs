@@ -151,6 +151,11 @@ pub struct UiMainWindow {
     /// Lunar Magic v1.91 "Check Object Placement on Save" (Options menu).
     /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
     check_placement_on_save:   bool,
+    /// Lunar Magic v3.40 "More ExAnimation Checks" (Options menu). When on,
+    /// the shared "ExAnimated Frames" dialog warns about destinations set
+    /// to disabled slots and duplicate one-shot trigger numbers.
+    /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
+    more_exanimation_checks:   bool,
     /// A save deferred by the placement-warning dialog, awaiting the user's
     /// answer ("Save anyway" resumes it; "Cancel" drops it).
     pending_placement_warning: Option<PendingPlacementWarning>,
@@ -245,6 +250,7 @@ impl UiMainWindow {
             restore_status: None,
             user_toolbar: UserToolbarState::load(),
             check_placement_on_save: EditorOptions::load().check_placement_on_save,
+            more_exanimation_checks: EditorOptions::load().more_exanimation_checks,
             pending_placement_warning: None,
             placement_save_confirmed: false,
         }
@@ -557,6 +563,15 @@ impl UiMainWindow {
         if let Some(path) = self.open_dialog.take_picked() {
             self.load_rom_from_path(ctx, path);
         }
+    }
+
+    /// Persist the Options-menu toggles to the per-user store.
+    fn save_editor_options(&self) {
+        EditorOptions {
+            check_placement_on_save: self.check_placement_on_save,
+            more_exanimation_checks: self.more_exanimation_checks,
+        }
+        .save();
     }
 
     fn load_rom_from_path(&mut self, ctx: &Context, path: PathBuf) {
@@ -1834,7 +1849,7 @@ impl UiMainWindow {
                     }
                 });
 
-                // ── Options (LM v1.91 parity) ──
+                // ── Options (LM v1.91 / v3.40 parity) ──
                 ui.menu_button("Options", |ui| {
                     if ui
                         .checkbox(&mut self.check_placement_on_save, "Check Object Placement on Save")
@@ -1844,7 +1859,19 @@ impl UiMainWindow {
                         )
                         .changed()
                     {
-                        EditorOptions { check_placement_on_save: self.check_placement_on_save }.save();
+                        self.save_editor_options();
+                    }
+                    if ui
+                        .checkbox(&mut self.more_exanimation_checks, "More ExAnimation Checks")
+                        .on_hover_text(
+                            "When enabled, the ExAnimated Frames dialog warns about ExAnimation \
+                             destinations set to disabled slots and about the same one-shot \
+                             trigger number assigned to more than one slot (Lunar Magic v3.40). \
+                             Uncheck to disable the warnings.",
+                        )
+                        .changed()
+                    {
+                        self.save_editor_options();
                     }
                 });
 
