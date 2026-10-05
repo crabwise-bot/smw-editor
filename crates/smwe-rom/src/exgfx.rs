@@ -421,7 +421,7 @@ impl BypassData {
 
 /// Scan `rom_bytes` for RATS blocks whose payload starts with `magic`.
 /// Returns the file offsets of the `STAR` tags.
-fn find_rats_blocks(rom_bytes: &[u8], magic: &[u8; 8]) -> Vec<usize> {
+pub(crate) fn find_rats_blocks(rom_bytes: &[u8], magic: &[u8; 8]) -> Vec<usize> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i + 16 < rom_bytes.len() {
@@ -450,12 +450,12 @@ fn find_rats_blocks(rom_bytes: &[u8], magic: &[u8; 8]) -> Vec<usize> {
 
 /// Payload size recorded in the RATS tag at `tag` (caller must have validated
 /// the tag via [`find_rats_blocks`]).
-fn rats_size(rom_bytes: &[u8], tag: usize) -> usize {
+pub(crate) fn rats_size(rom_bytes: &[u8], tag: usize) -> usize {
     u16::from_le_bytes([rom_bytes[tag + 4], rom_bytes[tag + 5]]) as usize
 }
 
 /// Write one `STAR`-tagged block (`magic` + `payload`) into free space.
-fn write_rats_block(
+pub(crate) fn write_rats_block(
     rom_bytes: &mut [u8], magic: &[u8; 8], payload: &[u8], header_offset: usize,
 ) -> Result<(), ExGfxError> {
     if payload.is_empty() || payload.len() > 0x10000 - 8 {

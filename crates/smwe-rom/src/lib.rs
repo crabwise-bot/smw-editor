@@ -21,6 +21,7 @@ pub mod map16_file;
 pub mod message_boxes;
 pub mod message_raster;
 pub mod music;
+pub mod music_bypass;
 pub mod mwl;
 pub mod objects;
 pub mod overworld;
@@ -84,6 +85,7 @@ pub struct SmwRom {
     pub custom_palettes:       CustomPaletteData,
     pub exgfx:                 exgfx::ExGfxData,
     pub gfx_bypass:            exgfx::BypassData,
+    pub music_bypass:          music_bypass::MusicBypassData,
     pub direct_map16:          DirectMap16Data,
     pub level_heights:         LevelHeights,
     pub level_entrance_extras: LevelEntranceExtrasData,
@@ -209,6 +211,15 @@ impl SmwRom {
         log::info!("Parsing ExGFX files and Super GFX Bypass table");
         let exgfx = exgfx::ExGfxData::parse(rom.bytes());
         let gfx_bypass = exgfx::BypassData::parse(rom.bytes()).unwrap_or_default();
+        log::info!("Parsing per-level music/time bypass table");
+        let music_bypass = music_bypass::MusicBypassData::parse(rom.bytes()).unwrap_or_else(|e| {
+            // NotFound is the normal case: a ROM nobody has authored
+            // music/time bypasses for yet simply has no block.
+            if !matches!(e, music_bypass::MusicBypassError::NotFound) {
+                log::warn!("Could not parse music/time bypass data: {e}");
+            }
+            music_bypass::MusicBypassData::default()
+        });
         log::info!("Parsing Direct Map16 data");
         let direct_map16 = DirectMap16Data::parse(rom.bytes()).unwrap_or_else(|e| {
             // NotFound is the normal case: a ROM nobody has authored
@@ -267,6 +278,7 @@ impl SmwRom {
             sprite_header_ext,
             exgfx,
             gfx_bypass,
+            music_bypass,
             direct_map16,
             level_heights,
             custom_palettes,
