@@ -162,4 +162,21 @@ mod tests {
             let _ = is_exit_enabled(id, 0x01);
         }
     }
+
+    #[test]
+    fn exit_enabled_full_map16_scan() {
+        // The set the Map16-editor overlay (LM v3.70) marks on a vanilla ROM
+        // with an identity acts table: doors + exit pipes in every mode,
+        // plus 0x09C only in level mode 0x01. Guards against the predicate
+        // silently widening or narrowing over the whole FG space.
+        use std::collections::HashMap;
+
+        use crate::map16_expanded::act_as_of;
+        let acts: HashMap<u16, u16> = HashMap::new();
+        let scan = |mode: u8| -> Vec<u16> {
+            (0x000..0x200u16).filter(|&id| is_exit_enabled(act_as_of(&acts, id), mode)).collect()
+        };
+        assert_eq!(scan(0x01), vec![0x01F, 0x020, 0x027, 0x028, 0x09C, 0x137, 0x138, 0x13F]);
+        assert_eq!(scan(0x00), vec![0x01F, 0x020, 0x027, 0x028, 0x137, 0x138, 0x13F]);
+    }
 }

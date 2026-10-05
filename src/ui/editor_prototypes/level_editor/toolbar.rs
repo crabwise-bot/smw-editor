@@ -163,7 +163,7 @@ impl UiLevelEditor {
             if tbtn(ui, icon::TEXT_T, "Show object labels", self.show_object_labels) {
                 self.show_object_labels = !self.show_object_labels;
             }
-            if tbtn(ui, icon::DOOR_OPEN, "Mark exit-enabled tiles (F9)", self.mark_exit_tiles) {
+            if tbtn(ui, icon::DOOR_OPEN, "Mark exit-enabled tiles (F9) — level and Map16 browser", self.mark_exit_tiles) {
                 self.mark_exit_tiles = !self.mark_exit_tiles;
             }
             if tbtn(ui, icon::TREND_UP, "Tile surface outlines (F10)", self.show_surface_outlines) {

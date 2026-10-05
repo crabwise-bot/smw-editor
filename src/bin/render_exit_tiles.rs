@@ -1,7 +1,8 @@
 // Headless screenshot for the "Mark exit-enabled tiles" (Lunar Magic
-// v3.31) view option: renders a real-ROM level and paints the same green
-// markers the editor overlay draws, computed from the WRAM block maps plus
-// the acts-like table through smwe_rom::block_behavior::is_exit_enabled.
+// v3.31; pink markers per v3.70) view option: renders a real-ROM level and
+// paints the same pink markers the editor overlay draws, computed from the
+// WRAM block maps plus the acts-like table through
+// smwe_rom::block_behavior::is_exit_enabled.
 //   --rom=PATH --level=0x105 --out=docs/screenshots/exit-enabled-tiles.png
 // If --level is omitted, the first level (0x000..=0x1FF) with at least 10
 // exit-enabled tiles is picked automatically.
@@ -135,8 +136,8 @@ fn main() -> anyhow::Result<()> {
     render_layer(&mut cpu, true, g.width, &mut pixels);
 
     for &(tx, ty) in &marked {
-        fill_rect_raw(&mut pixels, g.width, tx * 16, ty * 16, 16, 16, [70, 220, 110, 70]);
-        stroke_rect(&mut pixels, g.width, tx * 16, ty * 16, 16, 16, [70, 220, 110], 2);
+        fill_rect_raw(&mut pixels, g.width, tx * 16, ty * 16, 16, 16, [255, 110, 180, 70]);
+        stroke_rect(&mut pixels, g.width, tx * 16, ty * 16, 16, 16, [255, 110, 180], 2);
     }
 
     // ── Crop around the marked region ──

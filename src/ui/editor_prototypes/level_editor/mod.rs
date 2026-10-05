@@ -134,7 +134,7 @@ pub struct UiLevelEditor {
     show_object_overlay:   bool,
     show_sprite_overlay:   bool,
     show_object_labels:    bool,
-    mark_exit_tiles:       bool, // LM v3.31 view option: mark exit-enabled tiles
+    mark_exit_tiles:       bool, // LM v3.31 view option: mark exit-enabled tiles (v3.70: also shown in the Map16 browser grid)
     show_surface_outlines: bool, // LM v3.00/v3.70 view option: tile surface outlines
     special_world_passed:  bool, // LM v1.10 view option: Special World Passed
     selected_tile:         Option<(u32, u32)>,
