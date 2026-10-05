@@ -483,6 +483,13 @@ pub struct UiWorldEditor {
     /// Pending jump-to-event for the dialog's checklist, set when the current
     /// event spinner changes; consumed by `events_passed_window`.
     events_passed_scroll_to:   Option<usize>,
+    /// "Special World Passed" view (Lunar Magic v1.10 View-menu item):
+    /// preview flag. When set, the game's beaten-Special-World bits are
+    /// written to WRAM before `load_overworld` runs, so the real
+    /// `CODE_00AD25` / `UploadGFXFile` code produces the autumn overworld
+    /// palettes and post-Special-World koopa graphics exactly as the game
+    /// does. Preview-only — nothing is ever written to the ROM.
+    special_world_passed:      bool,
 
     /// Per-tile (index into `layer1_tiles`) level-number overrides. Absent
     /// entries use the vanilla scan-order-derived level number unchanged.
@@ -728,6 +735,7 @@ impl UiWorldEditor {
             show_change_events_passed: false,
             preview_current_event: 0,
             events_passed_scroll_to: None,
+            special_world_passed: false,
             custom_level_numbers: HashMap::new(),
             level_numbers_dirty: false,
             ow_sprite_tool: false,
@@ -774,8 +782,12 @@ impl UiWorldEditor {
 
     fn load_submap(&mut self) {
         apply_active_events_to_wram(&mut self.cpu, &self.active_events);
+        // "Special World Passed" view (LM v1.10): set the game's beaten-
+        // Special-World bits before the init routines run, so the real
+        // CODE_00AD25 / UploadGFXFile code produces the autumn palettes and
+        // post-Special-World koopa graphics exactly as the game does.
+        smwe_emu::emu::special_world::set_special_world_passed(&mut self.cpu, self.special_world_passed);
         smwe_emu::emu::load_overworld(&mut self.cpu, self.submap);
-
         let mut r = self.renderer.lock().expect("Cannot lock overworld renderer");
         r.upload_palette(&self.gl, &self.cpu.mem.cgram);
         r.upload_gfx(&self.gl, &self.cpu.mem.vram);
@@ -820,6 +832,28 @@ impl UiWorldEditor {
         // With an unedited list it reproduces the emulated result exactly.
         self.refresh_event_preview();
     }
+
+    /// "Special World Passed" view (LM v1.10) toggle: set the game's beaten-
+    /// Special-World bits and re-render through the real game code without
+    /// disturbing unsaved edits. Only VRAM's sprite-GFX region and CGRAM can
+    /// change (the overworld tilemap, event preview, and all edit state are
+    /// untouched), so this re-runs just `UploadSpriteGFX` + `CODE_00AD25`
+    /// and re-uploads palettes/graphics to the renderer.
+    fn refresh_special_world_view(&mut self) {
+        smwe_emu::emu::special_world::set_special_world_passed(&mut self.cpu, self.special_world_passed);
+        smwe_emu::emu::special_world::refresh_overworld_special_world(&mut self.cpu);
+
+        let r = self.renderer.lock().expect("Cannot lock overworld renderer");
+        r.upload_palette(&self.gl, &self.cpu.mem.cgram);
+        r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+        drop(r);
+
+        self.tile_picker.rebuild(&self.cpu.mem.vram, &self.cpu.mem.cgram, VRAM_L1_TILEMAP_BASE, VRAM_L2_TILEMAP_BASE);
+        self.l1_tile_picker.rebuild(&mut self.cpu);
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
+        self.exanim_vram_gen += 1;
+        self.exanim_dialog.reset_atlas();
+    }
 }
 
 impl DockableEditorTool for UiWorldEditor {
@@ -835,6 +869,11 @@ impl DockableEditorTool for UiWorldEditor {
             ui.horizontal(|ui| {
                 if ui.button("Change Events Passed…").clicked() {
                     self.show_change_events_passed = true;
+                }
+                // LM v1.10 View-menu item: preview the overworld as it looks
+                // after Special World is beaten (autumn palettes + koopa GFX).
+                if ui.checkbox(&mut self.special_world_passed, "Special World Passed").changed() {
+                    self.refresh_special_world_view();
                 }
             });
         });
