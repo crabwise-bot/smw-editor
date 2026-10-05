@@ -213,6 +213,19 @@ impl UiLevelEditor {
             {
                 self.show_gfx_bypass = !self.show_gfx_bypass;
             }
+            // Lunar Magic v1.70 parity: "Change Music & Time Limit Settings"
+            // bypass. The button lights up while the current level has a
+            // bypass enabled, even when the dialog is closed.
+            let mtb_active =
+                self.show_music_time_bypass || self.music_bypass_data.get(self.level_num).is_some();
+            if tbtn(
+                ui,
+                icon::MUSIC_NOTES,
+                "Change Music & Time Limit Settings (per-level header music/time override)",
+                mtb_active,
+            ) {
+                self.show_music_time_bypass = !self.show_music_time_bypass;
+            }
             if tbtn(
                 ui,
                 icon::STACK,

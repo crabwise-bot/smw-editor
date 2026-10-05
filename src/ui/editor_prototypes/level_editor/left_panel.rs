@@ -655,6 +655,23 @@ impl UiLevelEditor {
                 }
                 ui.end_row();
                 row_slider!("Timer:", p.timer, 0..=3_i32);
+                // Music & time-limit bypass (LM v1.70): when the current
+                // level has a bypass, say what it overrides so the header
+                // rows can't be misread as the effective settings.
+                if self.music_bypass_data.get(self.level_num).is_some() {
+                    ui.label("Bypass:");
+                    if ui
+                        .small_button(format!(
+                            "Music/time overridden → {}",
+                            self.music_bypass_data.effective_music_label(self.level_num, p.music)
+                        ))
+                        .on_hover_text("Open the \"Change Music & Time Limit Settings\" dialog")
+                        .clicked()
+                    {
+                        self.show_music_time_bypass = true;
+                    }
+                    ui.end_row();
+                }
                 row_slider_hex!("BG Palette:", p.palette_bg, 0..=7_i32, 1);
                 row_slider_hex!("FG Palette:", p.palette_fg, 0..=7_i32, 1);
                 row_slider_hex!("Sprite Palette:", p.palette_sprite, 0..=7_i32, 1);

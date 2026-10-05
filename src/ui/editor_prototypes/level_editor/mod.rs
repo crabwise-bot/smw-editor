@@ -14,6 +14,7 @@ mod gfx_editor;
 mod gfx_slot_browser;
 mod layer3_settings;
 mod message_editor;
+mod music_time_bypass;
 
 mod left_panel;
 mod level_renderer;
@@ -374,6 +375,21 @@ pub struct UiLevelEditor {
     exgfx_insert_pending: Option<(Vec<u8>, u16)>,
     exgfx_manager_status: Option<String>,
 
+    // Music & time-limit bypass (LM v1.70/v3.32/v3.70 parity): per-level
+    // header-music/time overrides in the editor-native SMWMUSBP RATS block.
+    // The in-memory copy is authoritative during the session and is written
+    // back to ROM by `save_to_rom` when dirty.
+    music_bypass_data:       smwe_rom::music_bypass::MusicBypassData,
+    music_bypass_dirty:      bool,
+    show_music_time_bypass:  bool,
+    /// "Change Music & Time Limit Settings" dialog working copy for the
+    /// current level.
+    music_bypass_edit:       music_time_bypass::MusicTimeBypassEdit,
+    /// Level `music_bypass_edit` was synced from; resync when it differs.
+    music_bypass_edit_level: u16,
+    /// Last dialog input error, shown until a field changes or Apply succeeds.
+    music_bypass_error:      Option<String>,
+
     // 8x8 tile (pixel) editor: staged per-file working copies of the decoded
     // tiles (applied to the ROM on save via `gfx_edits`), plus the pixel
     // editor's working state.
@@ -623,6 +639,7 @@ impl UiLevelEditor {
         // Clone before `rom` moves into the struct literal below.
         let exgfx_data = rom.exgfx.clone();
         let bypass_data = rom.gfx_bypass.clone();
+        let music_bypass_data = rom.music_bypass.clone();
         let custom_palettes = rom.custom_palettes.clone();
 
         let mut editor = Self {
@@ -758,6 +775,12 @@ impl UiLevelEditor {
             bypass_edit_level: 0xFFFF,
             exgfx_insert_pending: None,
             exgfx_manager_status: None,
+            music_bypass_data,
+            music_bypass_dirty: false,
+            show_music_time_bypass: false,
+            music_bypass_edit: music_time_bypass::MusicTimeBypassEdit::from_stored(None),
+            music_bypass_edit_level: 0xFFFF,
+            music_bypass_error: None,
             show_tile_editor: false,
             tile_editor_file_num: 0,
             tile_editor_palette: 0,
@@ -951,6 +974,7 @@ impl DockableEditorTool for UiLevelEditor {
         self.tile_editor_window(&ctx);
         self.exgfx_manager_window(&ctx);
         self.gfx_bypass_window(&ctx);
+        self.music_time_bypass_window(&ctx);
         self.message_editor_window(&ctx);
         self.boss_text_editor_window(&ctx);
         if self.show_exanimation_editor {
@@ -1562,6 +1586,30 @@ impl DockableEditorTool for UiLevelEditor {
             self.bypass_data.write_to_rom(rom_bytes, header_offset).context("Super GFX Bypass save")?;
         }
 
+        // ── Music & time-limit bypass (LM v1.70 parity) ── Merge the
+        // session-authoritative working copy into the editor-native RATS
+        // block, so another tab's entries survive: re-parse the block as
+        // written so far, overlay this tab's levels, clear levels whose
+        // bypass was emptied, and write back.
+        if self.music_bypass_dirty {
+            use smwe_rom::music_bypass::{MusicBypassData, MusicBypassError};
+            let mut merged = match MusicBypassData::parse(rom_bytes) {
+                Ok(data) => data,
+                Err(MusicBypassError::NotFound) => MusicBypassData::default(),
+                Err(e) => return Err(anyhow::anyhow!("Music/time bypass: {e}")),
+            };
+            let map_err = |e: MusicBypassError| anyhow::anyhow!("Music/time bypass: {e}");
+            for level in merged.levels.keys().copied().collect::<Vec<_>>() {
+                if self.music_bypass_data.get(level).is_none() {
+                    merged.levels.remove(&level);
+                }
+            }
+            for (level, bypass) in self.music_bypass_data.levels.iter() {
+                merged.set(*level, *bypass).map_err(&map_err)?;
+            }
+            merged.write_to_rom(rom_bytes, header_offset).map_err(map_err)?;
+        }
+
         // ── Message box text (global, $05A5D9 blob + $05A5A7 pointer table) ──
         if self.message_boxes_dirty {
             let (blob, pointers) = self.message_boxes.to_blob_and_pointers()?;
@@ -2129,6 +2177,11 @@ impl UiLevelEditor {
         // (bit-exact); ExGFX files are memcpied. Everything downstream
         // (renderer upload, tile picker rebuild) then sees the bypassed GFX.
         self.apply_bypass_to_vram();
+        // Music & time-limit bypass (LM v1.70 parity): mirror LM's bypass ASM
+        // at level load — the time override is written to the emulated
+        // InGameTimerHundreds/Tens/Ones the same way CODE_0584E3 writes them
+        // from the header TimerTable.
+        self.apply_music_time_bypass_to_wram();
 
         // Snapshot the vanilla layer-1 block map before any DM16 stamping,
         // so rerasterization can always restore tiles hidden under DM16.
