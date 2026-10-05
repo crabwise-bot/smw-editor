@@ -42,7 +42,7 @@ use crate::{
     ui::{
         dev_utils::address_converter::UiAddressConverter,
         editor_prototypes::{level_editor::UiLevelEditor, sprite_map_editor::UiSpriteMapEditor},
-        restore::RestoreManager,
+        restore::{format_byte_size, RestoreManager},
         tab_viewer::EditorToolTabViewer,
         tool::DockableEditorTool,
         user_toolbar::{ToolbarAction, UserToolbarState},
@@ -51,117 +51,128 @@ use crate::{
 };
 
 pub struct UiMainWindow {
-    gl:                        Arc<glow::Context>,
-    dock_style:                DockStyle,
-    dock_state:                DockState<Box<dyn DockableEditorTool>>,
+    gl:                          Arc<glow::Context>,
+    dock_style:                  DockStyle,
+    dock_state:                  DockState<Box<dyn DockableEditorTool>>,
     /// Path of the currently-open ROM (for Save).
-    rom_path:                  Option<PathBuf>,
+    rom_path:                    Option<PathBuf>,
     /// Set when a Save error needs to be shown.
-    save_error:                Option<String>,
+    save_error:                  Option<String>,
     /// In-egui file dialog for Open ROM.
-    open_dialog:               FileDialog,
+    open_dialog:                 FileDialog,
     /// In-egui file dialog for Save As.
-    save_as_dialog:            FileDialog,
+    save_as_dialog:              FileDialog,
     /// In-egui file dialog for BPS patch export.
-    bps_export_dialog:         FileDialog,
+    bps_export_dialog:           FileDialog,
     /// In-egui file dialog for IPS patch export.
-    ips_export_dialog:         FileDialog,
+    ips_export_dialog:           FileDialog,
     /// Expand-ROM dialog (File > Expand ROM...).
-    show_expand_dialog:        bool,
+    show_expand_dialog:          bool,
     /// Selected expansion target size in bytes.
-    expand_target:             usize,
+    expand_target:               usize,
     /// Status line shown in the Expand-ROM dialog.
-    expand_status:             Option<String>,
+    expand_status:               Option<String>,
     /// In-egui file dialog for single-level PNG export (File > Export Level to PNG...).
-    png_export_dialog:         FileDialog,
+    png_export_dialog:           FileDialog,
     /// Translevel chosen for the pending single-level PNG export.
-    png_export_level:          Option<u16>,
+    png_export_level:            Option<u16>,
     /// Status line for the last single-level PNG export.
-    png_export_status:         Option<String>,
+    png_export_status:           Option<String>,
     /// Batch level-export dialog (File > Levels > Export Multiple Levels to Image Files...).
-    show_batch_export_dialog:  bool,
+    show_batch_export_dialog:    bool,
     /// In-egui directory picker for the batch export output folder.
-    batch_export_dir_dialog:   FileDialog,
+    batch_export_dir_dialog:     FileDialog,
     /// Hex strings for the batch export range (inclusive), e.g. "000"–"1FF".
-    batch_from:                String,
-    batch_to:                  String,
+    batch_from:                  String,
+    batch_to:                    String,
     /// Batch export output folder.
-    batch_out_dir:             Option<PathBuf>,
+    batch_out_dir:               Option<PathBuf>,
     /// Batch export layer toggles (mirror the single-level options).
-    batch_include_l1:          bool,
-    batch_include_l2:          bool,
-    batch_include_sprites:     bool,
+    batch_include_l1:            bool,
+    batch_include_l2:            bool,
+    batch_include_sprites:       bool,
     /// Status line shown in the batch-export dialog.
-    batch_status:              Option<String>,
+    batch_status:                Option<String>,
     /// Delete-levels dialog (File > Levels > Delete Levels from ROM..., LM v3.50 parity).
-    show_delete_levels_dialog: bool,
+    show_delete_levels_dialog:   bool,
     /// Per-level checkbox state for the delete dialog (index = level number).
-    delete_levels_selected:    Vec<bool>,
+    delete_levels_selected:      Vec<bool>,
     /// Per-level "modified vs ROM-as-opened" flags, refreshed when the dialog opens.
-    delete_levels_modified:    Vec<bool>,
+    delete_levels_modified:      Vec<bool>,
     /// Per-level gameplay-critical flags (title/demo + overworld-placed),
     /// refreshed when the dialog opens; selecting any shows a warning.
-    delete_levels_critical:    Vec<bool>,
+    delete_levels_critical:      Vec<bool>,
     /// Levels awaiting delete confirmation.
-    delete_levels_pending:     Option<Vec<u16>>,
+    delete_levels_pending:       Option<Vec<u16>>,
     /// Status line shown in the delete-levels dialog.
-    delete_levels_status:      Option<String>,
+    delete_levels_status:        Option<String>,
     /// Open-Level-from-Address dialog (File > Open Level from Address...,
     /// LM v1.11 parity).
-    show_level_addr_dialog:    bool,
+    show_level_addr_dialog:      bool,
     /// Hex text of the PC address field in the from-address dialog.
-    level_addr_text:           String,
+    level_addr_text:             String,
     /// Generic dialog error toast (title "Error").
-    dialog_error:              Option<String>,
+    dialog_error:                Option<String>,
     /// Share-data dialog (File > Levels > Share Data Between Levels to Save Space...).
-    show_share_data_dialog:    bool,
+    show_share_data_dialog:      bool,
     /// Status line shown in the share-data dialog.
-    share_data_status:         Option<String>,
+    share_data_status:           Option<String>,
     /// Exit-scan dialog (Tools > Scan for Undefined Exits..., LM v1.50/v1.60
     /// parity). The scan runs on a worker thread; this owns its state.
-    show_exit_scan_dialog:     bool,
-    exit_scan:                 exit_scan_dialog::ExitScanUi,
+    show_exit_scan_dialog:       bool,
+    exit_scan:                   exit_scan_dialog::ExitScanUi,
     /// Resource-analysis dialog (Tools > Analyze Resources in Levels...,
     /// LM v3.03/v3.20 parity). The scan runs on a worker thread; this owns
     /// its state.
-    show_resource_scan_dialog: bool,
-    resource_scan:             resource_scan_dialog::ResourceScanUi,
+    show_resource_scan_dialog:   bool,
+    resource_scan:               resource_scan_dialog::ResourceScanUi,
     /// Set when user tries to close the app with unsaved changes
-    show_exit_dialog:          bool,
+    show_exit_dialog:            bool,
     /// Restore points + original-ROM reference copy (Restore menu, LM v1.80).
-    restore_manager:           RestoreManager,
+    restore_manager:             RestoreManager,
     /// In-egui file dialog for Apply IPS Patch.
-    ips_apply_dialog:          FileDialog,
+    ips_apply_dialog:            FileDialog,
     /// "Create Restore Point" dialog state.
-    show_restore_dialog:       bool,
+    show_restore_dialog:         bool,
     /// Name typed into the "Create Restore Point" dialog.
-    restore_point_name:        String,
+    restore_point_name:          String,
     /// Restore-point index awaiting revert confirmation.
-    pending_revert:            Option<usize>,
+    pending_revert:              Option<usize>,
     /// IPS patch path + preview awaiting apply confirmation.
-    pending_ips_apply:         Option<PendingIpsApply>,
+    pending_ips_apply:           Option<PendingIpsApply>,
     /// IPS export destination awaiting same-directory-warning confirmation.
-    pending_ips_export:        Option<PathBuf>,
+    pending_ips_export:          Option<PathBuf>,
     /// Status line for restore/IPS actions (shown in the Restore menu area).
-    restore_status:            Option<String>,
+    restore_status:              Option<String>,
     /// Lunar Magic-style custom user toolbar (LM v2.31+): second toolbar
     /// strip built from `usertoolbar.txt`, with external scripting buttons,
     /// internal `LM_…` commands, and keyboard shortcuts.
-    user_toolbar:              UserToolbarState,
+    user_toolbar:                UserToolbarState,
     /// Lunar Magic v1.91 "Check Object Placement on Save" (Options menu).
     /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
-    check_placement_on_save:   bool,
+    check_placement_on_save:     bool,
     /// Lunar Magic v3.40 "More ExAnimation Checks" (Options menu). When on,
     /// the shared "ExAnimated Frames" dialog warns about destinations set
     /// to disabled slots and duplicate one-shot trigger numbers.
     /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
-    more_exanimation_checks:   bool,
+    more_exanimation_checks:     bool,
+    /// Lunar Magic v3.40 "compress new restore points" (Options menu >
+    /// "Restore Point Options..."). When on, new restore points are
+    /// zstd-compressed in memory. Persisted per-user; on by default.
+    compress_restore_points:     bool,
+    /// Lunar Magic v3.70 "Do Incremental instead of Full Restores for
+    /// External Changes" (Options menu > "Restore Point Options..."). When
+    /// on, a new restore point stores only the 4 KiB blocks that changed vs
+    /// the previous point's image. Persisted per-user; on by default.
+    incremental_restore_points:  bool,
+    /// "Restore Point Options" dialog state (Options menu).
+    show_restore_options_dialog: bool,
     /// A save deferred by the placement-warning dialog, awaiting the user's
     /// answer ("Save anyway" resumes it; "Cancel" drops it).
-    pending_placement_warning: Option<PendingPlacementWarning>,
+    pending_placement_warning:   Option<PendingPlacementWarning>,
     /// One-shot: set when the user answered "Save anyway", consumed by the
     /// next save so the check does not immediately re-trigger the dialog.
-    placement_save_confirmed:  bool,
+    placement_save_confirmed:    bool,
 }
 
 /// A save deferred by the LM v1.91 placement-warning dialog.
@@ -240,7 +251,15 @@ impl UiMainWindow {
             show_resource_scan_dialog: false,
             resource_scan: resource_scan_dialog::ResourceScanUi::new(),
             show_exit_dialog: false,
-            restore_manager: RestoreManager::new(),
+            restore_manager: {
+                // The restore-point storage options live in the per-user
+                // store; the manager applies them to every new point.
+                let options = EditorOptions::load();
+                let mut manager = RestoreManager::new();
+                manager.compress_new_points = options.restore_compress_points;
+                manager.incremental_new_points = options.restore_incremental_points;
+                manager
+            },
             ips_apply_dialog: FileDialog::new(),
             show_restore_dialog: false,
             restore_point_name: String::new(),
@@ -251,6 +270,9 @@ impl UiMainWindow {
             user_toolbar: UserToolbarState::load(),
             check_placement_on_save: EditorOptions::load().check_placement_on_save,
             more_exanimation_checks: EditorOptions::load().more_exanimation_checks,
+            compress_restore_points: EditorOptions::load().restore_compress_points,
+            incremental_restore_points: EditorOptions::load().restore_incremental_points,
+            show_restore_options_dialog: false,
             pending_placement_warning: None,
             placement_save_confirmed: false,
         }
@@ -361,6 +383,9 @@ impl eframe::App for UiMainWindow {
 
         // Create Restore Point dialog (Restore menu).
         self.show_restore_point_dialog(ctx);
+
+        // Restore Point Options dialog (Options menu, LM v3.40/v3.70).
+        self.show_restore_point_options_dialog(ctx);
 
         // Revert-to-restore-point confirmation (Restore menu).
         self.show_revert_confirm_dialog(ctx);
@@ -568,8 +593,10 @@ impl UiMainWindow {
     /// Persist the Options-menu toggles to the per-user store.
     fn save_editor_options(&self) {
         EditorOptions {
-            check_placement_on_save: self.check_placement_on_save,
-            more_exanimation_checks: self.more_exanimation_checks,
+            check_placement_on_save:    self.check_placement_on_save,
+            more_exanimation_checks:    self.more_exanimation_checks,
+            restore_compress_points:    self.compress_restore_points,
+            restore_incremental_points: self.incremental_restore_points,
         }
         .save();
     }
@@ -1448,6 +1475,72 @@ impl UiMainWindow {
         }
     }
 
+    /// "Restore Point Options..." dialog (Options menu; LM v3.40/v3.70
+    /// parity, help topic "Options Menu : Restore Point Options"). The two
+    /// checkboxes are persisted per-user and apply to new points; the table
+    /// below shows each stored point's real in-memory size vs its raw size.
+    fn show_restore_point_options_dialog(&mut self, ctx: &Context) {
+        if !self.show_restore_options_dialog {
+            return;
+        }
+        let mut open = true;
+        let mut close_requested = false;
+        Window::new("Restore Point Options").open(&mut open).resizable(false).show(ctx, |ui| {
+            if ui
+                .checkbox(&mut self.compress_restore_points, "Compress new restore points")
+                .on_hover_text(
+                    "Lunar Magic v3.40 (on by default): zstd-compress each new restore point in memory. \
+                     Points stored before this option existed still decode.",
+                )
+                .changed()
+            {
+                self.restore_manager.compress_new_points = self.compress_restore_points;
+                self.save_editor_options();
+            }
+            if ui
+                .checkbox(
+                    &mut self.incremental_restore_points,
+                    "Do incremental instead of full restores for external changes",
+                )
+                .on_hover_text(
+                    "Lunar Magic v3.70 (on by default): a new restore point stores only the 4 KiB blocks \
+                     that changed vs the previous point's image instead of a full image. LM scopes this \
+                     to external changes against a restore file; smw-editor keeps points in memory with no \
+                     external-change detection, so deltas apply to new points generally. Deleting a point \
+                     that a later point's delta was based on stores that point as a full image instead.",
+                )
+                .changed()
+            {
+                self.restore_manager.incremental_new_points = self.incremental_restore_points;
+                self.save_editor_options();
+            }
+            ui.separator();
+            // Real numbers: one row per stored point plus totals.
+            let rows: Vec<(String, String)> =
+                self.restore_manager.points().iter().map(|p| (p.name.clone(), p.size_summary())).collect();
+            let stored = self.restore_manager.total_stored_bytes();
+            let raw = self.restore_manager.total_raw_bytes();
+            ui.label(format!(
+                "{} point(s) stored: {} in memory ({} uncompressed)",
+                rows.len(),
+                format_byte_size(stored),
+                format_byte_size(raw)
+            ));
+            for (name, sizes) in rows {
+                ui.label(format!("• {name}: {sizes}"));
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Close").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+        if !open || close_requested {
+            self.show_restore_options_dialog = false;
+        }
+    }
+
     /// "Revert to Restore Point" confirmation dialog.
     fn show_revert_confirm_dialog(&mut self, ctx: &Context) {
         let Some(index) = self.pending_revert else { return };
@@ -1490,7 +1583,7 @@ impl UiMainWindow {
     }
 
     fn perform_revert(&mut self, ctx: &Context, index: usize, name: &str) {
-        let Some(bytes) = self.restore_manager.revert_bytes(index).map(<[u8]>::to_vec) else {
+        let Some(bytes) = self.restore_manager.revert_bytes(index) else {
             self.save_error = Some("Restore point no longer exists.".to_string());
             return;
         };
@@ -1764,16 +1857,23 @@ impl UiMainWindow {
                         ui.add_enabled_ui(point_count > 0, |ui| {
                             // Collect summaries first: the submenu closure borrows
                             // `self` mutably when a revert is picked.
-                            let summaries: Vec<(usize, String, String)> = self
+                            let summaries: Vec<(usize, String, String, String)> = self
                                 .restore_manager
                                 .points()
                                 .iter()
                                 .enumerate()
-                                .map(|(i, p)| (i, p.name.clone(), p.stamp()))
+                                .map(|(i, p)| (i, p.name.clone(), p.stamp(), p.size_summary()))
                                 .collect();
                             ui.menu_button("Revert to Restore Point", |ui| {
-                                for (i, name, stamp) in summaries {
-                                    if ui.button(format!("{name}  ({stamp})")).clicked() {
+                                for (i, name, stamp, sizes) in summaries {
+                                    if ui
+                                        .button(format!("{name}  ({stamp})  [{sizes}]"))
+                                        .on_hover_text(
+                                            "Stored size / raw image size. Deltas and compressed points \
+                                             are reconstructed transparently on revert.",
+                                        )
+                                        .clicked()
+                                    {
                                         self.pending_revert = Some(i);
                                         ui.close_menu();
                                     }
@@ -1872,6 +1972,18 @@ impl UiMainWindow {
                         .changed()
                     {
                         self.save_editor_options();
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Restore Point Options...")
+                        .on_hover_text(
+                            "Lunar Magic v3.40/v3.70: compress new restore points and store \
+                             incremental (delta) points instead of full images. Both are on by default.",
+                        )
+                        .clicked()
+                    {
+                        self.show_restore_options_dialog = true;
+                        ui.close_menu();
                     }
                 });
 

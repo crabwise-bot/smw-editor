@@ -1,5 +1,6 @@
 //! Per-user editor options (Lunar Magic v1.91 "Check Object Placement on
-//! Save", v3.40 "More ExAnimation Checks").
+//! Save", v3.40 "More ExAnimation Checks", v3.40/v3.70 "Restore Point
+//! Options").
 //!
 //! Stored in `$HOME/.smw-editor-options.json` — the same per-user convention
 //! as the recent-files list and the custom-tooltips store. These are editor
@@ -18,18 +19,32 @@ pub struct EditorOptions {
     /// Lunar Magic v1.91 "Check Object Placement on Save" (Options menu).
     /// When on, saving to the ROM warns about objects and sprites placed
     /// outside the level boundaries.
-    pub check_placement_on_save: bool,
+    pub check_placement_on_save:    bool,
     /// Lunar Magic v3.40 "More ExAnimation Checks" (Options menu). When on,
     /// the shared "ExAnimated Frames" dialog warns about ExAnimation
     /// destinations set to disabled slots and duplicate one-shot trigger
     /// numbers. LM ships this checked; unchecking disables the warnings.
-    pub more_exanimation_checks: bool,
+    pub more_exanimation_checks:    bool,
+    /// Lunar Magic v3.40 "compress new restore points" (Options menu >
+    /// "Restore Point Options..."). When on, new restore points are
+    /// zstd-compressed in memory. LM ships this checked.
+    pub restore_compress_points:    bool,
+    /// Lunar Magic v3.70 "Do Incremental instead of Full Restores for
+    /// External Changes" (Options menu > "Restore Point Options..."). When
+    /// on, a new restore point stores only the 4 KiB blocks that changed vs
+    /// the previous point's image. LM ships this checked.
+    pub restore_incremental_points: bool,
 }
 
 impl Default for EditorOptions {
     fn default() -> Self {
-        // LM ships both options' defaults this way; the user opts in/out.
-        EditorOptions { check_placement_on_save: false, more_exanimation_checks: true }
+        // LM ships every one of these options' defaults this way.
+        EditorOptions {
+            check_placement_on_save:    false,
+            more_exanimation_checks:    true,
+            restore_compress_points:    true,
+            restore_incremental_points: true,
+        }
     }
 }
 
@@ -58,29 +73,41 @@ impl EditorOptions {
         #[derive(serde::Deserialize, Default)]
         struct StoreFile {
             #[serde(default)]
-            check_placement_on_save: bool,
+            check_placement_on_save:    bool,
             // `serde(default)` keeps old files (written before this field
             // existed) loading as the default (true).
             #[serde(default = "default_more_exanimation_checks")]
-            more_exanimation_checks: bool,
+            more_exanimation_checks:    bool,
+            // Same story: files written before the restore-point options
+            // existed load with both on, matching LM's defaults.
+            #[serde(default = "default_restore_compress_points")]
+            restore_compress_points:    bool,
+            #[serde(default = "default_restore_incremental_points")]
+            restore_incremental_points: bool,
         }
         let Ok(data) = std::fs::read_to_string(path) else { return Self::default() };
         let Ok(file) = serde_json::from_str::<StoreFile>(&data) else { return Self::default() };
         EditorOptions {
-            check_placement_on_save: file.check_placement_on_save,
-            more_exanimation_checks: file.more_exanimation_checks,
+            check_placement_on_save:    file.check_placement_on_save,
+            more_exanimation_checks:    file.more_exanimation_checks,
+            restore_compress_points:    file.restore_compress_points,
+            restore_incremental_points: file.restore_incremental_points,
         }
     }
 
     fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         #[derive(serde::Serialize)]
         struct StoreFile {
-            check_placement_on_save: bool,
-            more_exanimation_checks: bool,
+            check_placement_on_save:    bool,
+            more_exanimation_checks:    bool,
+            restore_compress_points:    bool,
+            restore_incremental_points: bool,
         }
         let file = StoreFile {
-            check_placement_on_save: self.check_placement_on_save,
-            more_exanimation_checks: self.more_exanimation_checks,
+            check_placement_on_save:    self.check_placement_on_save,
+            more_exanimation_checks:    self.more_exanimation_checks,
+            restore_compress_points:    self.restore_compress_points,
+            restore_incremental_points: self.restore_incremental_points,
         };
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
@@ -89,6 +116,16 @@ impl EditorOptions {
 
 /// The default for files written before the field existed.
 fn default_more_exanimation_checks() -> bool {
+    true
+}
+
+/// The default for files written before the field existed (LM v3.40 ships it on).
+fn default_restore_compress_points() -> bool {
+    true
+}
+
+/// The default for files written before the field existed (LM v3.70 ships it on).
+fn default_restore_incremental_points() -> bool {
     true
 }
 
@@ -101,11 +138,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("smwe-opt-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("options.json");
-        let opts = EditorOptions { check_placement_on_save: true, more_exanimation_checks: false };
+        let opts = EditorOptions {
+            check_placement_on_save:    true,
+            more_exanimation_checks:    false,
+            restore_compress_points:    false,
+            restore_incremental_points: false,
+        };
         opts.save_to(&path).unwrap();
         let back = EditorOptions::load_from(&path);
         assert!(back.check_placement_on_save);
         assert!(!back.more_exanimation_checks);
+        assert!(!back.restore_compress_points);
+        assert!(!back.restore_incremental_points);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -118,6 +162,8 @@ mod tests {
         let back = EditorOptions::load_from(&path);
         assert!(!back.check_placement_on_save);
         assert!(back.more_exanimation_checks);
+        assert!(back.restore_compress_points);
+        assert!(back.restore_incremental_points);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -132,6 +178,22 @@ mod tests {
         let back = EditorOptions::load_from(&path);
         assert!(back.check_placement_on_save);
         assert!(back.more_exanimation_checks);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_file_without_restore_options_loads_both_on() {
+        // A file written before the restore-point options existed must load
+        // with both on, matching LM's defaults (v3.40/v3.70 ship them on).
+        let dir = std::env::temp_dir().join(format!("smwe-opt-test-oldrp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("options.json");
+        std::fs::write(&path, "{\"check_placement_on_save\": false, \"more_exanimation_checks\": true}").unwrap();
+        let back = EditorOptions::load_from(&path);
+        assert!(!back.check_placement_on_save);
+        assert!(back.more_exanimation_checks);
+        assert!(back.restore_compress_points);
+        assert!(back.restore_incremental_points);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
