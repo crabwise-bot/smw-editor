@@ -1,25 +1,29 @@
 //! Headless mock screenshots of the Restore menu (LM v1.80 parity):
-//! restore points, revert flow, and apply-IPS.
+//! restore points, revert flow, and apply-IPS — plus the LM v3.40/v3.70
+//! "Restore Point Options" dialog.
 //!
 //! egui can't render headless, so these compose honest mocks of the menu and
 //! dialogs: every piece of *data* shown is real — the restore-point names and
 //! stamps come from a real `RestoreManager` populated with snapshots of the
-//! real ROM, and the Apply-IPS dialog shows a real IPS patch
+//! real ROM, the Apply-IPS dialog shows a real IPS patch
 //! (`smwe-ips::create_patch` over bytes actually changed in the ROM image)
-//! with its true changed-byte count and size delta. Only the window/menu
-//! chrome is drawn rather than real egui widgets.
+//! with its true changed-byte count and size delta, and the options dialog
+//! shows this machine's real saved options plus the real stored/raw size of
+//! each point. Only the window/menu chrome is drawn rather than real egui
+//! widgets.
 //!
 //! ```sh
 //! cargo run --bin render_restore -- --rom=smw.smc
 //! ```
-//! Writes `docs/screenshots/restore-menu.png` and
-//! `docs/screenshots/apply-ips.png`.
+//! Writes `docs/screenshots/restore-menu.png`, `docs/screenshots/apply-ips.png`
+//! and `docs/screenshots/restore-point-options.png`.
 
 use ab_glyph::{Font, FontRef, Glyph, Point, PxScale, ScaleFont};
 use image::{Rgb, RgbImage};
 use smw_editor::{
+    editor_options::EditorOptions,
     render_util::{fill_rect, rect_border},
-    ui::restore::RestoreManager,
+    ui::restore::{format_byte_size, RestoreManager},
 };
 
 const MONO_CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"];
@@ -92,28 +96,37 @@ fn title_bar(img: &mut RgbImage, fonts: &Fonts, title: &str, w: u32) {
 
 /// Build a real `RestoreManager` against a scratch copy of the ROM and take
 /// real snapshots of it, so the menu rows show genuine names/stamps/sizes.
+/// The manager's storage options come from this machine's real saved editor
+/// options (defaults: both on), so the stored sizes are what the user would
+/// actually see.
 fn sample_manager(rom_bytes: &[u8]) -> anyhow::Result<(RestoreManager, std::path::PathBuf)> {
     let scratch = std::env::temp_dir().join("render_restore_scratch.smc");
     std::fs::write(&scratch, rom_bytes)?;
     let mut mgr = RestoreManager::new();
+    let editor_opts = smw_editor::editor_options::EditorOptions::load();
+    mgr.compress_new_points = editor_opts.restore_compress_points;
+    mgr.incremental_new_points = editor_opts.restore_incremental_points;
     mgr.open_rom(&scratch);
     assert!(mgr.original().is_some(), "reference copy must be captured on open");
 
     // Simulate a session: two manual snapshots of actually-differing images.
-    let mut edited = rom_bytes.to_vec();
-    edited[0x200] ^= 0xFF;
-    edited[0x201] ^= 0xFF;
-    mgr.create_point("Before boss text edits".to_string(), edited.clone());
-    edited[0x300] ^= 0x0F;
-    mgr.create_point("Before expanding to 2MB".to_string(), edited);
+    let mut img0 = rom_bytes.to_vec();
+    img0[0x200] ^= 0xFF;
+    img0[0x201] ^= 0xFF;
+    mgr.create_point("Before boss text edits".to_string(), img0.clone());
+    let mut img1 = img0.clone();
+    img1[0x300] ^= 0x0F;
+    mgr.create_point("Before expanding to 2MB".to_string(), img1.clone());
 
     // One automatic pre-save point, as the tracking toggle would capture.
     mgr.auto_track_on_save = true;
     mgr.auto_point_before_save(rom_bytes.to_vec());
 
-    // Prove revert hands back the exact snapshot bytes.
-    let back = mgr.revert_bytes(0).expect("point 0 must exist");
-    assert_eq!(back[0x200], rom_bytes[0x200] ^ 0xFF, "revert must return snapshot bytes");
+    // Prove revert hands back the exact snapshot bytes for every point —
+    // compressed and delta points must reconstruct transparently.
+    assert_eq!(mgr.revert_bytes(0).as_deref(), Some(img0.as_slice()), "point 0 must revert exactly");
+    assert_eq!(mgr.revert_bytes(1).as_deref(), Some(img1.as_slice()), "point 1 must revert exactly");
+    assert_eq!(mgr.revert_bytes(2).as_deref(), Some(rom_bytes), "auto point must revert exactly");
     Ok((mgr, scratch))
 }
 
@@ -353,6 +366,109 @@ fn render_apply_ips(
     Ok(())
 }
 
+fn render_restore_point_options(
+    fonts: &Fonts, mgr: &RestoreManager, opts: &EditorOptions, out: &str,
+) -> anyhow::Result<()> {
+    let (w, h) = (1180u32, 880u32);
+    let mut img = RgbImage::new(w, h);
+    let bg = Rgb([0xF2, 0xF2, 0xF2]);
+    let gray = Rgb([0x66, 0x66, 0x66]);
+    let accent = Rgb([0x1A, 0x5A, 0x9A]);
+    for p in img.pixels_mut() {
+        *p = bg;
+    }
+    title_bar(
+        &mut img,
+        fonts,
+        "Restore Point Options — headless mock (checkboxes show this machine's saved options; every size is from a real RestoreManager over the real ROM)",
+        w,
+    );
+
+    // Dialog window.
+    let (dx, dy, dw, dh) = (190u32, 110u32, 800u32, 600u32);
+    fill_rect(&mut img, dx, dy, dw, dh, Rgb([0x2B, 0x2B, 0x2B]));
+    rect_border(&mut img, dx, dy, dw, dh, Rgb([0x77, 0x77, 0x77]));
+    let white = Rgb([0xFF, 0xFF, 0xFF]);
+    let dim = Rgb([0xBB, 0xBB, 0xBB]);
+    let mut y = dy + 24;
+    draw_text(&mut img, &fonts.sans_bold, "Restore Point Options", dx as i32 + 24, y as i32, 19.0, white);
+    y += 48;
+
+    // The two checkboxes, with their REAL saved states.
+    for (checked, label, note) in [
+        (opts.restore_compress_points, "Compress new restore points", "Lunar Magic v3.40 — on by default"),
+        (
+            opts.restore_incremental_points,
+            "Do incremental instead of full restores for external changes",
+            "Lunar Magic v3.70 — on by default",
+        ),
+    ] {
+        if checked {
+            fill_rect(&mut img, dx + 24, y, 18, 18, accent);
+            draw_text(&mut img, &fonts.sans_bold, "✓", dx as i32 + 28, (y - 2) as i32, 15.0, white);
+        } else {
+            rect_border(&mut img, dx + 24, y, 18, 18, Rgb([0x99, 0x99, 0x99]));
+        }
+        draw_text(&mut img, &fonts.sans, label, dx as i32 + 52, y as i32, 15.0, white);
+        y += 26;
+        draw_text(&mut img, &fonts.sans, note, dx as i32 + 52, y as i32, 13.0, dim);
+        y += 34;
+    }
+
+    // Real per-point numbers from the manager.
+    fill_rect(&mut img, dx + 24, y, dw - 48, 2, Rgb([0x55, 0x55, 0x55]));
+    y += 18;
+    draw_text(
+        &mut img,
+        &fonts.sans_bold,
+        &format!(
+            "{} point(s) stored: {} in memory ({} uncompressed)",
+            mgr.points().len(),
+            format_byte_size(mgr.total_stored_bytes()),
+            format_byte_size(mgr.total_raw_bytes())
+        ),
+        dx as i32 + 24,
+        y as i32,
+        15.0,
+        white,
+    );
+    y += 34;
+    for p in mgr.points() {
+        let auto = if p.automatic { " [auto]" } else { "" };
+        draw_text(
+            &mut img,
+            &fonts.mono,
+            &format!("• {}{}: {}", p.name, auto, p.size_summary()),
+            dx as i32 + 24,
+            y as i32,
+            14.0,
+            white,
+        );
+        y += 30;
+    }
+
+    // Close button.
+    fill_rect(&mut img, dx + 24, dy + dh - 64, 120, 40, accent);
+    draw_text(&mut img, &fonts.sans_bold, "Close", dx as i32 + 60, (dy + dh - 56) as i32, 16.0, white);
+
+    let mut fy = dy + dh + 36;
+    for line in [
+        "LM v3.70 scopes incremental restores to external changes against a restore file;",
+        "smw-editor keeps points in memory with no external-change detection, so each new",
+        "point stores the 4 KiB blocks that changed vs the previous point's image instead.",
+        "Deleting a point whose delta a later point was based on stores that point as a full",
+        "image, so every point always reverts to its exact bytes. Window chrome is drawn,",
+        "not real egui — the checkbox states and all sizes are real.",
+    ] {
+        draw_text(&mut img, &fonts.sans, line, 24, fy as i32, 14.0, gray);
+        fy += 26;
+    }
+
+    img.save(out)?;
+    println!("wrote {out} ({w}x{h})");
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let rom_path = args
@@ -377,5 +493,7 @@ fn main() -> anyhow::Result<()> {
 
     render_restore_menu(&fonts, &mgr, &format!("{out_dir}/restore-menu.png"))?;
     render_apply_ips(&fonts, &patch_name, changed, rom_bytes.len(), new_len, &format!("{out_dir}/apply-ips.png"))?;
+    let opts = EditorOptions::load();
+    render_restore_point_options(&fonts, &mgr, &opts, &format!("{out_dir}/restore-point-options.png"))?;
     Ok(())
 }
