@@ -203,11 +203,17 @@ pub struct UiLevelEditor {
     spawn_drag_before:  Option<SpawnPos>,
 
     // Unsaved changes tracking
-    show_unsaved_dialog: bool,
-    pending_level_num:   Option<u16>,
-    has_edits:           bool,
-    request_rom_save:    bool,
-    pending_close:       bool,
+    show_unsaved_dialog:    bool,
+    pending_level_num:      Option<u16>,
+    has_edits:              bool,
+    request_rom_save:       bool,
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" toolbar
+    /// button: set by the toolbar, consumed by the app via
+    /// `take_insert_all_gfx_request`.
+    request_insert_all_gfx: bool,
+    /// Status line from the last insert-all-GFX run, shown in the status bar.
+    insert_gfx_status:      Option<String>,
+    pending_close:          bool,
 
     // Editor windows
     show_level_header:        bool,
@@ -700,6 +706,8 @@ impl UiLevelEditor {
             pending_level_num: None,
             has_edits: false,
             request_rom_save: false,
+            request_insert_all_gfx: false,
+            insert_gfx_status: None,
             pending_close: false,
             show_level_header: false,
             show_secondary_entrances: false,
@@ -1920,6 +1928,53 @@ impl DockableEditorTool for UiLevelEditor {
 
     fn take_save_request(&mut self) -> bool {
         std::mem::take(&mut self.request_rom_save)
+    }
+
+    fn take_insert_all_gfx_request(&mut self) -> bool {
+        std::mem::take(&mut self.request_insert_all_gfx)
+    }
+
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload": the merged
+    /// `rom_bytes` already contain every staged GFX/ExGFX edit (written by
+    /// `save_to_rom`'s GFX sections during the app's merge). Swap the
+    /// emulator cart to the new image, force the game to re-upload every
+    /// graphics slot, re-apply the Super GFX Bypass overrides, and refresh
+    /// the renderer + tile pickers — the same tail as a fresh `load_level`,
+    /// without touching WRAM block maps, CGRAM, or any unsaved edits.
+    fn reload_graphics_from_rom(&mut self, rom_bytes: &[u8]) -> Option<String> {
+        let body = if rom_bytes.len() % 0x400 == 0x200 { &rom_bytes[0x200..] } else { rom_bytes };
+        let mut emu_rom = EmuRom::new(body.to_vec());
+        emu_rom.load_symbols(include_str!("../../../../symbols/SMW_U.sym"));
+        self.cpu.mem.cart = Arc::new(emu_rom);
+
+        smwe_emu::emu::reload_level_graphics(&mut self.cpu);
+        // Bypass overrides sit on top of the freshly uploaded tileset
+        // defaults, exactly like `load_level`'s tail.
+        self.apply_bypass_to_vram();
+        smwe_emu::emu::fetch_anim_frame(&mut self.cpu);
+
+        {
+            let renderer = self.level_renderer.lock().expect("Cannot lock level_renderer");
+            renderer.upload_gfx(&self.gl, &self.cpu.mem.vram);
+        }
+        self.tile_picker.rebuild(&mut self.cpu);
+        self.bg_tile_picker.rebuild(&mut self.cpu);
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
+        self.exanim_dialog.reset_atlas();
+
+        let vanilla = self.gfx_edits.len();
+        let exgfx = self.exgfx_data.files.len();
+        let status = if vanilla == 0 && exgfx == 0 {
+            "No staged GFX changes — graphics reloaded from the current ROM image.".to_owned()
+        } else {
+            format!(
+                "Inserted {vanilla} GFX file(s) + {exgfx} ExGFX file(s) into the ROM image; graphics reloaded \
+                 (LM v3.00)."
+            )
+        };
+        self.insert_gfx_status = Some(status.clone());
+        log::info!("{status}");
+        Some(status)
     }
 
     fn on_save_succeeded(&mut self) {

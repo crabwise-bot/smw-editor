@@ -35,6 +35,21 @@ pub trait DockableEditorTool {
     /// confirmation flow. No-op for tabs that are not level editors. Used by
     /// Tools > Analyze Resources in Levels... for its jump links.
     fn request_level_jump(&mut self, _level: u16) {}
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" toolbar
+    /// button: take the pending request (clears the flag). The app performs
+    /// the merged-ROM insert and then calls `reload_graphics_from_rom` on
+    /// every tab.
+    fn take_insert_all_gfx_request(&mut self) -> bool {
+        false
+    }
+    /// Reload this tab's graphics display from a fully-merged ROM image (all
+    /// tabs' unsaved edits applied, GFX/ExGFX inserted). The tab swaps its
+    /// emulator cart to the new image and re-uploads its graphics to VRAM;
+    /// unsaved non-graphics edits are never disturbed. Returns a short
+    /// status line for the tab to display.
+    fn reload_graphics_from_rom(&mut self, _rom_bytes: &[u8]) -> Option<String> {
+        None
+    }
     /// Lunar Magic v1.11 "Open Level from Address": decode the Layer-1 object
     /// stream at the given headerless PC address into this tool. Sprites,
     /// entrances and background are intentionally not touched.
