@@ -27,6 +27,7 @@ pub mod overworld;
 pub mod rom_expansion;
 pub mod snes_utils;
 pub mod sprite_tweakers;
+pub mod tile_surface;
 pub mod title_credits;
 pub mod title_stripe;
 pub mod xref;

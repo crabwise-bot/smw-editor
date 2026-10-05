@@ -337,6 +337,11 @@ impl UiLevelEditor {
             self.paint_exit_enabled_overlay(&painter, view_rect, origin, tile_sz, level_w, level_h);
         }
 
+        // ── Tile surface outlines (LM v3.00 view option, water tiles v3.70) ───
+        if self.show_surface_outlines {
+            self.paint_surface_outlines_overlay(&painter, view_rect, origin, tile_sz, level_w, level_h);
+        }
+
         // ── Object overlay (structure view + editing) ─────────
         let show_overlay = self.show_object_overlay
             || self.editing_mode != EditingMode::Select
@@ -816,6 +821,86 @@ impl UiLevelEditor {
                     );
                     painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
                     painter.rect_stroke(r, egui::CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+                }
+            }
+        }
+    }
+
+    /// Paint the Lunar Magic v3.00 "Tile Surface Outlines" overlay (water
+    /// tiles added in v3.70): solid tiles get a white outline, slope tiles
+    /// get their actual surface polyline from the game's `SlopeHeights` data
+    /// (via `smwe_rom::tile_surface`), water tiles get a blue outline, and
+    /// hurt blocks get a red outline. Tile data comes straight from the WRAM
+    /// block maps, so the outlines track the live level including unsaved
+    /// object edits and staged acts-like changes — same as the exit overlay.
+    fn paint_surface_outlines_overlay(
+        &mut self, painter: &egui::Painter, view_rect: egui::Rect, origin: egui::Pos2, tile_sz: f32, level_w: u32,
+        level_h: u32,
+    ) {
+        use smwe_rom::{
+            map16_expanded::act_as_of,
+            tile_surface::{surface_kind, SurfaceKind},
+        };
+
+        let acts = self.effective_acts_table();
+        // The game's ObjectTileset (level header FG/BG GFX low nibble) selects
+        // the slope table; tilesets 0 and 7 use the alternate mapping.
+        let object_tileset = self.level_properties.fg_bg_gfx;
+        let level_mode = self.level_properties.level_mode;
+        // In level mode 0x01 the object-backed Layer 2 is interactive, so the
+        // game evaluates its tiles too (same as the exit overlay).
+        let l2_active = level_mode == 0x01 && self.level_properties.has_layer2;
+        let l2_off = if self.level_properties.is_vertical { 0x0E * 16 * 32 } else { 0x10 * 16 * 27 };
+
+        let x0 = ((view_rect.min.x - origin.x) / tile_sz).floor().max(0.0) as u32;
+        let y0 = ((view_rect.min.y - origin.y) / tile_sz).floor().max(0.0) as u32;
+        let x1 = ((view_rect.max.x - origin.x) / tile_sz).ceil().max(0.0).min(level_w as f32) as u32;
+        let y1 = ((view_rect.max.y - origin.y) / tile_sz).ceil().max(0.0).min(level_h as f32) as u32;
+
+        let white = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(240, 240, 240, 230));
+        let blue = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 230));
+        let red = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(255, 70, 70, 230));
+
+        // Surface kind for one Map16 block id (0 = empty = no outline).
+        let kind_of = |id: u16| {
+            if id == 0 {
+                None
+            } else {
+                surface_kind(act_as_of(&acts, id), object_tileset)
+            }
+        };
+
+        for ty in y0..y1 {
+            for tx in x0..x1 {
+                let mut kind = kind_of(self.raw_block_id_at(tx, ty, 0x7EC800, 0x7FC800));
+                if kind.is_none() && l2_active {
+                    kind = kind_of(self.raw_block_id_at(tx, ty, 0x7EC800 + l2_off, 0x7FC800 + l2_off));
+                }
+                let Some(kind) = kind else { continue };
+                let tile_origin = origin + egui::vec2(tx as f32 * tile_sz, ty as f32 * tile_sz);
+                match kind {
+                    SurfaceKind::Solid | SurfaceKind::Water | SurfaceKind::Hurt => {
+                        let stroke = match kind {
+                            SurfaceKind::Water => blue,
+                            SurfaceKind::Hurt => red,
+                            _ => white,
+                        };
+                        let r = egui::Rect::from_min_size(tile_origin, egui::Vec2::splat(tile_sz));
+                        painter.rect_stroke(r, egui::CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+                    }
+                    SurfaceKind::Slope(px) => {
+                        // The game's 16 per-column surface heights, drawn as a
+                        // polyline across the tile (px height -> y offset).
+                        let pts: Vec<egui::Pos2> = px
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &h)| {
+                                tile_origin
+                                    + egui::vec2((i as f32 + 0.5) / 16.0 * tile_sz, (h.min(16) as f32) / 16.0 * tile_sz)
+                            })
+                            .collect();
+                        painter.add(egui::Shape::line(pts, white));
+                    }
                 }
             }
         }
