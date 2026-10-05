@@ -780,7 +780,9 @@ impl UiLevelEditor {
 
     /// Paint the Lunar Magic v3.31 "Mark exit-enabled tiles" overlay:
     /// Layer 1 tiles (plus the object-backed Layer 2 in level mode 0x01)
-    /// whose act-as root is exit-enabled get a translucent green fill.
+    /// whose act-as root is exit-enabled get a translucent pink fill
+    /// (LM v3.70 changed the marker color from red to pink so it stays
+    /// distinct from the hurt blocks of "Tile Surface Outlines").
     /// Tile data comes straight from the WRAM block maps, so the markers
     /// track the live level including unsaved object edits and staged
     /// acts-like changes.
@@ -802,8 +804,8 @@ impl UiLevelEditor {
         let x1 = ((view_rect.max.x - origin.x) / tile_sz).ceil().max(0.0).min(level_w as f32) as u32;
         let y1 = ((view_rect.max.y - origin.y) / tile_sz).ceil().max(0.0).min(level_h as f32) as u32;
 
-        let fill = egui::Color32::from_rgba_unmultiplied(70, 220, 110, 70);
-        let edge = egui::Color32::from_rgba_unmultiplied(70, 220, 110, 230);
+        let fill = egui::Color32::from_rgba_unmultiplied(255, 110, 180, 70);
+        let edge = egui::Color32::from_rgba_unmultiplied(255, 110, 180, 230);
         let stroke = egui::Stroke::new(1.5_f32, edge);
 
         for ty in y0..y1 {

@@ -167,6 +167,34 @@ impl UiLevelEditor {
                 egui::Stroke::new(2.0_f32, Color32::YELLOW),
                 egui::StrokeKind::Outside,
             );
+
+            // Lunar Magic v3.70: the "Mark exit-enabled tiles" view option
+            // also shows in the Map16 editor. Paint the same pink markers
+            // over the FG blocks whose act-as root is exit-enabled, using the
+            // current level's mode (the same predicate as the canvas
+            // overlay) and the effective acts table so markers track staged
+            // acts-like changes. BG tiles have no act-as values, so the BG
+            // grid is left unmarked.
+            if self.mark_exit_tiles && !bg_l2_mode {
+                use smwe_rom::{block_behavior::is_exit_enabled, map16_expanded::act_as_of};
+                let acts = self.effective_acts_table();
+                let level_mode = self.level_properties.level_mode;
+                let fill = Color32::from_rgba_unmultiplied(255, 110, 180, 70);
+                let edge = Color32::from_rgba_unmultiplied(255, 110, 180, 230);
+                let mark_stroke = egui::Stroke::new(2.0_f32, edge);
+                for block_id in 0..0x200u16 {
+                    if !is_exit_enabled(act_as_of(&acts, block_id), level_mode) {
+                        continue;
+                    }
+                    let (col, row) = (block_id as usize % 16, block_id as usize / 16);
+                    let r = Rect::from_min_size(
+                        rect.min + vec2(col as f32 * block_px * scale_x, row as f32 * block_px * scale_y),
+                        vec2(block_px * scale_x, block_px * scale_y),
+                    );
+                    ui.painter().rect_filled(r, egui::CornerRadius::ZERO, fill);
+                    ui.painter().rect_stroke(r, egui::CornerRadius::ZERO, mark_stroke, egui::StrokeKind::Inside);
+                }
+            }
         }
 
         ui.separator();
