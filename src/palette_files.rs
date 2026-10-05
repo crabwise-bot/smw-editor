@@ -152,15 +152,28 @@ pub fn write_mw3(pal: &LevelPalette36) -> [u8; MW3_BYTES] {
 /// Strict parse of a `.mw3` file: exactly 514 bytes, else rejected. Reads
 /// words 0..36 into the level palette and ignores the rest.
 pub fn read_mw3(bytes: &[u8]) -> Result<LevelPalette36, PaletteFileError> {
+    let words = read_mw3_words(bytes)?;
+    let mut pal = LevelPalette36::default();
+    for (slot, &w) in pal.bg.iter_mut().chain(pal.fg.iter_mut()).chain(pal.sprite.iter_mut()).zip(words.iter()) {
+        *slot = w;
+    }
+    Ok(pal)
+}
+
+/// Strict parse of a `.mw3` file into the full 257-word working buffer
+/// (Lunar Magic's palette-file layout). Exactly 514 bytes, else rejected.
+/// This is what masked (`.palmask`) imports operate on: the mask selects
+/// words across the whole buffer, including the backdrop word 256, before
+/// words 0..36 are written back to the level palette.
+pub fn read_mw3_words(bytes: &[u8]) -> Result<[u16; MW3_WORDS], PaletteFileError> {
     if bytes.len() != MW3_BYTES {
         return Err(PaletteFileError::BadMw3Size { expected: MW3_BYTES, got: bytes.len() });
     }
-    let mut pal = LevelPalette36::default();
-    let mut words = bytes.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).take(MW3_LEVEL_COLORS);
-    for slot in pal.bg.iter_mut().chain(pal.fg.iter_mut()).chain(pal.sprite.iter_mut()) {
-        *slot = words.next().expect("take(MW3_LEVEL_COLORS) yields 36 words");
+    let mut words = [0u16; MW3_WORDS];
+    for (slot, chunk) in words.iter_mut().zip(bytes.chunks_exact(2)) {
+        *slot = u16::from_le_bytes([chunk[0], chunk[1]]);
     }
-    Ok(pal)
+    Ok(words)
 }
 
 #[cfg(test)]

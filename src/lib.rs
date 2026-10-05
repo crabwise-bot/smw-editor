@@ -6,6 +6,7 @@ pub mod exit_scan;
 pub mod level_address;
 pub mod level_png_export;
 pub mod palette_files;
+pub mod palmask;
 pub mod placement_check;
 pub mod project;
 pub mod render_util;

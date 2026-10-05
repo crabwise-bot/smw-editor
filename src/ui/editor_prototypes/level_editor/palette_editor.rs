@@ -624,6 +624,120 @@ impl UiLevelEditor {
         if let Some(status) = self.palette_file_status.clone() {
             ui.label(egui::RichText::new(status).small().italics());
         }
+        ui.separator();
+        self.palmask_section(ui);
+    }
+
+    /// Lunar Magic v2.40 `.palmask` mask buttons: a same-name `.palmask`
+    /// next to a palette file selects which of the file's colors an import
+    /// applies. The mask is the 257-word selector (byte `i` ↔ palette word
+    /// `i`; zero keeps the destination, nonzero takes the source); the
+    /// default is everything selected, matching Lunar Magic's transient
+    /// selector reset state.
+    fn palmask_section(&mut self, ui: &mut Ui) {
+        ui.label("Palette mask (.palmask)");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.palmask_edit_mode, "Edit mask").on_hover_text(
+                "Mask-editing mode (Lunar Magic v2.40): clicking a palette swatch toggles whether that \
+                 color is included in the next masked import, instead of selecting the swatch for editing. \
+                 Masked colors show a green marker; dimmed colors are excluded.",
+            );
+            if ui.small_button("Select all").on_hover_text("Select every color in the mask").clicked() {
+                self.palmask.select_all();
+                self.palmask_status = Some("Mask: all 257 colors selected.".to_string());
+            }
+            if ui.small_button("Select none").on_hover_text("Deselect every color in the mask").clicked() {
+                self.palmask.select_none();
+                self.palmask_status =
+                    Some("Mask: no colors selected — a masked import would change nothing.".to_string());
+            }
+            if ui.small_button("Invert").on_hover_text("Invert the mask selection").clicked() {
+                self.palmask.invert();
+                self.palmask_status =
+                    Some(format!("Mask inverted: {} of 257 colors selected.", self.palmask.selected_count()));
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Save mask (.palmask)…")
+                .on_hover_text("Save the current 257-word import mask to a .palmask file")
+                .clicked()
+            {
+                self.save_palmask();
+            }
+            if ui
+                .button("Load mask (.palmask)…")
+                .on_hover_text("Load a .palmask file as the current import mask (must be exactly 257 bytes)")
+                .clicked()
+            {
+                self.load_palmask();
+            }
+        });
+        let count = self.palmask.selected_count();
+        let hint = if self.palmask_edit_mode {
+            " — mask-editing mode is ON: click swatches to toggle their mask bits"
+        } else {
+            ""
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{count} of 257 colors selected{hint}. Importing a palette file auto-discovers a \
+                 same-name .palmask beside it; exporting republishes this mask beside the export."
+            ))
+            .small()
+            .italics(),
+        );
+        if let Some(status) = self.palmask_status.clone() {
+            ui.label(egui::RichText::new(status).small().italics());
+        }
+    }
+
+    /// Save the current `.palmask` selector to a file (the v2.40
+    /// "buttons to work with them": explicit mask save).
+    fn save_palmask(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Lunar Magic palette mask", &["palmask"])
+            .set_file_name("palette.palmask")
+            .save_file()
+        else {
+            return;
+        };
+        let bytes = self.palmask.to_bytes();
+        self.palmask_status = Some(match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                let msg = format!(
+                    "Saved palette mask (257 bytes, {} selected) → {}",
+                    self.palmask.selected_count(),
+                    path.display()
+                );
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Palette-mask save failed: {e:#}"),
+        });
+    }
+
+    /// Load a `.palmask` file as the current import mask. The file must be
+    /// exactly 257 bytes; anything else is rejected without touching the
+    /// current mask.
+    fn load_palmask(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Lunar Magic palette mask", &["palmask"]).pick_file() else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<String> {
+            let bytes = std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+            let mask = crate::palmask::Palmask::from_bytes(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let count = mask.selected_count();
+            self.palmask = mask;
+            Ok(format!("Loaded palette mask ← {} ({count} of 257 colors selected)", path.display()))
+        })();
+        self.palmask_status = Some(match result {
+            Ok(msg) => {
+                log::info!("{msg}");
+                msg
+            }
+            Err(e) => format!("Palette-mask load failed: {e:#}"),
+        });
     }
 
     /// Lunar Magic v3.40: "support for importing palettes from Snes9x save
@@ -820,6 +934,10 @@ impl UiLevelEditor {
     /// Export this level's 36 palette colors to a Lunar Magic `.mw3`
     /// custom-palette file (514 bytes; Lunar Magic v1.40 File-menu parity —
     /// here in the palette window next to the other file buttons).
+    ///
+    /// Lunar Magic v2.40 republishes the palette editor's selector beside
+    /// the export, so this also writes a same-name `.palmask` carrying the
+    /// current mask.
     fn export_mw3(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Lunar Magic custom palette", &["mw3"])
@@ -831,13 +949,22 @@ impl UiLevelEditor {
         let bytes = self.palettes.read(|pal| {
             crate::palette_files::write_mw3(&LevelPalette36 { bg: pal.bg, fg: pal.fg, sprite: pal.sprite })
         });
-        self.palette_file_status = Some(match std::fs::write(&path, bytes) {
-            Ok(()) => {
-                let msg = format!("Exported custom palette (514 bytes) → {}", path.display());
+        let mask_path = path.with_extension("palmask");
+        let mask_bytes = self.palmask.to_bytes();
+        self.palette_file_status = Some(match (std::fs::write(&path, bytes), std::fs::write(&mask_path, mask_bytes)) {
+            (Ok(()), Ok(())) => {
+                let msg = format!(
+                    "Exported custom palette (514 bytes) → {} + mask → {}",
+                    path.display(),
+                    mask_path.display()
+                );
                 log::info!("{msg}");
                 msg
             }
-            Err(e) => format!("Custom-palette export failed: {e:#}"),
+            (Ok(()), Err(e)) => {
+                format!("Exported custom palette → {} but the .palmask republish failed: {e:#}", path.display())
+            }
+            (Err(e), _) => format!("Custom-palette export failed: {e:#}"),
         });
     }
 
@@ -847,26 +974,82 @@ impl UiLevelEditor {
     /// semantics) and the import lands in the private palette, never the
     /// shared tables. The file must be exactly 514 bytes or it is rejected
     /// without touching the palette.
+    ///
+    /// Lunar Magic v2.40: a same-name `.palmask` next to the `.mw3` is
+    /// discovered automatically and only the masked colors are imported
+    /// (zero byte keeps the destination word, nonzero takes the source
+    /// word); selected row-zero words are cleared to the backdrop word like
+    /// the ordinary loader. A malformed mask fails the whole import before
+    /// anything changes.
     fn import_mw3(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("Lunar Magic custom palette", &["mw3"]).pick_file() else {
             return;
         };
         let result = (|| -> anyhow::Result<String> {
             let bytes = std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-            let pal = crate::palette_files::read_mw3(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Lunar Magic v2.40 mask discovery: an optional same-name
+            // `.palmask` beside the palette file. Parsed strictly before
+            // anything is applied, so a malformed mask fails the import
+            // without touching the palette.
+            let mask_path = path.with_extension("palmask");
+            let mask = if mask_path.exists() {
+                let mask_bytes =
+                    std::fs::read(&mask_path).with_context(|| format!("Failed to read {}", mask_path.display()))?;
+                Some(
+                    crate::palmask::Palmask::from_bytes(&mask_bytes)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", mask_path.display()))?,
+                )
+            } else {
+                None
+            };
             if !self.custom_palette_enabled {
                 self.set_custom_palette_enabled(true);
             }
-            let (bg, fg, sprite) = (pal.bg, pal.fg, pal.sprite);
-            self.palettes.write(|p| {
-                p.bg = bg;
-                p.fg = fg;
-                p.sprite = sprite;
-            });
+            let msg = match mask {
+                Some(mask) => {
+                    let src = crate::palette_files::read_mw3_words(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // Compose the 257-word window from the level's 36
+                    // colors (words 36..257 are zero — the editor doesn't
+                    // model them — so the backdrop word 256 reads as 0),
+                    // apply the recovered loader semantics, write back
+                    // words 0..36.
+                    let mut dest = [0u16; crate::palmask::PALMASK_WORDS];
+                    let current = self.palettes.read(|pal| [pal.bg, pal.fg, pal.sprite]);
+                    for (i, row) in current.iter().enumerate() {
+                        dest[i * 12..(i + 1) * 12].copy_from_slice(row);
+                    }
+                    crate::palmask::apply_masked_import(&mut dest, &src, &mask);
+                    let (mut bg, mut fg, mut sprite) = ([0u16; 12], [0u16; 12], [0u16; 12]);
+                    bg.copy_from_slice(&dest[0..12]);
+                    fg.copy_from_slice(&dest[12..24]);
+                    sprite.copy_from_slice(&dest[24..36]);
+                    self.palettes.write(|p| {
+                        p.bg = bg;
+                        p.fg = fg;
+                        p.sprite = sprite;
+                    });
+                    format!(
+                        "Imported custom palette ← {} with mask ← {} ({} of 257 colors selected) (undo with Ctrl+Z)",
+                        path.display(),
+                        mask_path.display(),
+                        mask.selected_count()
+                    )
+                }
+                None => {
+                    let pal = crate::palette_files::read_mw3(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let (bg, fg, sprite) = (pal.bg, pal.fg, pal.sprite);
+                    self.palettes.write(|p| {
+                        p.bg = bg;
+                        p.fg = fg;
+                        p.sprite = sprite;
+                    });
+                    format!("Imported custom palette ← {} (undo with Ctrl+Z)", path.display())
+                }
+            };
             self.palette_dirty = true;
             self.mark_edited();
             self.sync_custom_palette_entry();
-            Ok(format!("Imported custom palette ← {} (undo with Ctrl+Z)", path.display()))
+            Ok(msg)
         })();
         self.palette_file_status = Some(match result {
             Ok(msg) => {
@@ -922,6 +1105,12 @@ impl UiLevelEditor {
             let r = ((raw & 0x1F) as f32 / 31.0 * 255.0) as u8;
             let g = (((raw >> 5) & 0x1F) as f32 / 31.0 * 255.0) as u8;
             let b = (((raw >> 10) & 0x1F) as f32 / 31.0 * 255.0) as u8;
+
+            // Lunar Magic v2.40: in mask-editing mode the swatch shows its
+            // `.palmask` selection bit instead of the color plainly —
+            // selected words get a green marker, excluded words are dimmed.
+            let masked = crate::palmask::level_color_word_index(group, col).is_some_and(|w| self.palmask.selected(w));
+            let (r, g, b) = if self.palmask_edit_mode && !masked { (r / 3, g / 3, b / 3) } else { (r, g, b) };
             let c32 = Color32::from_rgb(r, g, b);
 
             // Fill the cell
@@ -933,6 +1122,14 @@ impl UiLevelEditor {
                 egui::Stroke::new(1.0_f32, Color32::from_gray(80)),
                 egui::StrokeKind::Outside,
             );
+            if self.palmask_edit_mode && masked {
+                let bl = cell_rect.left_bottom();
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![bl, bl + vec2(7.0, 0.0), bl + vec2(0.0, -7.0)],
+                    egui::Color32::GREEN,
+                    egui::Stroke::NONE,
+                ));
+            }
 
             // Highlight selected cell
             let selected = self.selected_palette_group == group as u8
@@ -967,7 +1164,16 @@ impl UiLevelEditor {
             // Alt+Shift+Right-Click makes it vertical.
             let gradient_hint =
                 "Alt+Right-Click: gradient from the selected color · Alt+Shift+Right-Click: vertical gradient";
-            if exanim_dest.is_some() {
+            // Lunar Magic v2.40: in mask-editing mode the hover shows the
+            // word's mask state instead of the other hints.
+            if self.palmask_edit_mode {
+                if let Some(word) = crate::palmask::level_color_word_index(group, col) {
+                    resp = resp.on_hover_text(format!(
+                        "Mask word {word} — {} in the import mask. Click to toggle.",
+                        if masked { "included" } else { "excluded" }
+                    ));
+                }
+            } else if exanim_dest.is_some() {
                 resp = resp.on_hover_text(format!(
                     "ExAnimated color destination — Ctrl+Shift+Left-Click to select its slot in ExAnimated Frames\n{gradient_hint}"
                 ));
@@ -976,7 +1182,19 @@ impl UiLevelEditor {
             }
             if resp.clicked() {
                 let mods = ui.input(|i| i.modifiers);
-                if mods.ctrl && mods.shift {
+                if self.palmask_edit_mode {
+                    // Lunar Magic v2.40: mask-editing mode — toggle the
+                    // word's `.palmask` selection bit instead of selecting
+                    // the swatch for color editing.
+                    if let Some(word) = crate::palmask::level_color_word_index(group, col) {
+                        let selected = self.palmask.toggle(word);
+                        self.palmask_status = Some(format!(
+                            "Mask: word {word} {} ({} of 257 selected).",
+                            if selected { "selected" } else { "excluded" },
+                            self.palmask.selected_count()
+                        ));
+                    }
+                } else if mods.ctrl && mods.shift {
                     // LM v3.33: select the ExAnimated slot whose destination
                     // is this color, opening the dialog if needed.
                     self.select_exanim_dest(group, col);
