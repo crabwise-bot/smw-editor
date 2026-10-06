@@ -615,7 +615,7 @@ impl UiMainWindow {
             restore_compress_points:     self.compress_restore_points,
             restore_incremental_points:  self.incremental_restore_points,
             allow_descriptive_gfx_names: self.allow_descriptive_gfx_names,
-            use_multichar_tiles:        self.use_multichar_tiles,
+            use_multichar_tiles:         self.use_multichar_tiles,
         }
         .save();
     }

@@ -46,7 +46,7 @@ pub struct EditorOptions {
     /// character strings and "LL" automatically encodes to the squished `$3A`
     /// tile. When off, squished tiles display as `\XX` hex escapes and are
     /// never auto-selected. LM ships this checked.
-    pub use_multichar_tiles:        bool,
+    pub use_multichar_tiles:         bool,
 }
 
 impl Default for EditorOptions {
@@ -58,7 +58,7 @@ impl Default for EditorOptions {
             restore_compress_points:     true,
             restore_incremental_points:  true,
             allow_descriptive_gfx_names: true,
-            use_multichar_tiles:        true,
+            use_multichar_tiles:         true,
         }
     }
 }
@@ -106,7 +106,7 @@ impl EditorOptions {
             // Same story: files written before the MultiChar option existed
             // load with it on, matching LM v3.40's default.
             #[serde(default = "default_use_multichar_tiles")]
-            use_multichar_tiles:        bool,
+            use_multichar_tiles:         bool,
         }
         let Ok(data) = std::fs::read_to_string(path) else { return Self::default() };
         let Ok(file) = serde_json::from_str::<StoreFile>(&data) else { return Self::default() };
@@ -116,7 +116,7 @@ impl EditorOptions {
             restore_compress_points:     file.restore_compress_points,
             restore_incremental_points:  file.restore_incremental_points,
             allow_descriptive_gfx_names: file.allow_descriptive_gfx_names,
-            use_multichar_tiles:        file.use_multichar_tiles,
+            use_multichar_tiles:         file.use_multichar_tiles,
         }
     }
 
@@ -128,7 +128,7 @@ impl EditorOptions {
             restore_compress_points:     bool,
             restore_incremental_points:  bool,
             allow_descriptive_gfx_names: bool,
-            use_multichar_tiles:        bool,
+            use_multichar_tiles:         bool,
         }
         let file = StoreFile {
             check_placement_on_save:     self.check_placement_on_save,
@@ -136,7 +136,7 @@ impl EditorOptions {
             restore_compress_points:     self.restore_compress_points,
             restore_incremental_points:  self.restore_incremental_points,
             allow_descriptive_gfx_names: self.allow_descriptive_gfx_names,
-            use_multichar_tiles:        self.use_multichar_tiles,
+            use_multichar_tiles:         self.use_multichar_tiles,
         };
         let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
@@ -183,7 +183,7 @@ mod tests {
             restore_compress_points:     false,
             restore_incremental_points:  false,
             allow_descriptive_gfx_names: false,
-            use_multichar_tiles:        false,
+            use_multichar_tiles:         false,
         };
         opts.save_to(&path).unwrap();
         let back = EditorOptions::load_from(&path);
