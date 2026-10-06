@@ -10,6 +10,7 @@ pub mod exit_scan;
 
 pub mod font_map;
 pub mod freespace;
+pub mod gfx_filename;
 pub mod graphics;
 pub mod internal_header;
 pub mod layer3;

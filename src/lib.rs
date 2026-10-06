@@ -2,6 +2,7 @@ pub mod custom_collections;
 pub mod custom_tooltips;
 pub mod edit_manual;
 pub mod editor_options;
+pub mod exgfx_file_names;
 pub mod exit_scan;
 pub mod level_address;
 pub mod level_png_export;
