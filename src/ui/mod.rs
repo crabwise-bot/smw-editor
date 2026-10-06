@@ -156,6 +156,12 @@ pub struct UiMainWindow {
     /// to disabled slots and duplicate one-shot trigger numbers.
     /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
     more_exanimation_checks:     bool,
+    /// Lunar Magic v3.40 "Use MultiChar Tiles" (Options menu). When on, the
+    /// squished tiles Nintendo used in "YELLOW SWITCH PALACE" and "FOREST OF
+    /// ILLUSION" decode to their character strings and "LL" auto-encodes to
+    /// the squished tile. When off, they display as `\XX` hex escapes.
+    /// Persisted per-user (`$HOME/.smw-editor-options.json`); never the ROM.
+    use_multichar_tiles:         bool,
     /// Lunar Magic v3.40 "compress new restore points" (Options menu >
     /// "Restore Point Options..."). When on, new restore points are
     /// zstd-compressed in memory. Persisted per-user; on by default.
@@ -276,6 +282,7 @@ impl UiMainWindow {
             user_toolbar: UserToolbarState::load(),
             check_placement_on_save: EditorOptions::load().check_placement_on_save,
             more_exanimation_checks: EditorOptions::load().more_exanimation_checks,
+            use_multichar_tiles: EditorOptions::load().use_multichar_tiles,
             compress_restore_points: EditorOptions::load().restore_compress_points,
             incremental_restore_points: EditorOptions::load().restore_incremental_points,
             allow_descriptive_gfx_names: EditorOptions::load().allow_descriptive_gfx_names,
@@ -608,6 +615,7 @@ impl UiMainWindow {
             restore_compress_points:     self.compress_restore_points,
             restore_incremental_points:  self.incremental_restore_points,
             allow_descriptive_gfx_names: self.allow_descriptive_gfx_names,
+            use_multichar_tiles:        self.use_multichar_tiles,
         }
         .save();
     }
@@ -1992,6 +2000,19 @@ impl UiMainWindow {
                              pre-fills the file index from the name. When disabled, \
                              descriptively named files are refused — rename them to \
                              ExGFX###.bin or re-enable this option.",
+                        )
+                        .changed()
+                    {
+                        self.save_editor_options();
+                    }
+                    if ui
+                        .checkbox(&mut self.use_multichar_tiles, "Use MultiChar Tiles")
+                        .on_hover_text(
+                            "When enabled, the squished tiles Nintendo used in level names like \
+                             \"YELLOW SWITCH PALACE\" and \"FOREST OF ILLUSION\" are displayed \
+                             as their characters and \"LL\" is automatically encoded to the \
+                             squished tile (Lunar Magic v3.40). When disabled, squished tiles \
+                             display as \\XX hex escapes and are never auto-selected.",
                         )
                         .changed()
                     {

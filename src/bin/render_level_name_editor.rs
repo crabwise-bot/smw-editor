@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
     // Real data path, identical to the UI: strip header, decode all 93 names.
     let raw = std::fs::read(rom_path)?;
     let rom_bytes: &[u8] = if raw.len() % 0x400 == 0x200 { &raw[0x200..] } else { &raw[..] };
-    let names = level_names::decode_all(rom_bytes, 0, false).ok_or_else(|| anyhow::anyhow!("decode failed"))?;
+    let names = level_names::decode_all(rom_bytes, 0, false, true).ok_or_else(|| anyhow::anyhow!("decode failed"))?;
     anyhow::ensure!(names.len() == level_names::LEVEL_NAMES_COUNT);
 
     // Demo translevel: 0x29 == "YOSHI'S ISLAND 1" in the vanilla ROM.
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
     // Prove the save path fits: re-encode all 93 names with the override.
     let mut all = names.clone();
     all[tl] = custom.clone();
-    let enc = level_names::encode_names(&all)?;
+    let enc = level_names::encode_names(&all, true)?;
     anyhow::ensure!(enc.pool.len() <= level_names::STRINGS_PATCHED_LEN);
 
     // ---- Compose the mock window ----
@@ -183,7 +183,7 @@ fn main() -> anyhow::Result<()> {
         draw_text(
             &mut img,
             &fonts.sans,
-            &format!("Name encodes to {used} / {} tiles", level_names::MAX_NAME_CHARS),
+            &format!("Name encodes to {used} / {} tiles", level_names::MAX_NAME_TILES),
             x as i32,
             y as i32,
             14.0,
