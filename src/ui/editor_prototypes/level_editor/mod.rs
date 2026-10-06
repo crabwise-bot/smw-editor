@@ -68,6 +68,7 @@ use self::{
     xref_search::XrefSearchState,
 };
 use crate::{
+    exgfx_file_names::ExGfxFileNames,
     rom_freespace::{find_free_space, find_free_space_in},
     ui::{editing_mode::EditingMode, tool::DockableEditorTool},
     undo::{Undo, UndoableData},
@@ -377,9 +378,14 @@ pub struct UiLevelEditor {
     bypass_edit_slots:    [u16; smwe_rom::exgfx::BYPASS_SLOT_COUNT],
     /// Level `bypass_edit_slots` was synced from; resync when it differs.
     bypass_edit_level:    u16,
-    /// Pending ExGFX insert: raw .bin bytes + chosen file index.
-    exgfx_insert_pending: Option<(Vec<u8>, u16)>,
+    /// Pending ExGFX insert: raw .bin bytes + chosen file index + the
+    /// descriptive suffix parsed from the file name (LM v3.70; None for
+    /// strict `ExGFX###.bin` names).
+    exgfx_insert_pending: Option<(Vec<u8>, u16, Option<String>)>,
     exgfx_manager_status: Option<String>,
+    /// Per-user descriptive names for inserted ExGFX files (LM v3.70;
+    /// editor metadata, never the ROM). Shown in the manager's file list.
+    exgfx_file_names:     ExGfxFileNames,
 
     // Music & time-limit bypass (LM v1.70/v3.32/v3.70 parity): per-level
     // header-music/time overrides in the editor-native SMWMUSBP RATS block.
@@ -783,6 +789,7 @@ impl UiLevelEditor {
             bypass_edit_level: 0xFFFF,
             exgfx_insert_pending: None,
             exgfx_manager_status: None,
+            exgfx_file_names: ExGfxFileNames::load(),
             music_bypass_data,
             music_bypass_dirty: false,
             show_music_time_bypass: false,

@@ -3,13 +3,22 @@
 //! LM v1.10/v1.60 parity: insert/extract/delete extra GFX files (indices
 //! 0x80+). Files are stored as RATS-tagged free-space blocks in the ROM;
 //! the "Levels using" column cross-references the Super GFX Bypass table.
+//! LM v3.70 "Allow Descriptive GFX File Names" parity: when the
+//! Options-menu option is on (LM's default), inserting accepts descriptive
+//! file names of the form `ExGFX###T.bin` and pre-fills the file index
+//! from the name; the descriptive suffix is kept as per-user editor
+//! metadata and shown in the file list. When the option is off,
+//! descriptively named files are refused.
 //! Note: making the game itself *use* ExGFX still requires Lunar Magic's
 //! ExGFX ASM hack — this editor authors and previews the data
 //! (see `smwe_rom::exgfx` docs).
 
 use egui::{Context, Slider};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
-use smwe_rom::exgfx::{BYPASS_DEFAULT, EXGFX_FILE_BYTES, EXGFX_FIRST_INDEX, EXGFX_MAX_INDEX, EXGFX_TILES_PER_FILE};
+use smwe_rom::{
+    exgfx::{BYPASS_DEFAULT, EXGFX_FILE_BYTES, EXGFX_FIRST_INDEX, EXGFX_MAX_INDEX, EXGFX_TILES_PER_FILE},
+    gfx_filename::{parse_gfx_filename, GfxFileKind},
+};
 
 use super::UiLevelEditor;
 
@@ -21,8 +30,9 @@ impl UiLevelEditor {
         let mut open = self.show_exgfx_manager;
         // Snapshot everything the window body needs so the egui closure
         // doesn't fight the borrow checker with `self`.
-        let mut insert_index = self.exgfx_insert_pending.as_ref().map(|&(_, idx)| idx);
-        let insert_label = self.exgfx_insert_pending.as_ref().map(|(bytes, _)| bytes.len());
+        let mut insert_index = self.exgfx_insert_pending.as_ref().map(|&(_, idx, _)| idx);
+        let insert_label = self.exgfx_insert_pending.as_ref().map(|(bytes, _, _)| bytes.len());
+        let file_names = &self.exgfx_file_names;
 
         let mut files: Vec<(u16, usize)> = self.exgfx_data.files.iter().map(|(&idx, f)| (idx, f.tiles.len())).collect();
         files.sort_unstable_by_key(|&(idx, _)| idx);
@@ -74,7 +84,13 @@ impl UiLevelEditor {
                                 ui.label("");
                                 ui.end_row();
                                 for ((idx, tile_count), &(_, ref levels)) in files.iter().zip(used_by.iter()) {
-                                    ui.monospace(format!("ExGFX{idx:03X}"));
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(format!("ExGFX{idx:03X}"));
+                                        // Descriptive suffix kept at insert time (LM v3.70).
+                                        if let Some(name) = file_names.get(*idx) {
+                                            ui.label(egui::RichText::new(format!("\"{name}\"")).small().weak());
+                                        }
+                                    });
                                     ui.label(format!("{tile_count}"));
                                     ui.label(if levels.is_empty() {
                                         "—".to_owned()
@@ -155,8 +171,8 @@ impl UiLevelEditor {
             self.exgfx_manager_status = Some("Insert cancelled.".to_owned());
         } else if let (Some(idx), true) = (insert_index, confirm_insert) {
             // The slider above wrote the chosen index back into `insert_index`.
-            if let Some((bytes, _)) = self.exgfx_insert_pending.take() {
-                self.commit_exgfx_insert(bytes, idx);
+            if let Some((bytes, _, descriptive)) = self.exgfx_insert_pending.take() {
+                self.commit_exgfx_insert(bytes, idx, descriptive);
             }
         } else if let Some(idx) = insert_index {
             // Keep the slider's index choice in the pending state.
@@ -197,16 +213,54 @@ impl UiLevelEditor {
         else {
             return;
         };
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let parsed = parse_gfx_filename(&file_name);
         match std::fs::read(&path) {
             Ok(bytes) if bytes.len() == EXGFX_FILE_BYTES => {
-                let idx = self.lowest_free_exgfx_index();
-                self.exgfx_insert_pending = Some((bytes, idx));
-                self.exgfx_manager_status = Some(format!(
-                    "Read {} ({} bytes, {} tiles). Pick the file index, then Insert.",
-                    path.display(),
-                    EXGFX_FILE_BYTES,
-                    EXGFX_TILES_PER_FILE
-                ));
+                // LM v3.70 "Allow Descriptive GFX File Names": the Options
+                // state is read from the per-user store (the Options menu
+                // persists on every toggle, so this is always current).
+                let allow_descriptive = crate::editor_options::EditorOptions::load().allow_descriptive_gfx_names;
+                if let Some(p) = &parsed {
+                    if p.kind == GfxFileKind::ExGfx && p.descriptive_text.is_some() && !allow_descriptive {
+                        // Option off: refuse the file rather than silently
+                        // inserting it under a different name.
+                        self.exgfx_manager_status = Some(format!(
+                            "Refused {file_name}: \"Allow Descriptive GFX File Names\" is off \
+                             (Options menu). Rename the file to ExGFX{:03X}.bin or enable the option.",
+                            p.index
+                        ));
+                        return;
+                    }
+                }
+                // Pre-fill the file index from the name when it parses as an
+                // ExGFX name (strict or descriptive); fall back to the lowest
+                // free index when the named one is already in use. Vanilla
+                // `GFX##T.bin` names carry no usable ExGFX index.
+                let (idx, descriptive) = match &parsed {
+                    Some(p) if p.kind == GfxFileKind::ExGfx => {
+                        let idx = if self.exgfx_data.files.contains_key(&p.index) {
+                            self.lowest_free_exgfx_index()
+                        } else {
+                            p.index
+                        };
+                        (idx, p.descriptive_text.clone())
+                    }
+                    _ => (self.lowest_free_exgfx_index(), None),
+                };
+                self.exgfx_insert_pending = Some((bytes, idx, descriptive));
+                self.exgfx_manager_status = Some(match &parsed {
+                    Some(p) if p.kind == GfxFileKind::ExGfx && p.descriptive_text.is_some() => {
+                        format!(
+                            "Read {file_name} ({EXGFX_FILE_BYTES} bytes, {EXGFX_TILES_PER_FILE} tiles) \
+                             → file index ExGFX{idx:03X}. Pick the file index, then Insert.",
+                        )
+                    }
+                    _ => format!(
+                        "Read {file_name} ({EXGFX_FILE_BYTES} bytes, {EXGFX_TILES_PER_FILE} tiles). \
+                         Pick the file index, then Insert.",
+                    ),
+                });
             }
             Ok(bytes) => {
                 self.exgfx_manager_status = Some(format!(
@@ -223,19 +277,25 @@ impl UiLevelEditor {
         }
     }
 
-    fn commit_exgfx_insert(&mut self, bytes: Vec<u8>, index: u16) {
+    fn commit_exgfx_insert(&mut self, bytes: Vec<u8>, index: u16, descriptive: Option<String>) {
         if self.exgfx_data.files.contains_key(&index) {
             self.exgfx_manager_status = Some(format!("ExGFX{index:03X} is already in use — pick a free index."));
-            self.exgfx_insert_pending = Some((bytes, self.lowest_free_exgfx_index()));
+            self.exgfx_insert_pending = Some((bytes, self.lowest_free_exgfx_index(), descriptive));
             return;
         }
         match self.exgfx_data.insert_raw(index, bytes) {
             Ok(()) => {
                 self.exgfx_dirty = true;
                 self.mark_edited();
+                // Keep the descriptive suffix (if the file name had one) as
+                // per-user editor metadata — shown in the file list, never
+                // written to the ROM.
+                self.exgfx_file_names.set(index, descriptive.as_deref());
+                self.exgfx_file_names.save();
+                let name_note = descriptive.map(|d| format!(" \"{d}\"")).unwrap_or_default();
                 self.exgfx_manager_status = Some(format!(
-                    "Inserted ExGFX{index:03X} ({} tiles). Assign it in Super GFX Bypass.",
-                    EXGFX_TILES_PER_FILE
+                    "Inserted ExGFX{index:03X}{name_note} ({EXGFX_TILES_PER_FILE} tiles). \
+                     Assign it in Super GFX Bypass."
                 ));
             }
             Err(e) => {
@@ -270,6 +330,9 @@ impl UiLevelEditor {
         }
         if self.exgfx_data.remove(index) {
             self.exgfx_dirty = true;
+            // Drop the descriptive name kept at insert time (LM v3.70).
+            self.exgfx_file_names.remove(index);
+            self.exgfx_file_names.save();
             // The confirmation promised fallback to defaults: rewrite every
             // bypass slot that referenced the deleted file.
             let mut cleared: Vec<u16> = Vec::new();

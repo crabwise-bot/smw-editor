@@ -165,6 +165,12 @@ pub struct UiMainWindow {
     /// on, a new restore point stores only the 4 KiB blocks that changed vs
     /// the previous point's image. Persisted per-user; on by default.
     incremental_restore_points:  bool,
+    /// Lunar Magic v3.70 "Allow Descriptive GFX File Names" (Options menu).
+    /// When on, inserting ExGFX accepts descriptive file names of the form
+    /// `ExGFX###T.bin` and pre-fills the file index from the name; when off,
+    /// descriptively named files are refused. Persisted per-user
+    /// (`$HOME/.smw-editor-options.json`); on by default like LM.
+    allow_descriptive_gfx_names: bool,
     /// "Restore Point Options" dialog state (Options menu).
     show_restore_options_dialog: bool,
     /// A save deferred by the placement-warning dialog, awaiting the user's
@@ -272,6 +278,7 @@ impl UiMainWindow {
             more_exanimation_checks: EditorOptions::load().more_exanimation_checks,
             compress_restore_points: EditorOptions::load().restore_compress_points,
             incremental_restore_points: EditorOptions::load().restore_incremental_points,
+            allow_descriptive_gfx_names: EditorOptions::load().allow_descriptive_gfx_names,
             show_restore_options_dialog: false,
             pending_placement_warning: None,
             placement_save_confirmed: false,
@@ -596,10 +603,11 @@ impl UiMainWindow {
     /// Persist the Options-menu toggles to the per-user store.
     fn save_editor_options(&self) {
         EditorOptions {
-            check_placement_on_save:    self.check_placement_on_save,
-            more_exanimation_checks:    self.more_exanimation_checks,
-            restore_compress_points:    self.compress_restore_points,
-            restore_incremental_points: self.incremental_restore_points,
+            check_placement_on_save:     self.check_placement_on_save,
+            more_exanimation_checks:     self.more_exanimation_checks,
+            restore_compress_points:     self.compress_restore_points,
+            restore_incremental_points:  self.incremental_restore_points,
+            allow_descriptive_gfx_names: self.allow_descriptive_gfx_names,
         }
         .save();
     }
@@ -1971,6 +1979,19 @@ impl UiMainWindow {
                              destinations set to disabled slots and about the same one-shot \
                              trigger number assigned to more than one slot (Lunar Magic v3.40). \
                              Uncheck to disable the warnings.",
+                        )
+                        .changed()
+                    {
+                        self.save_editor_options();
+                    }
+                    if ui
+                        .checkbox(&mut self.allow_descriptive_gfx_names, "Allow Descriptive GFX File Names")
+                        .on_hover_text(
+                            "When enabled, inserting ExGFX accepts Lunar Magic v3.70 descriptive \
+                             file names (ExGFX###T.bin, e.g. \"ExGFX80Mario tiles.bin\") and \
+                             pre-fills the file index from the name. When disabled, \
+                             descriptively named files are refused — rename them to \
+                             ExGFX###.bin or re-enable this option.",
                         )
                         .changed()
                     {
