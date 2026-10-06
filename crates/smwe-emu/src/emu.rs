@@ -518,6 +518,45 @@ pub fn upload_gfx_file_to_vram(cpu: &mut Cpu<CheckedMem>, file: u8, vram_word_ad
     cy
 }
 
+/// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" support: force
+/// the game to re-upload every level graphics slot through its own routines.
+///
+/// The game normally skips any slot whose file number already matches the
+/// `SpriteGFXFile` ($0101-$0104) / `BackgroundGFXFile` ($0105-$0108) caches
+/// ("don't upload when it's not needed"); clearing both caches makes every
+/// slot re-upload, exactly as on a fresh level load (where WRAM starts
+/// zeroed). `CODE_00A993` re-uploads files $28-$2B to VRAM $4000 (plus file
+/// $00 to $6000, which the sprite slots then overwrite), and
+/// `UploadSpriteGFX` re-uploads the level's FG1-3/BG1 + SP1-4 slots from the
+/// tilesets in WRAM. Mirrors `special_world::refresh_sprite_gfx`'s guard
+/// against the decompression-buffer overrun into the BG tilemap ($7EB900).
+/// Callers re-apply the Super GFX Bypass overrides and `fetch_anim_frame`
+/// afterwards, like `decompress_sublevel`'s tail.
+pub fn reload_level_graphics(cpu: &mut Cpu<CheckedMem>) {
+    for i in 0..8u32 {
+        cpu.mem.store_u8(0x0101 + i, 0);
+    }
+    let snapshot: Vec<u8> = (0x7EB900..0x7EC100).map(|a| cpu.mem.load_u8(a)).collect();
+    run_routines(cpu, &["CODE_00A993", "UploadSpriteGFX"], 20_000_000);
+    for (i, byte) in snapshot.into_iter().enumerate() {
+        cpu.mem.store_u8(0x7EB900 + i as u32, byte);
+    }
+}
+
+/// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" support for the
+/// overworld editor: force the game to re-upload the overworld's graphics
+/// slots. The overworld's 8 slots (4 FG/BG from its object tileset + 4 sprite
+/// files, all handled inside `UploadSpriteGFX`) are re-uploaded with the
+/// skip caches cleared, exactly as on a fresh `load_overworld`. Verified:
+/// re-running on an overworld CPU reproduces VRAM byte-exactly and leaves
+/// WRAM untouched, so unsaved overworld edits are never disturbed.
+pub fn reload_overworld_graphics(cpu: &mut Cpu<CheckedMem>) {
+    for i in 0..8u32 {
+        cpu.mem.store_u8(0x0101 + i, 0);
+    }
+    run_routines(cpu, &["UploadSpriteGFX"], 20_000_000);
+}
+
 fn clear_sprite_preview_state(cpu: &mut Cpu<CheckedMem>) {
     const SLOT_COUNT: u32 = 12;
     const SPRITE_TABLE_BASES: &[u32] = &[
@@ -1340,5 +1379,115 @@ mod lm_map16_tests {
 
         // TrueFrame ($13) should have advanced by 8.
         assert_eq!(cpu.mem.load_u8(0x0013) & 7, 0, "TrueFrame not multiple of 8");
+    }
+}
+
+#[cfg(test)]
+mod reload_graphics_tests {
+    use std::sync::Arc;
+
+    use super::{reload_level_graphics, reload_overworld_graphics, CheckedMem, Cpu};
+    use crate::rom::Rom;
+
+    /// Fresh CPU on the real ROM (ROM_PATH), or None to skip when absent.
+    fn real_rom_cpu() -> Option<Cpu<CheckedMem>> {
+        let rom_path = std::env::var("ROM_PATH").ok()?;
+        let raw = std::fs::read(&rom_path).ok()?;
+        let bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sym = std::fs::read_to_string(root.join("symbols/SMW_U.sym")).ok()?;
+        let mut rom = Rom::new(bytes);
+        rom.load_symbols(&sym);
+        Some(Cpu::new(CheckedMem::new(Arc::new(rom))))
+    }
+
+    /// LM v3.00 reload: re-running the level graphics upload on a freshly
+    /// loaded level must reproduce VRAM byte-exactly.
+    #[test]
+    #[ignore]
+    fn reload_level_graphics_matches_fresh_load() {
+        let Some(mut cpu) = real_rom_cpu() else {
+            eprintln!("skipping: ROM_PATH not set");
+            return;
+        };
+        super::decompress_sublevel(&mut cpu, 0x105);
+        let fresh_vram = cpu.mem.vram.clone();
+        reload_level_graphics(&mut cpu);
+        assert_eq!(cpu.mem.vram, fresh_vram, "reload changed VRAM vs fresh level load");
+    }
+
+    /// The reload forces every slot to re-upload even when the game's
+    /// skip caches claim the files are already loaded and VRAM was
+    /// corrupted in the meantime.
+    #[test]
+    #[ignore]
+    fn reload_level_graphics_forces_reupload_despite_caches() {
+        let Some(mut cpu) = real_rom_cpu() else {
+            eprintln!("skipping: ROM_PATH not set");
+            return;
+        };
+        super::decompress_sublevel(&mut cpu, 0x105);
+        let fresh_vram = cpu.mem.vram.clone();
+        // Corrupt the FG/BG VRAM region and lie in the skip caches.
+        for b in cpu.mem.vram[0..0x2000].iter_mut() {
+            *b = 0;
+        }
+        for i in 0..8u32 {
+            cpu.mem.store_u8(0x0101 + i, 0xFF);
+        }
+        reload_level_graphics(&mut cpu);
+        assert_eq!(cpu.mem.vram, fresh_vram, "reload did not restore corrupted VRAM");
+    }
+
+    /// Same byte-exactness guarantee for the overworld editor's reload.
+    #[test]
+    #[ignore]
+    fn reload_overworld_graphics_matches_fresh_load() {
+        let Some(mut cpu) = real_rom_cpu() else {
+            eprintln!("skipping: ROM_PATH not set");
+            return;
+        };
+        super::load_overworld(&mut cpu, 0);
+        let fresh_vram = cpu.mem.vram.clone();
+        reload_overworld_graphics(&mut cpu);
+        assert_eq!(cpu.mem.vram, fresh_vram, "reload changed VRAM vs fresh overworld load");
+    }
+
+    /// The reload reads graphics from the NEW cart after a swap: repoint
+    /// GFX file $14 at file $15's data (both valid LC_LZ2 streams), swap,
+    /// reload, and the FG1 VRAM region must become file $15's tiles.
+    #[test]
+    #[ignore]
+    fn reload_level_graphics_reads_new_cart() {
+        let Some(mut cpu) = real_rom_cpu() else {
+            eprintln!("skipping: ROM_PATH not set");
+            return;
+        };
+        super::decompress_sublevel(&mut cpu, 0x105);
+        let before = cpu.mem.vram[0..0x1000].to_vec();
+
+        // GFX pointer table (LoROM bank 0): low/high/bank byte PCs.
+        let rom_path = std::env::var("ROM_PATH").unwrap();
+        let raw = std::fs::read(&rom_path).unwrap();
+        let mut bytes = if raw.len() % 0x400 == 0x200 { raw[0x200..].to_vec() } else { raw };
+        let ptr = |bytes: &[u8], file: usize| -> [u8; 3] {
+            [bytes[0x3992 + file], bytes[0x39C4 + file], bytes[0x39F6 + file]]
+        };
+        let p15 = ptr(&bytes, 0x15);
+        bytes[0x3992 + 0x14] = p15[0];
+        bytes[0x39C4 + 0x14] = p15[1];
+        bytes[0x39F6 + 0x14] = p15[2];
+
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sym = std::fs::read_to_string(root.join("symbols/SMW_U.sym")).unwrap();
+        let mut new_rom = Rom::new(bytes);
+        new_rom.load_symbols(&sym);
+        cpu.mem.cart = Arc::new(new_rom);
+
+        reload_level_graphics(&mut cpu);
+        let after = cpu.mem.vram[0..0x1000].to_vec();
+        // Level 0x105's FG1 slot is GFX file $14 (tileset 7); after the
+        // repoint it must show file $15's tiles instead.
+        assert_ne!(before, after, "reload did not pick up the swapped cart's GFX data");
     }
 }

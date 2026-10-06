@@ -450,18 +450,26 @@ pub struct UiWorldEditor {
     needs_center:   bool,
 
     // Editing state
-    editing_mode:          EditingMode,
-    draw_tile_num:         u8,
-    draw_palette:          u8,
-    draw_tile_attr:        u8,
-    tile_picker:           ow_tile_picker::OwTilePicker,
-    l1_tile_picker:        ow_tile_picker::OwL1TilePicker,
-    edit_layer:            u8, // 1 or 2
-    preview_texture:       Option<egui::TextureHandle>,
-    preview_for:           Option<(u32, u32)>,
-    has_edits:             bool,
-    has_unsavable_changes: bool,
-    pub(super) edit_state: UndoableData<OverworldEditState>,
+    editing_mode:           EditingMode,
+    draw_tile_num:          u8,
+    draw_palette:           u8,
+    draw_tile_attr:         u8,
+    tile_picker:            ow_tile_picker::OwTilePicker,
+    l1_tile_picker:         ow_tile_picker::OwL1TilePicker,
+    edit_layer:             u8, // 1 or 2
+    preview_texture:        Option<egui::TextureHandle>,
+    preview_for:            Option<(u32, u32)>,
+    has_edits:              bool,
+    has_unsavable_changes:  bool,
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" toolbar
+    /// button: set by the toolbar, consumed by the app via
+    /// `take_insert_all_gfx_request`. The overworld editor authors no GFX
+    /// itself; the app merges every tab's staged GFX/ExGFX edits into the
+    /// ROM image and this tab re-uploads the overworld graphics from it.
+    request_insert_all_gfx: bool,
+    /// Status line from the last insert-all-GFX run, shown in the toolbar.
+    insert_gfx_status:      Option<String>,
+    pub(super) edit_state:  UndoableData<OverworldEditState>,
 
     /// Per-event (0..smwe_rom::overworld::OW_EVENT_COUNT) preview toggle: whether
     /// this "destruction" event (castle/fortress/switch palace beaten, etc.) is
@@ -729,6 +737,8 @@ impl UiWorldEditor {
             preview_for: None,
             has_edits: false,
             has_unsavable_changes: false,
+            request_insert_all_gfx: false,
+            insert_gfx_status: None,
             edit_state,
             active_events: vec![true; smwe_rom::overworld::OW_EVENT_COUNT],
             show_l2_event_markers: true,
@@ -870,10 +880,26 @@ impl DockableEditorTool for UiWorldEditor {
                 if ui.button("Change Events Passed…").clicked() {
                     self.show_change_events_passed = true;
                 }
+                // Lunar Magic v3.00: toolbar button that inserts all GFX and
+                // ExGFX then reloads the graphics. The app merges every tab's
+                // staged GFX/ExGFX edits into the ROM image and each tab
+                // re-uploads its graphics; nothing is written to disk (the
+                // next save persists the staged edits as usual).
+                if ui
+                    .button("Insert all GFX and ExGFX then reload")
+                    .on_hover_text("Insert all GFX and ExGFX then reload graphics (LM v3.00)")
+                    .clicked()
+                {
+                    self.request_insert_all_gfx = true;
+                }
                 // LM v1.10 View-menu item: preview the overworld as it looks
                 // after Special World is beaten (autumn palettes + koopa GFX).
                 if ui.checkbox(&mut self.special_world_passed, "Special World Passed").changed() {
                     self.refresh_special_world_view();
+                }
+                if let Some(status) = &self.insert_gfx_status {
+                    ui.separator();
+                    ui.label(egui::RichText::new(status).small().color(egui::Color32::LIGHT_GREEN));
                 }
             });
         });
@@ -912,6 +938,43 @@ impl DockableEditorTool for UiWorldEditor {
 
     fn has_unsaved_changes(&self) -> bool {
         self.has_edits
+    }
+
+    fn take_insert_all_gfx_request(&mut self) -> bool {
+        std::mem::take(&mut self.request_insert_all_gfx)
+    }
+
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload": the merged
+    /// `rom_bytes` already contain every staged GFX/ExGFX edit (written by
+    /// the level editor's `save_to_rom` GFX sections during the app's
+    /// merge). Swap the emulator cart to the new image and force the game
+    /// to re-upload the overworld's graphics slots — the same 8 files
+    /// `load_overworld` uploads (verified byte-exact) — then refresh the
+    /// renderer + tile pickers. WRAM tilemaps, CGRAM, and all unsaved
+    /// overworld edits are untouched.
+    fn reload_graphics_from_rom(&mut self, rom_bytes: &[u8]) -> Option<String> {
+        let body = if rom_bytes.len() % 0x400 == 0x200 { &rom_bytes[0x200..] } else { rom_bytes };
+        let mut emu_rom = EmuRom::new(body.to_vec());
+        emu_rom.load_symbols(include_str!("../../../symbols/SMW_U.sym"));
+        self.cpu.mem.cart = Arc::new(emu_rom);
+
+        smwe_emu::emu::reload_overworld_graphics(&mut self.cpu);
+
+        {
+            let r = self.renderer.lock().expect("Cannot lock overworld renderer");
+            r.upload_gfx(&self.gl, &self.cpu.mem.vram);
+        }
+        self.tile_picker.rebuild(&self.cpu.mem.vram, &self.cpu.mem.cgram, VRAM_L1_TILEMAP_BASE, VRAM_L2_TILEMAP_BASE);
+        self.l1_tile_picker.rebuild(&mut self.cpu);
+        self.exanimation_base_vram = self.cpu.mem.vram.clone();
+        self.exanim_vram_gen += 1;
+        self.exanim_dialog.reset_atlas();
+
+        let status =
+            "Inserted all GFX and ExGFX into the ROM image; overworld graphics reloaded (LM v3.00).".to_owned();
+        self.insert_gfx_status = Some(status.clone());
+        log::info!("{status}");
+        Some(status)
     }
 
     fn on_save_succeeded(&mut self) {

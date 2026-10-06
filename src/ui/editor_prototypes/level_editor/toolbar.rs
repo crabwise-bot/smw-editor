@@ -42,6 +42,14 @@ impl UiLevelEditor {
             if tbtn(ui, icon::UPLOAD_SIMPLE, "Import Lunar Magic .mwl file into this level", false) {
                 self.import_mwl();
             }
+            // Lunar Magic v3.00: toolbar button that inserts all GFX and
+            // ExGFX then reloads the graphics. The app merges every tab's
+            // staged GFX/ExGFX edits into the ROM image and each tab
+            // re-uploads its graphics; nothing is written to disk (the next
+            // save persists the staged edits as usual).
+            if tbtn(ui, icon::FILE_IMAGE, "Insert all GFX and ExGFX then reload graphics (LM v3.00)", false) {
+                self.request_insert_all_gfx = true;
+            }
             ui.separator();
 
             // The iconic Lunar Magic level-number box.
@@ -320,6 +328,10 @@ impl UiLevelEditor {
                 ui.monospace(format!("{} object(s) selected", self.selected_object_indices.len()));
             }
             if let Some(status) = self.mwl_status.clone() {
+                ui.separator();
+                ui.label(RichText::new(status).monospace().color(Color32::LIGHT_GREEN));
+            }
+            if let Some(status) = self.insert_gfx_status.clone() {
                 ui.separator();
                 ui.label(RichText::new(status).monospace().color(Color32::LIGHT_GREEN));
             }

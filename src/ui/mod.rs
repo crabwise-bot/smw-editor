@@ -538,6 +538,9 @@ impl eframe::App for UiMainWindow {
         // Check if any level editor is requesting a save
         self.check_for_save_requests(ctx);
 
+        // Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" buttons
+        self.check_for_insert_all_gfx_requests();
+
         // Exit confirmation dialog
         if self.show_exit_dialog {
             egui::Window::new("⚠️  Unsaved Changes")
@@ -2093,6 +2096,37 @@ impl UiMainWindow {
             }
         }
         false
+    }
+
+    /// Lunar Magic v3.00 "Insert all GFX and ExGFX then reload" toolbar
+    /// button (level editor + overworld editor): merge every tab's unsaved
+    /// edits into a ROM image — the tabs' `save_to_rom` GFX sections write
+    /// all staged vanilla GFX (`gfx_edits`, LC_LZ2 + repoint) and ExGFX
+    /// files into it, which is the "insert" half — then hand the image back
+    /// to every tab so each re-uploads its own graphics ("reload" half).
+    /// Nothing is written to disk: the staged edits stay unsaved and the
+    /// next save persists them through the normal path.
+    fn check_for_insert_all_gfx_requests(&mut self) {
+        let mut requested = false;
+        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
+            if tab.take_insert_all_gfx_request() {
+                requested = true;
+            }
+        }
+        if !requested {
+            return;
+        }
+        let merged = match self.current_rom_image() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.save_error = Some(format!("Insert all GFX failed: {e:#}"));
+                return;
+            }
+        };
+        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
+            tab.reload_graphics_from_rom(&merged);
+        }
+        log::info!("Insert all GFX and ExGFX: graphics reloaded in all tabs");
     }
 
     fn check_for_save_requests(&mut self, ctx: &Context) {
