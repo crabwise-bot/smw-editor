@@ -694,8 +694,11 @@ impl UiWorldEditor {
             submap_music,
         });
         // Decode vanilla level names before `rom` is moved into the struct.
+        // The MultiChar option controls whether squished tiles decode to
+        // their strings ("LL") or to `\XX` hex escapes.
+        let use_multichar = crate::editor_options::EditorOptions::load().use_multichar_tiles;
         let vanilla_level_names =
-            smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false).unwrap_or_default();
+            smwe_rom::overworld::level_names::decode_all(rom.rom_bytes(), 0, false, use_multichar).unwrap_or_default();
         // Decode the vanilla event-ownership table ($05D608) the same way.
         let event_ownership = smwe_rom::overworld::event_ownership::EventOwnership::parse(rom.rom_bytes(), 0)
             .map(|eo| eo.table)
@@ -1079,7 +1082,9 @@ impl DockableEditorTool for UiWorldEditor {
                     names[translevel as usize] = custom.clone();
                 }
             }
-            let encoded = ln::encode_names(&names).map_err(|e| anyhow::anyhow!("Cannot encode level names: {e}"))?;
+            let use_multichar = crate::editor_options::EditorOptions::load().use_multichar_tiles;
+            let encoded = ln::encode_names(&names, use_multichar)
+                .map_err(|e| anyhow::anyhow!("Cannot encode level names: {e}"))?;
             let header_offset = usize::from(has_smc_header) * 0x200;
             ln::apply_to_rom(rom_bytes, header_offset, &encoded)
                 .map_err(|e| anyhow::anyhow!("Cannot apply level-name patch: {e}"))?;
@@ -1727,6 +1732,8 @@ impl UiWorldEditor {
                                 );
                                 if resp.changed() {
                                     use smwe_rom::overworld::level_names as ln;
+                                    let use_multichar =
+                                        crate::editor_options::EditorOptions::load().use_multichar_tiles;
                                     let trimmed = self.level_name_edit.trim().to_string();
                                     if trimmed.is_empty() || trimmed.to_uppercase() == vanilla_name.to_uppercase() {
                                         self.custom_level_names.remove(&translevel_u8);
@@ -1734,7 +1741,7 @@ impl UiWorldEditor {
                                         self.level_names_dirty = true;
                                         self.has_edits = true;
                                     } else {
-                                        match ln::check_name(&trimmed) {
+                                        match ln::check_name_with(&trimmed, use_multichar) {
                                             Ok(normalized) => {
                                                 self.custom_level_names.insert(translevel_u8, normalized);
                                                 self.level_name_error = None;
@@ -1752,20 +1759,56 @@ impl UiWorldEditor {
                                     }
                                 }
                             });
-                            // Byte-budget feedback, mirroring the message-box
-                            // editor: the game draws at most MAX_NAME_CHARS
-                            // tiles per name (CODE_049D07's $26-byte stripe).
+                            // Use MultiChar Tiles option (Lunar Magic v3.40).
+                            // When toggled, re-decode the vanilla names so
+                            // squished tiles switch between their character
+                            // strings and `\XX` hex escapes.
                             {
                                 use smwe_rom::overworld::level_names as ln;
-                                let used = self.level_name_edit.trim().chars().count();
-                                let budget_color = if self.level_name_error.is_some() || used > ln::MAX_NAME_CHARS {
+                                let mut use_multichar =
+                                    crate::editor_options::EditorOptions::load().use_multichar_tiles;
+                                if ui
+                                    .checkbox(&mut use_multichar, "  Use MultiChar Tiles")
+                                    .on_hover_text(
+                                        "Display the squished tiles Nintendo used in \"YELLOW SWITCH \
+                                         PALACE\" and \"FOREST OF ILLUSION\" as their characters and \
+                                         auto-encode \"LL\" to the squished tile (Lunar Magic v3.40). \
+                                         When off, squished tiles show as \\XX hex escapes. \
+                                         Type \\XX in the name field to insert a specific tile.",
+                                    )
+                                    .changed()
+                                {
+                                    let mut opts = crate::editor_options::EditorOptions::load();
+                                    opts.use_multichar_tiles = use_multichar;
+                                    opts.save();
+                                    // Re-decode vanilla names with the new setting.
+                                    if let Some(decoded) = ln::decode_all(self.rom.rom_bytes(), 0, false, use_multichar)
+                                    {
+                                        self.vanilla_level_names = decoded;
+                                    }
+                                    // Force the text field to re-sync from the
+                                    // (possibly re-decoded) vanilla name.
+                                    self.level_name_for = None;
+                                    self.level_name_error = None;
+                                }
+                            }
+                            // Tile-budget feedback, mirroring the message-box
+                            // editor: the game draws at most MAX_NAME_TILES
+                            // tiles per name (CODE_049D07's $26-byte stripe).
+                            // With MultiChar tiles, characters can outnumber
+                            // tiles ("LL" is one tile).
+                            {
+                                use smwe_rom::overworld::level_names as ln;
+                                let use_multichar = crate::editor_options::EditorOptions::load().use_multichar_tiles;
+                                let used = ln::count_name_tiles(self.level_name_edit.trim(), use_multichar);
+                                let budget_color = if self.level_name_error.is_some() || used > ln::MAX_NAME_TILES {
                                     egui::Color32::from_rgb(220, 60, 60)
                                 } else {
                                     ui.style().visuals.text_color()
                                 };
                                 ui.colored_label(
                                     budget_color,
-                                    format!("  Name encodes to {used} / {} tiles", ln::MAX_NAME_CHARS),
+                                    format!("  Name encodes to {used} / {} tiles", ln::MAX_NAME_TILES),
                                 );
                                 if let Some(err) = self.level_name_error.as_ref() {
                                     ui.colored_label(egui::Color32::from_rgb(220, 60, 60), format!("  {err}"));

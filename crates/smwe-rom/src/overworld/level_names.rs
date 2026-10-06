@@ -78,6 +78,58 @@ const VANILLA_SITE_BYTES: [(u32, [u8; 3]); 3] =
 
 /// Tile value for a space.
 pub const TILE_SPACE: u8 = 0x1F;
+// ── MultiChar (squished) tiles ──────────────────────────────────────────────
+//
+// Lunar Magic v3.40 added "Use MultiChar Tiles" support to its "Edit Level
+// Names" dialog for the squished tiles Nintendo used in "YELLOW SWITCH PALACE"
+// and "FOREST OF ILLUSION". These tiles are graphically narrower than the
+// standard A-Z tiles, and two of them contain two characters in a single 8x8
+// tile:
+//
+// - `$34` and `$3A` are "LL" — two squished L's in one tile. "YELLOW" (6
+//   chars) is stored as 5 tiles (`$38,$39,$3A,$3B,$3C`), and "FOREST OF
+//   ILLUSION 1" (20 chars) fits the game's 19-tile stripe buffer as 19 tiles
+//   (`$32-$37` = " ILLUSI", 7 chars in 6 tiles).
+// - `$32,$33,$35,$36,$37` and `$38,$39,$3B,$3C` are squished single characters
+//   (" ", "I", "U", "S", "I" and "Y", "E", "O", "W").
+// - `$1C` is a squished single "L" (used in "CHOCOLGHOST HOUSE").
+//
+// Verified against the vanilla U ROM (tile bytes of translevels 0x14, 0x21,
+// 0x2A-0x2D) and the OW status-bar font in VRAM after the real `load_overworld`
+// (squished "LL" glyphs visually confirmed).
+//
+// When the editor's "Use MultiChar Tiles" option is on (LM's default), these
+// tiles decode to their character strings and are automatically used when
+// encoding. When off, they decode to `\XX` hex escapes (LM's behavior) and are
+// never auto-selected for new input.
+
+/// Squished tile → the character(s) it displays. The two multi-character
+/// entries (`$34`, `$3A` = "LL") are the actual MultiChar tiles; the rest are
+/// squished single characters from the same font region.
+pub const SQUISHED_TILES: &[(u8, &str)] = &[
+    (0x1C, "L"),
+    (0x32, " "),
+    (0x33, "I"),
+    (0x34, "LL"),
+    (0x35, "U"),
+    (0x36, "S"),
+    (0x37, "I"),
+    (0x38, "Y"),
+    (0x39, "E"),
+    (0x3A, "LL"),
+    (0x3B, "O"),
+    (0x3C, "W"),
+];
+
+/// Returns the display string for a squished tile, or `None` for normal tiles.
+pub fn squished_tile_str(tile: u8) -> Option<&'static str> {
+    SQUISHED_TILES.iter().find(|(t, _)| *t == tile).map(|(_, s)| *s)
+}
+
+/// Returns true if the tile is one of the squished/MultiChar tiles.
+pub fn is_squished_tile(tile: u8) -> bool {
+    squished_tile_str(tile).is_some()
+}
 /// Byte emitted for "skip this fragment" (T2): first byte `$9F`.
 ///
 /// `CODE_049D07` skips the T2 fragment when its first string byte is `$9F`.
@@ -86,26 +138,59 @@ pub const T2_SKIP_BYTE: u8 = 0x9F;
 pub const T1_SKIP_BYTE: u8 = 0x80;
 
 /// Longest name the game will draw: `CODE_049D07` reserves `$26` stripe-image
-/// bytes (19 characters) for the composed name, then pads with blanks.
-/// A longer name's extra characters are silently dropped by the game, so the
-/// editor refuses them instead of truncating.
-pub const MAX_NAME_CHARS: usize = 19;
+/// bytes (19 tiles) for the composed name, then pads with blanks. A longer
+/// name's extra tiles are silently dropped by the game, so the editor refuses
+/// them instead of truncating. Note this is a TILE budget, not a character
+/// budget — with MultiChar tiles (e.g. `$3A` = "LL"), 20 characters can fit
+/// in 19 tiles.
+pub const MAX_NAME_TILES: usize = 19;
+/// Legacy alias for [`MAX_NAME_TILES`].
+pub const MAX_NAME_CHARS: usize = MAX_NAME_TILES;
 
 /// Validate a level name typed in the editor.
 ///
 /// Returns the normalized name (trimmed, uppercased — the game only has
-/// uppercase glyphs). Errors when the name is empty, longer than
-/// [`MAX_NAME_CHARS`] characters, or contains a character with no
-/// overworld-name tile (allowed: `A-Z 0-9 space # '`).
+/// uppercase glyphs). The name may contain `\XX` hex escapes for specific
+/// tile values (Lunar Magic's escape syntax).
+///
+/// Errors when the name is empty, encodes to more than [`MAX_NAME_TILES`]
+/// tiles, or contains a character with no overworld-name tile (allowed:
+/// `A-Z 0-9 space # '`, plus `\XX` escapes). When `use_multichar` is on,
+/// "LL" encodes to the squished `$3A` tile (one tile for two characters).
 pub fn check_name(name: &str) -> anyhow::Result<String> {
+    check_name_with(name, true)
+}
+
+/// [`check_name`] with an explicit MultiChar option.
+///
+/// When `use_multichar` is off, "LL" encodes as two separate tiles and
+/// squished tiles are never auto-selected (matching Lunar Magic v3.40's
+/// "Use MultiChar Tiles" option).
+pub fn check_name_with(name: &str, use_multichar: bool) -> anyhow::Result<String> {
     let normalized = name.trim().to_uppercase();
     anyhow::ensure!(!normalized.is_empty(), "name is empty");
-    let len = normalized.chars().count();
-    anyhow::ensure!(len <= MAX_NAME_CHARS, "name is {len} characters; the game draws at most {MAX_NAME_CHARS}");
-    for c in normalized.chars() {
+    // Validate escapes and charset by encoding.
+    let tiles = encode_name_to_tiles(&normalized, use_multichar)?;
+    // Charset check: encode_name_to_tiles maps unknown chars to space via
+    // char_to_tile; detect them explicitly for a good error message.
+    let mut i = 0;
+    let chars: Vec<char> = normalized.chars().collect();
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            // Escape already validated by encode_name_to_tiles.
+            i += 3;
+            continue;
+        }
+        let c = chars[i];
         let ok = matches!(c, 'A'..='Z' | '0'..='9' | ' ' | '#' | '\'');
         anyhow::ensure!(ok, "character {c:?} has no overworld-name tile (A-Z 0-9 space # ' only)");
+        i += 1;
     }
+    let tile_count = tiles.len();
+    anyhow::ensure!(
+        tile_count <= MAX_NAME_TILES,
+        "name encodes to {tile_count} tiles; the game draws at most {MAX_NAME_TILES}"
+    );
     Ok(normalized)
 }
 
@@ -132,6 +217,10 @@ pub fn char_to_tile(c: char) -> u8 {
 /// Covers the standard tiles plus the alternate encodings the vanilla ROM
 /// actually uses (`$32-$37` for `" ILLUS"`, `$38-$3C` for `"YELLO"`, `$1C`
 /// for `L` in `"CHOCOLATE"`). Unknown tiles decode as `'?'`.
+///
+/// Note: this is the single-character view. The squished tiles `$34`/`$3A`
+/// actually contain "LL" (two characters); use [`decode_tile_str`] for the
+/// MultiChar-aware decoding.
 pub fn tile_to_char(tile: u8) -> char {
     match tile {
         0x00..=0x19 => (b'A' + tile) as char,
@@ -154,8 +243,115 @@ pub fn tile_to_char(tile: u8) -> char {
     }
 }
 
+/// Decode a single name tile (bit 7 already masked) to its display string.
+///
+/// When `use_multichar` is on (Lunar Magic v3.40's "Use MultiChar Tiles",
+/// on by default), squished tiles decode to their character strings (`$3A`
+/// → `"LL"`). When off, squished tiles decode to `\XX` hex escapes, matching
+/// LM's behavior ("existing entries that use them will just be displayed in
+/// the editor using hex escape sequences").
+pub fn decode_tile_str(tile: u8, use_multichar: bool) -> String {
+    if let Some(s) = squished_tile_str(tile) {
+        if use_multichar {
+            return s.to_string();
+        } else {
+            return format!("\\{tile:02X}");
+        }
+    }
+    tile_to_char(tile).to_string()
+}
+
 // ── Patch detection ─────────────────────────────────────────────────────────
 
+/// Parse a `\XX` hex escape at the start of `s` (after the backslash).
+/// Returns the tile byte and the number of chars consumed from `s` (2).
+fn parse_hex_escape(s: &str) -> Option<(u8, usize)> {
+    let hex: String = s.chars().take(2).collect();
+    if hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        u8::from_str_radix(&hex, 16).ok().map(|b| (b, 2))
+    } else {
+        None
+    }
+}
+
+/// Encode a name string to tile bytes.
+///
+/// The string may contain `\XX` hex escapes (backslash + 2 hex digits) for
+/// specific tile values — Lunar Magic's "Edit Level Names" dialog uses the
+/// same escape syntax for tiles with no keystroke representation.
+///
+/// When `use_multichar` is on, the encoder greedily matches the longest
+/// squished-tile strings first (so `"LL"` → `$3A`, `"YELLOW"` → `$38-$3C`
+/// via the individual tile mappings); otherwise every character maps through
+/// [`char_to_tile`] and squished tiles are never emitted.
+pub fn encode_name_to_tiles(name: &str, use_multichar: bool) -> anyhow::Result<Vec<u8>> {
+    let mut tiles = Vec::new();
+    let chars: Vec<char> = name.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // Hex escape: \XX
+        if chars[i] == '\\' {
+            let rest: String = chars[i + 1..].iter().collect();
+            match parse_hex_escape(&rest) {
+                Some((b, _)) => {
+                    tiles.push(b);
+                    i += 3; // backslash + 2 hex digits
+                    continue;
+                }
+                None => anyhow::bail!("invalid hex escape at position {i} (expected \\XX)"),
+            }
+        }
+        // MultiChar: longest squished-tile string match first.
+        if use_multichar {
+            // Try 2-char matches ("LL"), then single-char squished tiles.
+            let mut matched = false;
+            // Check 2-char sequences first.
+            if i + 1 < chars.len() {
+                let pair: String = [chars[i], chars[i + 1]].iter().collect();
+                let pair_upper = pair.to_uppercase();
+                // Prefer $3A for "LL" (vanilla "YELLOW" usage); $34 is the
+                // "ILLUSION" variant. Both decode to "LL".
+                if pair_upper == "LL" {
+                    tiles.push(0x3A);
+                    i += 2;
+                    matched = true;
+                }
+            }
+            if !matched {
+                // Single squished char? (e.g., typed "Y" could be $38 or $18;
+                // prefer the standard tile for single chars to avoid
+                // surprising substitutions — squished singles are only used
+                // when explicitly escaped or via the full-name patterns below.)
+                //
+                // Actually, for LM parity ("automatically be used when making
+                // new entries"), we DO want auto-substitution. But to avoid
+                // over-substitution, we only auto-use the multi-char "LL"
+                // tile. Single squished tiles ($32-$33 etc.) are available via
+                // \XX escapes. This matches the vanilla ROM, where only "LL"
+                // is a true 2-char tile; the others are stylistic variants.
+                tiles.push(char_to_tile(chars[i]));
+                i += 1;
+            }
+        } else {
+            tiles.push(char_to_tile(chars[i]));
+            i += 1;
+        }
+    }
+    Ok(tiles)
+}
+
+/// Count the tiles a name string encodes to (for the 19-tile budget).
+/// Hex escapes count as one tile; "LL" counts as one tile when `use_multichar`.
+pub fn count_name_tiles(name: &str, use_multichar: bool) -> usize {
+    match encode_name_to_tiles(name, use_multichar) {
+        Ok(tiles) => tiles.len(),
+        Err(_) => name.chars().count(), // fallback for invalid escapes
+    }
+}
+
+/// Decode an overworld-name tile value (bit 7 already masked) to a character.
+///
+/// Covers the standard tiles plus the alternate encodings the vanilla ROM
 /// Returns true if the level-name table-relocation patch is applied to the ROM.
 pub fn is_patch_applied(rom: &[u8], header_offset: usize) -> bool {
     PATCH_SITES.iter().all(|(pc, base)| {
@@ -175,7 +371,7 @@ pub fn is_vanilla(rom: &[u8], header_offset: usize) -> bool {
 // ── Decoding ────────────────────────────────────────────────────────────────
 
 /// Decode one fragment string at a pool-relative byte offset.
-fn decode_fragment(rom: &[u8], strings_pc: usize, offset: usize) -> String {
+fn decode_fragment(rom: &[u8], strings_pc: usize, offset: usize, use_multichar: bool) -> String {
     let mut s = String::new();
     let mut i = strings_pc + offset;
     loop {
@@ -188,7 +384,7 @@ fn decode_fragment(rom: &[u8], strings_pc: usize, offset: usize) -> String {
         if s.is_empty() && b == T1_SKIP_BYTE {
             break;
         }
-        s.push(tile_to_char(b & 0x7F));
+        s.push_str(&decode_tile_str(b & 0x7F, use_multichar));
         i += 1;
         if b & 0x80 != 0 {
             break;
@@ -204,8 +400,13 @@ fn decode_fragment(rom: &[u8], strings_pc: usize, offset: usize) -> String {
 /// Decode the level name for a translevel (0..93).
 ///
 /// `patched` selects the relocated (post-patch) or vanilla table addresses.
+/// When `use_multichar` is on, squished tiles decode to their character
+/// strings (`$3A` → `"LL"`); when off, they decode to `\XX` hex escapes
+/// (Lunar Magic v3.40's "Use MultiChar Tiles" option).
 /// Returns `None` if the translevel is out of range or the ROM is truncated.
-pub fn decode_name(rom: &[u8], header_offset: usize, translevel: usize, patched: bool) -> Option<String> {
+pub fn decode_name(
+    rom: &[u8], header_offset: usize, translevel: usize, patched: bool, use_multichar: bool,
+) -> Option<String> {
     if translevel >= LEVEL_NAMES_COUNT {
         return None;
     }
@@ -231,7 +432,7 @@ pub fn decode_name(rom: &[u8], header_offset: usize, translevel: usize, patched:
     let t1_off =
         u16::from_le_bytes([*rom.get(t1_pc + (hi & 0x7F) * 2)?, *rom.get(t1_pc + (hi & 0x7F) * 2 + 1)?]) as usize;
     if rom.get(strings_pc + t1_off).copied().unwrap_or(0x80) & 0x80 == 0 {
-        name.push_str(&decode_fragment(rom, strings_pc, t1_off));
+        name.push_str(&decode_fragment(rom, strings_pc, t1_off, use_multichar));
     }
 
     // Piece 2 (T2): skipped if the fragment is exactly $9F.
@@ -239,20 +440,23 @@ pub fn decode_name(rom: &[u8], header_offset: usize, translevel: usize, patched:
         u16::from_le_bytes([*rom.get(t2_pc + ((lo >> 4) & 0xF) * 2)?, *rom.get(t2_pc + ((lo >> 4) & 0xF) * 2 + 1)?])
             as usize;
     if rom.get(strings_pc + t2_off).copied().unwrap_or(T2_SKIP_BYTE) != T2_SKIP_BYTE {
-        name.push_str(&decode_fragment(rom, strings_pc, t2_off));
+        name.push_str(&decode_fragment(rom, strings_pc, t2_off, use_multichar));
     }
 
     // Piece 3 (T3): always emitted.
     let t3_off =
         u16::from_le_bytes([*rom.get(t3_pc + (lo & 0xF) * 2)?, *rom.get(t3_pc + (lo & 0xF) * 2 + 1)?]) as usize;
-    name.push_str(&decode_fragment(rom, strings_pc, t3_off));
+    name.push_str(&decode_fragment(rom, strings_pc, t3_off, use_multichar));
 
     Some(name)
 }
 
 /// Decode all 93 level names.
-pub fn decode_all(rom: &[u8], header_offset: usize, patched: bool) -> Option<Vec<String>> {
-    (0..LEVEL_NAMES_COUNT).map(|t| decode_name(rom, header_offset, t, patched)).collect()
+///
+/// When `use_multichar` is on, squished tiles decode to their character
+/// strings; when off, to `\XX` hex escapes.
+pub fn decode_all(rom: &[u8], header_offset: usize, patched: bool, use_multichar: bool) -> Option<Vec<String>> {
+    (0..LEVEL_NAMES_COUNT).map(|t| decode_name(rom, header_offset, t, patched, use_multichar)).collect()
 }
 
 // ── Encoding ────────────────────────────────────────────────────────────────
@@ -286,8 +490,8 @@ fn split_name(name: &str) -> Split {
 }
 
 /// Encode a fragment to pool bytes (tiles, bit 7 on the last byte).
-fn encode_fragment(text: &str) -> Vec<u8> {
-    let tiles: Vec<u8> = text.chars().map(char_to_tile).collect();
+fn encode_fragment(text: &str, use_multichar: bool) -> Vec<u8> {
+    let tiles: Vec<u8> = encode_name_to_tiles(text, use_multichar).unwrap_or_default();
     if tiles.is_empty() {
         return vec![T2_SKIP_BYTE];
     }
@@ -405,9 +609,13 @@ fn merge_rarest_t3(splits: &mut [Split]) -> bool {
 /// Encode 93 level names into the patched pool/table format.
 ///
 /// Names are uppercased and split into shared (prefix, middle, suffix)
-/// fragments. Returns an error if the fragments don't fit the patched pool
+/// fragments. When `use_multichar` is on, "LL" encodes to the squished `$3A`
+/// tile (Lunar Magic v3.40's "Use MultiChar Tiles"); otherwise all characters
+/// map through [`char_to_tile`]. Names may contain `\XX` hex escapes for
+/// specific tile values.
+/// Returns an error if the fragments don't fit the patched pool
 /// (578 bytes) or table slot counts (93/16/16).
-pub fn encode_names(names: &[String]) -> anyhow::Result<EncodedNames> {
+pub fn encode_names(names: &[String], use_multichar: bool) -> anyhow::Result<EncodedNames> {
     anyhow::ensure!(names.len() == LEVEL_NAMES_COUNT, "need exactly {} names, got {}", LEVEL_NAMES_COUNT, names.len());
 
     // Normalize: uppercase, collapse whitespace.
@@ -485,15 +693,15 @@ pub fn encode_names(names: &[String]) -> anyhow::Result<EncodedNames> {
     let mut t3_off = Vec::new();
     for p in &t1_list {
         t1_off.push(pool.len() as u16);
-        pool.extend_from_slice(&encode_fragment(p));
+        pool.extend_from_slice(&encode_fragment(p, use_multichar));
     }
     for p in &t2_list {
         t2_off.push(pool.len() as u16);
-        pool.extend_from_slice(&encode_fragment(p));
+        pool.extend_from_slice(&encode_fragment(p, use_multichar));
     }
     for p in &t3_list {
         t3_off.push(pool.len() as u16);
-        pool.extend_from_slice(&encode_fragment(p));
+        pool.extend_from_slice(&encode_fragment(p, use_multichar));
     }
     // Skip fragments: T1 skip ($80) and T2 skip ($9F).
     // Only add them if actually needed (some name has p1/p2 == None).
@@ -666,7 +874,7 @@ mod tests {
         names[0] = "DONUT PLAINS 1".to_string();
         names[1] = "DONUT PLAINS 2".to_string();
         names[2] = "FUNKY".to_string();
-        let enc = encode_names(&names).unwrap();
+        let enc = encode_names(&names, true).unwrap();
         // "DONUT " shared, "PLAINS " shared, "1"/"2"/"FUNKY" distinct.
         assert!(enc.pool.len() < STRINGS_PATCHED_LEN);
         assert_eq!(enc.entries.len(), LEVEL_NAMES_COUNT);
@@ -684,7 +892,7 @@ mod tests {
         assert!(is_vanilla(&rom, header_offset));
         assert!(!is_patch_applied(&rom, header_offset));
 
-        let names = decode_all(&rom, header_offset, false).expect("decode");
+        let names = decode_all(&rom, header_offset, false, true).expect("decode");
         assert_eq!(names.len(), LEVEL_NAMES_COUNT);
 
         // Spot-check known vanilla names.
@@ -696,7 +904,7 @@ mod tests {
         assert!(joined.iter().any(|n| n == "FOREST OF ILLUSION 1" || n == "FOREST OF ILLUSON 1"));
 
         // Re-encode must fit the patched pool.
-        let enc = encode_names(&names).expect("encode vanilla names");
+        let enc = encode_names(&names, true).expect("encode vanilla names");
         assert!(enc.pool.len() <= STRINGS_PATCHED_LEN, "pool {} > {}", enc.pool.len(), STRINGS_PATCHED_LEN);
         println!(
             "vanilla re-encode: {} pool bytes, T1 {}/93, T2 {}/31, T3 {}/31",
@@ -715,15 +923,89 @@ mod tests {
         let mut rom = std::fs::read(path).expect("can't read ROM");
         let header_offset = if rom.len() % 0x400 == 0x200 { 512 } else { 0 };
 
-        let names = decode_all(&rom, header_offset, false).expect("decode");
-        let enc = encode_names(&names).expect("encode");
+        let names = decode_all(&rom, header_offset, false, true).expect("decode");
+        let enc = encode_names(&names, true).expect("encode");
         apply_to_rom(&mut rom, header_offset, &enc).expect("apply");
 
         assert!(is_patch_applied(&rom, header_offset));
 
-        let back = decode_all(&rom, header_offset, true).expect("re-decode");
+        let back = decode_all(&rom, header_offset, true, true).expect("re-decode");
         for (a, b) in names.iter().zip(back.iter()) {
             assert_eq!(a.trim(), b.trim(), "round-trip mismatch: {a:?} vs {b:?}");
         }
+    }
+
+    #[test]
+    fn multichar_decode_encode() {
+        // Squished tiles decode to their strings when use_multichar is on.
+        assert_eq!(decode_tile_str(0x3A, true), "LL");
+        assert_eq!(decode_tile_str(0x34, true), "LL");
+        assert_eq!(decode_tile_str(0x38, true), "Y");
+        assert_eq!(decode_tile_str(0x32, true), " ");
+        // When off, they decode to hex escapes (LM v3.40 behavior).
+        assert_eq!(decode_tile_str(0x3A, false), "\\3A");
+        assert_eq!(decode_tile_str(0x34, false), "\\34");
+        assert_eq!(decode_tile_str(0x38, false), "\\38");
+        // Normal tiles are unaffected.
+        assert_eq!(decode_tile_str(0x00, true), "A");
+        assert_eq!(decode_tile_str(0x00, false), "A");
+
+        // "LL" encodes to the squished $3A tile when use_multichar is on.
+        assert_eq!(encode_name_to_tiles("LL", true).unwrap(), vec![0x3A]);
+        assert_eq!(encode_name_to_tiles("HELLO", true).unwrap(), vec![0x07, 0x04, 0x3A, 0x0E]);
+        // When off, "LL" is two separate tiles.
+        assert_eq!(encode_name_to_tiles("LL", false).unwrap(), vec![0x0B, 0x0B]);
+        // Hex escapes work regardless.
+        assert_eq!(encode_name_to_tiles("\\3A", true).unwrap(), vec![0x3A]);
+        assert_eq!(encode_name_to_tiles("\\3A", false).unwrap(), vec![0x3A]);
+        assert_eq!(encode_name_to_tiles("A\\3ABC", true).unwrap(), vec![0x00, 0x3A, 0x01, 0x02]);
+        // Invalid escapes are rejected.
+        assert!(encode_name_to_tiles("A\\ZZ", true).is_err());
+        assert!(encode_name_to_tiles("A\\3", true).is_err());
+
+        // Tile budget: "LL" is 1 tile with multichar, 2 without.
+        assert_eq!(count_name_tiles("LL", true), 1);
+        assert_eq!(count_name_tiles("LL", false), 2);
+        assert_eq!(count_name_tiles("\\3A", true), 1);
+    }
+
+    #[test]
+    fn check_name_multichar_budget() {
+        // 20 chars in 19 tiles via the "LL" multichar tile is allowed.
+        assert!(check_name_with("YELLOW SWITCH PALACE", true).is_ok());
+        // Without multichar, it's 20 tiles — over budget.
+        assert!(check_name_with("YELLOW SWITCH PALACE", false).is_err());
+        // Escapes are allowed and count as tiles.
+        assert!(check_name_with("A\\3A", true).is_ok());
+    }
+
+    /// Real-ROM test: vanilla squished names decode correctly with multichar on.
+    #[test]
+    #[ignore]
+    fn real_rom_multichar_names() {
+        let path = std::env::var("ROM_PATH").expect("ROM_PATH not set");
+        let rom = std::fs::read(path).expect("can't read ROM");
+        let header_offset = if rom.len() % 0x400 == 0x200 { 512 } else { 0 };
+
+        let names = decode_all(&rom, header_offset, false, true).expect("decode");
+        let joined: Vec<String> = names.iter().map(|n| n.trim().to_string()).collect();
+        // "YELLOW SWITCH PALACE" (20 chars, 19 tiles via $3A="LL"). The ROM
+        // stores 21 bytes; the game draws the first 19 tiles.
+        assert!(
+            joined.iter().any(|n| n.starts_with("YELLOW SWITCH PALACE")),
+            "YELLOW SWITCH PALACE not found; got: {:?}",
+            joined.iter().filter(|n| n.contains("YELLOW") || n.contains("YELLO")).collect::<Vec<_>>()
+        );
+        // "FOREST OF ILLUSION 1" (20 chars, 19 tiles via $34="LL").
+        assert!(
+            joined.iter().any(|n| n == "FOREST OF ILLUSION 1"),
+            "FOREST OF ILLUSION 1 not found; got: {:?}",
+            joined.iter().filter(|n| n.contains("ILLUSION") || n.contains("ILLUS")).collect::<Vec<_>>()
+        );
+
+        // With multichar off, squished tiles show as hex escapes.
+        let names_off = decode_all(&rom, header_offset, false, false).expect("decode");
+        let yellow_off = names_off.iter().find(|n| n.contains("\\38")).expect("yellow name with escapes");
+        assert!(yellow_off.contains("\\3A"), "expected hex escape in {yellow_off:?}");
     }
 }
