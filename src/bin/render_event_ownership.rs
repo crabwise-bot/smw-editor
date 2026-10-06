@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
     let rom_bytes: &[u8] = if raw.len() % 0x400 == 0x200 { &raw[0x200..] } else { &raw[..] };
     let ownership = eo::EventOwnership::parse(rom_bytes, 0)?;
     anyhow::ensure!(ownership.table.len() == eo::EVENT_OWNERSHIP_COUNT);
-    let names = level_names::decode_all(rom_bytes, 0, false).ok_or_else(|| anyhow::anyhow!("decode names failed"))?;
+    let names = level_names::decode_all(rom_bytes, 0, false, true).ok_or_else(|| anyhow::anyhow!("decode names failed"))?;
     let rom = Rom::new(rom_bytes.to_vec()).map_err(|e| anyhow::anyhow!("Rom::new: {e:?}"))?;
     let events = OverworldEvents::parse(&rom)?;
 
